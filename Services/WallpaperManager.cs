@@ -809,7 +809,6 @@ public sealed class WallpaperManager : IDisposable
             _attackPlaylistSwitchRequested = false;
             _imageStartedAt = DateTime.UtcNow;
             overlay.Start();
-            _output.SetPresentationSuppressed(true);
             SetRuntimeStatus(
                 "АТАКА СИСТЕМЫ // ИНТЕРФЕЙС ПЕРЕХВАЧЕН ПОТОКОМ",
                 isError: false);
@@ -872,7 +871,6 @@ public sealed class WallpaperManager : IDisposable
     {
         if (_disposed || !_output.IsRunning)
             return;
-        _output.SetPresentationSuppressed(false);
         _output.UpdateSettings(_settings);
         _output.SetImage(
             _settings.ImageMode ? _currentImage : null);
@@ -922,7 +920,6 @@ public sealed class WallpaperManager : IDisposable
 
         if (!_disposed && _output.IsRunning)
         {
-            _output.SetPresentationSuppressed(false);
             _output.UpdateSettings(_settings);
             _output.SetImage(
                 _settings.ImageMode ? _currentImage : null);

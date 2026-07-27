@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using WallpaperMatrix.Models;
 using WallpaperMatrix.Native;
+using WallpaperMatrix.Services;
 
 namespace WallpaperMatrix.Rendering;
 
@@ -91,6 +92,7 @@ internal sealed class MatrixSceneRenderer : IDisposable
     private double _averageLengthDistribution = 0.5;
     private double _simulationTime;
     private long _nextStreamId;
+    private long _lastSlowFrameReportTimestamp;
 
     public MatrixSceneRenderer(
         IntPtr referenceWindow,
@@ -230,13 +232,60 @@ internal sealed class MatrixSceneRenderer : IDisposable
 
         double dt = Math.Min(0.08, Math.Max(0.0, (now - _lastFrameAt).TotalSeconds));
         _lastFrameAt = now;
+        long frameStartedAt = Stopwatch.GetTimestamp();
         if (_settings.ImageMode && _image is not null)
             EnsureImageMask();
+        long maskFinishedAt = Stopwatch.GetTimestamp();
         FadeImageCells(dt);
+        long fadeFinishedAt = Stopwatch.GetTimestamp();
         AdvanceStreams(dt);
+        long streamsFinishedAt = Stopwatch.GetTimestamp();
         BuildRainCells();
+        long cellsFinishedAt = Stopwatch.GetTimestamp();
         PublishScene();
+        ReportSlowFrame(
+            frameStartedAt,
+            maskFinishedAt,
+            fadeFinishedAt,
+            streamsFinishedAt,
+            cellsFinishedAt,
+            Stopwatch.GetTimestamp());
         return true;
+    }
+
+    private void ReportSlowFrame(
+        long frameStartedAt,
+        long maskFinishedAt,
+        long fadeFinishedAt,
+        long streamsFinishedAt,
+        long cellsFinishedAt,
+        long frameFinishedAt)
+    {
+        TimeSpan total = Stopwatch.GetElapsedTime(
+            frameStartedAt,
+            frameFinishedAt);
+        if (total < TimeSpan.FromMilliseconds(120))
+            return;
+
+        long previous = _lastSlowFrameReportTimestamp;
+        if (previous != 0
+            && Stopwatch.GetElapsedTime(previous, frameFinishedAt)
+                < TimeSpan.FromSeconds(10))
+        {
+            return;
+        }
+
+        _lastSlowFrameReportTimestamp = frameFinishedAt;
+        static double Milliseconds(long start, long end) =>
+            Stopwatch.GetElapsedTime(start, end).TotalMilliseconds;
+        DiagnosticLog.Write(
+            $"Медленный кадр симуляции: "
+            + $"всего={total.TotalMilliseconds:0} мс; "
+            + $"маска={Milliseconds(frameStartedAt, maskFinishedAt):0} мс; "
+            + $"образ={Milliseconds(maskFinishedAt, fadeFinishedAt):0} мс; "
+            + $"струи={Milliseconds(fadeFinishedAt, streamsFinishedAt):0} мс; "
+            + $"ячейки={Milliseconds(streamsFinishedAt, cellsFinishedAt):0} мс; "
+            + $"публикация={Milliseconds(cellsFinishedAt, frameFinishedAt):0} мс.");
     }
 
     public int RecommendedWaitMilliseconds(bool paused)

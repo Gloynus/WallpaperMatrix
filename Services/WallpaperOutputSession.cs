@@ -82,12 +82,6 @@ internal sealed class WallpaperOutputSession : IDisposable
             window.ResetImageOverlay(image);
     }
 
-    public void SetPresentationSuppressed(bool suppressed)
-    {
-        foreach (NativeWallpaperWindow window in _windows)
-            window.SetPresentationSuppressed(suppressed);
-    }
-
     public void Activate()
     {
         foreach (NativeWallpaperWindow window in _windows)

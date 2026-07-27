@@ -33,7 +33,6 @@ internal sealed class NativeWallpaperWindow : IDisposable
     private Direct3D11Presenter? _direct3DPresenter;
     private Exception? _startupError;
     private int _paused;
-    private int _presentationSuppressed;
     private bool _disposed;
     private bool _synchronizationDisposed;
 
@@ -114,11 +113,6 @@ internal sealed class NativeWallpaperWindow : IDisposable
             _renderingEnabled.Set();
         }
     }
-
-    public void SetPresentationSuppressed(bool suppressed) =>
-        Volatile.Write(
-            ref _presentationSuppressed,
-            suppressed ? 1 : 0);
 
     private void RenderThreadMain()
     {
@@ -202,8 +196,7 @@ internal sealed class NativeWallpaperWindow : IDisposable
                 }
                 else
                     waitMilliseconds = 25;
-                if (Volatile.Read(ref _presentationSuppressed) == 0)
-                    PresentLatestFrame(ref presentedVersion);
+                PresentLatestFrame(ref presentedVersion);
                 if (!nonEmptyFrameConfirmed
                     && SharedFrame.InstanceCount > 0
                     && presentedVersion >= 0)

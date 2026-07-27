@@ -39,8 +39,17 @@ internal sealed class SharedMatrixScene : IDisposable
         MatrixRenderParameters parameters,
         long latestStreamId)
     {
-        Instances = instances;
-        InstanceCount = Math.Clamp(instanceCount, 0, instances.Length);
+        int count = Math.Clamp(instanceCount, 0, instances.Length);
+        if (Instances.Length < count)
+        {
+            int capacity = Math.Max(
+                count,
+                Math.Max(1024, Instances.Length * 2));
+            Instances = new GlyphInstance[capacity];
+        }
+        if (count > 0)
+            Array.Copy(instances, Instances, count);
+        InstanceCount = count;
         Parameters = parameters;
         Interlocked.Exchange(ref _latestStreamId, latestStreamId);
         if (atlas is not null)

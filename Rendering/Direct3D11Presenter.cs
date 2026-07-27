@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -68,6 +69,7 @@ internal sealed class Direct3D11Presenter : IDisposable
     private float _screenshotStreamCutoff;
     private float _screenshotLimitEnabled;
     private float _attackHaloFactor = 1;
+    private long _lastSlowPresentReportTimestamp;
     private bool _disposed;
 
     private Direct3D11Presenter(
@@ -370,6 +372,10 @@ internal sealed class Direct3D11Presenter : IDisposable
         if (_disposed || targetWidth <= 0 || targetHeight <= 0)
             return false;
 
+        long frameStartedAt = Stopwatch.GetTimestamp();
+        MatrixRenderParameters parameters;
+        GlyphAtlasData atlas;
+        int instanceCount;
         lock (_scene.SyncRoot)
         {
             UploadAtlasIfNeeded();
@@ -379,16 +385,67 @@ internal sealed class Direct3D11Presenter : IDisposable
                 UploadInstances();
                 _uploadedVersion = version;
             }
-
-            Draw(targetWidth, targetHeight, viewports);
-            Result presentResult = _swapChain.Present(0, PresentFlags.None);
-            if (presentResult.Failure)
-            {
-                throw new InvalidOperationException(
-                    $"Direct3D 11 не передал кадр композитору; HRESULT={presentResult.Code:X8}.");
-            }
-            return true;
+            parameters = _scene.Parameters;
+            atlas = _scene.Atlas;
+            instanceCount = _scene.InstanceCount;
         }
+        long uploadFinishedAt = Stopwatch.GetTimestamp();
+
+        // Present can occasionally wait for the desktop compositor. Never hold
+        // the shared scene lock while it does: the simulation and another
+        // presentation surface must remain free to consume the next frame.
+        Draw(
+            targetWidth,
+            targetHeight,
+            viewports,
+            parameters,
+            atlas,
+            instanceCount);
+        Result presentResult = _swapChain.Present(0, PresentFlags.None);
+        if (presentResult.Failure)
+        {
+            throw new InvalidOperationException(
+                $"Direct3D 11 не передал кадр композитору; HRESULT={presentResult.Code:X8}.");
+        }
+        ReportSlowPresent(
+            frameStartedAt,
+            uploadFinishedAt,
+            Stopwatch.GetTimestamp());
+        return true;
+    }
+
+    private void ReportSlowPresent(
+        long frameStartedAt,
+        long uploadFinishedAt,
+        long frameFinishedAt)
+    {
+        TimeSpan total = Stopwatch.GetElapsedTime(
+            frameStartedAt,
+            frameFinishedAt);
+        if (total < TimeSpan.FromMilliseconds(120))
+            return;
+
+        long previous = _lastSlowPresentReportTimestamp;
+        if (previous != 0
+            && Stopwatch.GetElapsedTime(previous, frameFinishedAt)
+                < TimeSpan.FromSeconds(10))
+        {
+            return;
+        }
+
+        _lastSlowPresentReportTimestamp = frameFinishedAt;
+        TimeSpan upload = Stopwatch.GetElapsedTime(
+            frameStartedAt,
+            uploadFinishedAt);
+        TimeSpan drawAndPresent = Stopwatch.GetElapsedTime(
+            uploadFinishedAt,
+            frameFinishedAt);
+        DiagnosticLog.Write(
+            $"Медленная передача кадра D3D11: "
+            + $"всего={total.TotalMilliseconds:0} мс; "
+            + $"снимок сцены={upload.TotalMilliseconds:0} мс; "
+            + $"отрисовка/композитор={drawAndPresent.TotalMilliseconds:0} мс; "
+            + $"поверхность={(_transparentSurface ? "АТАКА" : "рабочий стол")}.");
     }
 
     private void UploadAtlasIfNeeded()
@@ -488,10 +545,11 @@ internal sealed class Direct3D11Presenter : IDisposable
     private void Draw(
         int targetWidth,
         int targetHeight,
-        IReadOnlyList<DrawingRectangle> viewports)
+        IReadOnlyList<DrawingRectangle> viewports,
+        MatrixRenderParameters parameters,
+        GlyphAtlasData atlas,
+        int instanceCount)
     {
-        MatrixRenderParameters parameters = _scene.Parameters;
-        GlyphAtlasData atlas = _scene.Atlas;
         if (_atlasView is null)
             return;
 
@@ -522,6 +580,7 @@ internal sealed class Direct3D11Presenter : IDisposable
                 viewports,
                 parameters,
                 atlas,
+                instanceCount,
                 streamFilterMode: 1,
                 screenshotInfluence: 1,
                 solidBody: 1,
@@ -535,6 +594,7 @@ internal sealed class Direct3D11Presenter : IDisposable
                 viewports,
                 parameters,
                 atlas,
+                instanceCount,
                 streamFilterMode: 0,
                 screenshotInfluence: 0,
                 solidBody: 0,
@@ -548,12 +608,13 @@ internal sealed class Direct3D11Presenter : IDisposable
         IReadOnlyList<DrawingRectangle> viewports,
         MatrixRenderParameters parameters,
         GlyphAtlasData atlas,
+        int instanceCount,
         float streamFilterMode,
         float screenshotInfluence,
         float solidBody,
         float haloFactor)
     {
-        if (_instanceBuffer is null || _scene.InstanceCount <= 0)
+        if (_instanceBuffer is null || instanceCount <= 0)
             return;
 
         _context.IASetInputLayout(_inputLayout);
@@ -616,7 +677,7 @@ internal sealed class Direct3D11Presenter : IDisposable
             UpdateConstantBuffer(constants);
             _context.DrawInstanced(
                 4,
-                (uint)_scene.InstanceCount,
+                (uint)instanceCount,
                 0,
                 0);
         }
