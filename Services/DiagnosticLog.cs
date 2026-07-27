@@ -37,7 +37,7 @@ internal static class DiagnosticLog
     public static string BuildReport(string runtimeStatus)
     {
         StringBuilder report = new();
-        report.AppendLine("Wallpaper Matrix 3.3.0");
+        report.AppendLine("Wallpaper Matrix 3.3.1");
         report.AppendLine($"Время: {DateTime.Now:O}");
         report.AppendLine($"ОС: {Environment.OSVersion}");
         report.AppendLine($"Процесс: {Environment.ProcessPath}");

@@ -2408,6 +2408,104 @@
 
                     <Border Style="{StaticResource SectionBorder}">
                         <StackPanel>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Orientation="Horizontal">
+                                    <CheckBox x:Name="AttackSystemEnabledCheck"
+                                              Content="АТАКА СИСТЕМЫ"
+                                              FontFamily="Consolas"
+                                              FontWeight="Bold"
+                                              Foreground="#00E667"/>
+                                    <Button Style="{StaticResource HelpButton}"
+                                            VerticalAlignment="Center"
+                                            ToolTip="После заданного бездействия поток захватывает интерфейс системы. Любой ввод быстро возвращает рабочий стол."/>
+                                </StackPanel>
+                                <Button Grid.Column="1"
+                                        Style="{StaticResource ResetParameterButton}"
+                                        Tag="AttackBlock"
+                                        VerticalAlignment="Center"
+                                        ToolTip="Сбросить настройки атаки системы"/>
+                            </Grid>
+                            <StackPanel x:Name="AttackContentPanel"
+                                        Margin="0,10,0,0">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition/>
+                                        <ColumnDefinition Width="18"/>
+                                        <ColumnDefinition/>
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel>
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition/>
+                                                <ColumnDefinition Width="Auto"/>
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Orientation="Horizontal">
+                                                <TextBlock Text="Бездействие"/>
+                                                <Button Style="{StaticResource HelpButton}"
+                                                        ToolTip="Задаёт время без ввода, после которого начинается атака."/>
+                                            </StackPanel>
+                                            <StackPanel Grid.Column="1" Orientation="Horizontal">
+                                                <TextBox x:Name="AttackIdleMinutesInput"
+                                                         Tag="AttackIdleMinutes"
+                                                         Style="{StaticResource NumericInput}"
+                                                         ToolTip="Ползунок: 1–120 мин. Ручной ввод: 1–1440 мин."/>
+                                                <TextBlock Text="мин" Margin="4,3,0,0"
+                                                           FontFamily="Consolas" Foreground="#83FFAA"/>
+                                                <Button Style="{StaticResource ResetParameterButton}"
+                                                        Tag="AttackIdleMinutes"/>
+                                            </StackPanel>
+                                        </Grid>
+                                        <Slider x:Name="AttackIdleMinutesSlider"
+                                                Minimum="1" Maximum="120"
+                                                TickFrequency="1"
+                                                ValueChanged="AnySlider_ValueChanged"/>
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="2">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition/>
+                                                <ColumnDefinition Width="Auto"/>
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Orientation="Horizontal">
+                                                <TextBlock Text="Захват системы"/>
+                                                <Button Style="{StaticResource HelpButton}"
+                                                        ToolTip="Задаёт длительность превращения интерфейса в фон и символы потока."/>
+                                            </StackPanel>
+                                            <StackPanel Grid.Column="1" Orientation="Horizontal">
+                                                <TextBox x:Name="AttackTransitionSecondsInput"
+                                                         Tag="AttackTransitionSeconds"
+                                                         Style="{StaticResource NumericInput}"
+                                                         ToolTip="Допустимый диапазон: 1–30 с."/>
+                                                <TextBlock Text="с" Margin="4,3,0,0"
+                                                           FontFamily="Consolas" Foreground="#83FFAA"/>
+                                                <Button Style="{StaticResource ResetParameterButton}"
+                                                        Tag="AttackTransitionSeconds"/>
+                                            </StackPanel>
+                                        </Grid>
+                                        <Slider x:Name="AttackTransitionSecondsSlider"
+                                                Minimum="1" Maximum="30"
+                                                TickFrequency="0.5"
+                                                ValueChanged="AnySlider_ValueChanged"/>
+                                    </StackPanel>
+                                </Grid>
+                                <Button Content="ПРОВЕРИТЬ АТАКУ"
+                                        Height="29"
+                                        Margin="0,10,0,0"
+                                        HorizontalAlignment="Right"
+                                        Padding="12,2"
+                                        Style="{StaticResource ActionButton}"
+                                        Click="TestAttackButton_Click"
+                                        ToolTip="Немедленно показать переход без ожидания таймера."/>
+                            </StackPanel>
+                        </StackPanel>
+                    </Border>
+
+                    <Border Style="{StaticResource SectionBorder}">
+                        <StackPanel>
                             <Grid Margin="0,0,0,7">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition/>
@@ -2437,95 +2535,6 @@
                                     <Button Grid.Column="1" Style="{StaticResource ResetParameterButton}" Tag="FramesPerSecond"/>
                                 </Grid>
                             </StackPanel>
-                            <Border Margin="0,2,0,10"
-                                    Padding="10"
-                                    Background="#041108"
-                                    BorderBrush="#174A2B"
-                                    BorderThickness="1">
-                                <StackPanel>
-                                    <Grid Margin="0,0,0,8">
-                                        <Grid.ColumnDefinitions>
-                                            <ColumnDefinition/>
-                                            <ColumnDefinition Width="Auto"/>
-                                        </Grid.ColumnDefinitions>
-                                        <StackPanel Orientation="Horizontal">
-                                            <CheckBox x:Name="AttackSystemEnabledCheck"
-                                                      Content="АТАКА СИСТЕМЫ"/>
-                                            <Button Style="{StaticResource HelpButton}"
-                                                    VerticalAlignment="Center"
-                                                    ToolTip="После заданного бездействия продолжает поток поверх интерфейса и постепенно превращает снимок системы в код. Любой ввод возвращает рабочий стол."/>
-                                        </StackPanel>
-                                        <Button Grid.Column="1"
-                                                Content="ПРОВЕРИТЬ"
-                                                Height="25"
-                                                Padding="10,2"
-                                                Style="{StaticResource ActionButton}"
-                                                Click="TestAttackButton_Click"
-                                                ToolTip="Немедленно показать переход без ожидания таймера."/>
-                                    </Grid>
-                                    <Grid IsEnabled="{Binding IsChecked, ElementName=AttackSystemEnabledCheck}">
-                                        <Grid.ColumnDefinitions>
-                                            <ColumnDefinition/>
-                                            <ColumnDefinition Width="18"/>
-                                            <ColumnDefinition/>
-                                        </Grid.ColumnDefinitions>
-                                        <StackPanel>
-                                            <Grid>
-                                                <Grid.ColumnDefinitions>
-                                                    <ColumnDefinition/>
-                                                    <ColumnDefinition Width="Auto"/>
-                                                </Grid.ColumnDefinitions>
-                                                <StackPanel Orientation="Horizontal">
-                                                    <TextBlock Text="Бездействие"/>
-                                                    <Button Style="{StaticResource HelpButton}"
-                                                            ToolTip="Задаёт время без ввода, после которого начинается атака."/>
-                                                </StackPanel>
-                                                <StackPanel Grid.Column="1" Orientation="Horizontal">
-                                                    <TextBox x:Name="AttackIdleMinutesInput"
-                                                             Tag="AttackIdleMinutes"
-                                                             Style="{StaticResource NumericInput}"
-                                                             ToolTip="Ползунок: 1–120 мин. Ручной ввод: 1–1440 мин."/>
-                                                    <TextBlock Text="мин" Margin="4,3,0,0"
-                                                               FontFamily="Consolas" Foreground="#83FFAA"/>
-                                                    <Button Style="{StaticResource ResetParameterButton}"
-                                                            Tag="AttackIdleMinutes"/>
-                                                </StackPanel>
-                                            </Grid>
-                                            <Slider x:Name="AttackIdleMinutesSlider"
-                                                    Minimum="1" Maximum="120"
-                                                    TickFrequency="1"
-                                                    ValueChanged="AnySlider_ValueChanged"/>
-                                        </StackPanel>
-                                        <StackPanel Grid.Column="2">
-                                            <Grid>
-                                                <Grid.ColumnDefinitions>
-                                                    <ColumnDefinition/>
-                                                    <ColumnDefinition Width="Auto"/>
-                                                </Grid.ColumnDefinitions>
-                                                <StackPanel Orientation="Horizontal">
-                                                    <TextBlock Text="Захват системы"/>
-                                                    <Button Style="{StaticResource HelpButton}"
-                                                            ToolTip="Задаёт длительность превращения снимка интерфейса в однотонный фон и символы потока."/>
-                                                </StackPanel>
-                                                <StackPanel Grid.Column="1" Orientation="Horizontal">
-                                                    <TextBox x:Name="AttackTransitionSecondsInput"
-                                                             Tag="AttackTransitionSeconds"
-                                                             Style="{StaticResource NumericInput}"
-                                                             ToolTip="Допустимый диапазон: 1–30 с."/>
-                                                    <TextBlock Text="с" Margin="4,3,0,0"
-                                                               FontFamily="Consolas" Foreground="#83FFAA"/>
-                                                    <Button Style="{StaticResource ResetParameterButton}"
-                                                            Tag="AttackTransitionSeconds"/>
-                                                </StackPanel>
-                                            </Grid>
-                                            <Slider x:Name="AttackTransitionSecondsSlider"
-                                                    Minimum="1" Maximum="30"
-                                                    TickFrequency="0.5"
-                                                    ValueChanged="AnySlider_ValueChanged"/>
-                                        </StackPanel>
-                                    </Grid>
-                                </StackPanel>
-                            </Border>
                             <StackPanel Orientation="Horizontal">
                                 <CheckBox x:Name="PauseDuringFullscreenAppsCheck"
                                           Content="Пауза в играх"/>

@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
@@ -29,14 +30,40 @@ internal static class DesktopCaptureService
             PixelFormat.Format32bppArgb);
         using (Graphics graphics = Graphics.FromImage(bitmap))
         {
-            graphics.CopyFromScreen(
-                bounds.Left,
-                bounds.Top,
-                0,
-                0,
-                bounds.Size,
-                CopyPixelOperation.SourceCopy
-                    | CopyPixelOperation.CaptureBlt);
+            IntPtr destinationDc = graphics.GetHdc();
+            IntPtr sourceDc = IntPtr.Zero;
+            try
+            {
+                sourceDc = GetDC(IntPtr.Zero);
+                if (sourceDc == IntPtr.Zero)
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "Windows не предоставила поверхность рабочего стола.");
+                }
+
+                if (!BitBlt(
+                        destinationDc,
+                        0,
+                        0,
+                        bounds.Width,
+                        bounds.Height,
+                        sourceDc,
+                        bounds.Left,
+                        bounds.Top,
+                        SourceCopy | CaptureBlt))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "Не удалось получить снимок интерфейса системы.");
+                }
+            }
+            finally
+            {
+                if (sourceDc != IntPtr.Zero)
+                    _ = ReleaseDC(IntPtr.Zero, sourceDc);
+                graphics.ReleaseHdc(destinationDc);
+            }
         }
 
         DrawingRectangle localBounds =
@@ -87,4 +114,28 @@ internal static class DesktopCaptureService
             bitmap.UnlockBits(data);
         }
     }
+
+    private const uint SourceCopy = 0x00CC0020;
+    private const uint CaptureBlt = 0x40000000;
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetDC(IntPtr window);
+
+    [DllImport("user32.dll")]
+    private static extern int ReleaseDC(
+        IntPtr window,
+        IntPtr deviceContext);
+
+    [DllImport("gdi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool BitBlt(
+        IntPtr destination,
+        int destinationX,
+        int destinationY,
+        int width,
+        int height,
+        IntPtr source,
+        int sourceX,
+        int sourceY,
+        uint rasterOperation);
 }

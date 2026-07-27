@@ -1364,6 +1364,9 @@ public partial class SettingsWindow : Window
                 ResetAnalysisBlock(standard);
                 ResetOutputBlock(standard);
                 break;
+            case "AttackBlock":
+                ResetAttackBlock(standard);
+                break;
             case "SystemBlock":
                 ResetSystemBlock(standard);
                 break;
@@ -1604,8 +1607,10 @@ public partial class SettingsWindow : Window
         PauseDuringFullscreenAppsCheck.IsChecked =
             standard.PauseDuringFullscreenApps;
         AutostartCheck.IsChecked = standard.StartWithWindows;
-        AttackSystemEnabledCheck.IsChecked =
-            standard.AttackSystemEnabled;
+    }
+
+    private void ResetAttackBlock(AppSettings standard)
+    {
         _attackIdleMinutesValue = standard.AttackIdleMinutes;
         AttackIdleMinutesSlider.Value =
             standard.AttackIdleMinutes;
@@ -3087,6 +3092,13 @@ public partial class SettingsWindow : Window
             DatabaseContentPanel.Visibility = ImageModeCheck.IsChecked == true
                 ? Visibility.Visible
                 : Visibility.Collapsed;
+        }
+        if (AttackContentPanel is not null)
+        {
+            AttackContentPanel.Visibility =
+                AttackSystemEnabledCheck.IsChecked == true
+                    ? Visibility.Visible
+                    : Visibility.Collapsed;
         }
     }
 

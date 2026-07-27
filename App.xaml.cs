@@ -28,15 +28,31 @@ public partial class App : System.Windows.Application
         DispatcherUnhandledException += OnDispatcherUnhandledException;
         AppDomain.CurrentDomain.UnhandledException += OnDomainUnhandledException;
         TaskScheduler.UnobservedTaskException += OnUnobservedTaskException;
-        if (e.Args.Any(argument =>
+        bool validateShaders = e.Args.Any(argument =>
             string.Equals(
                 argument,
                 "--validate-shaders",
-                StringComparison.OrdinalIgnoreCase)))
+                StringComparison.OrdinalIgnoreCase));
+        bool validateAttack = e.Args.Any(argument =>
+            string.Equals(
+                argument,
+                "--validate-attack",
+                StringComparison.OrdinalIgnoreCase));
+        if (validateShaders || validateAttack)
         {
             try
             {
                 Direct3D11Presenter.ValidateShaders();
+                if (validateAttack)
+                {
+                    CapturedDesktopFrame capture =
+                        DesktopCaptureService.CaptureVirtualDesktop();
+                    DiagnosticLog.Write(
+                        $"Самопроверка захвата АТАКИ СИСТЕМЫ завершена успешно: "
+                        + $"{capture.Width}x{capture.Height}; "
+                        + $"начало=({capture.Left},{capture.Top}); "
+                        + $"BGRA={capture.Pixels.Length} байт.");
+                }
                 DiagnosticLog.Write(
                     "Самопроверка шейдеров D3D11 завершена успешно.");
                 Shutdown(0);
@@ -106,7 +122,6 @@ public partial class App : System.Windows.Application
             togglePaused: TogglePaused,
             toggleImageMode: ToggleImageMode,
             nextImage: () => _wallpaperManager?.NextImage(),
-            startAttack: StartAttack,
             refreshDesktop: () => _wallpaperManager?.RefreshWindows(),
             exit: ExitApplication);
         _tray.Update(
