@@ -16,6 +16,7 @@ public sealed class TrayService : IDisposable
         Action togglePaused,
         Action toggleImageMode,
         Action nextImage,
+        Action startAttack,
         Action refreshDesktop,
         Action exit)
     {
@@ -28,6 +29,10 @@ public sealed class TrayService : IDisposable
         menu.Items.Add(_pauseItem);
         menu.Items.Add(_imageModeItem);
         menu.Items.Add("Следующее изображение", null, (_, _) => RunOnUi(nextImage));
+        menu.Items.Add(
+            "АТАКА СИСТЕМЫ // ПРОВЕРИТЬ",
+            null,
+            (_, _) => RunOnUi(startAttack));
         menu.Items.Add(new System.Windows.Forms.ToolStripSeparator());
         menu.Items.Add("Переподключить к рабочему столу", null, (_, _) => RunOnUi(refreshDesktop));
         menu.Items.Add("Выход", null, (_, _) => RunOnUi(exit));
@@ -35,7 +40,7 @@ public sealed class TrayService : IDisposable
         _notifyIcon = new System.Windows.Forms.NotifyIcon
         {
             Icon = _icon,
-            Text = "Wallpaper Matrix 3.2.2",
+            Text = "Wallpaper Matrix 3.3.0",
             ContextMenuStrip = menu,
             Visible = true
         };

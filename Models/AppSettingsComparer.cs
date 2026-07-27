@@ -103,6 +103,11 @@ internal static class AppSettingsComparer
         && Near(left.ClockWeight, right.ClockWeight)
         && left.StartWithWindows == right.StartWithWindows
         && left.PauseDuringFullscreenApps == right.PauseDuringFullscreenApps
+        && left.AttackSystemEnabled == right.AttackSystemEnabled
+        && Near(left.AttackIdleMinutes, right.AttackIdleMinutes)
+        && Near(
+            left.AttackTransitionSeconds,
+            right.AttackTransitionSeconds)
         && left.ActivePresetId == right.ActivePresetId;
 
     public static bool PresetEquivalent(

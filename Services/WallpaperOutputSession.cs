@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using WallpaperMatrix.Models;
 using WallpaperMatrix.Native;
+using WallpaperMatrix.Rendering;
 
 namespace WallpaperMatrix.Services;
 
@@ -19,6 +20,8 @@ internal sealed class WallpaperOutputSession : IDisposable
     private int _screenCount;
 
     public bool IsRunning => _windows.Count > 0;
+    public SharedMatrixScene? SharedFrame =>
+        _windows.Count > 0 ? _windows[0].SharedFrame : null;
     public int WindowCount => _screenCount;
     public int TargetWidth { get; private set; } = 2560;
     public int TargetHeight { get; private set; } = 1440;
@@ -70,6 +73,19 @@ internal sealed class WallpaperOutputSession : IDisposable
         _image = image;
         foreach (NativeWallpaperWindow window in _windows)
             window.SetImage(image);
+    }
+
+    public void ResetImageOverlay(PreparedImage? image)
+    {
+        _image = image;
+        foreach (NativeWallpaperWindow window in _windows)
+            window.ResetImageOverlay(image);
+    }
+
+    public void SetPresentationSuppressed(bool suppressed)
+    {
+        foreach (NativeWallpaperWindow window in _windows)
+            window.SetPresentationSuppressed(suppressed);
     }
 
     public void Activate()

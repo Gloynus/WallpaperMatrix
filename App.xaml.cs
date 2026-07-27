@@ -4,6 +4,7 @@ using System.Windows;
 using System.Windows.Threading;
 using WallpaperMatrix.Models;
 using WallpaperMatrix.Native;
+using WallpaperMatrix.Rendering;
 using WallpaperMatrix.Services;
 using WallpaperMatrix.Views;
 
@@ -27,10 +28,34 @@ public partial class App : System.Windows.Application
         DispatcherUnhandledException += OnDispatcherUnhandledException;
         AppDomain.CurrentDomain.UnhandledException += OnDomainUnhandledException;
         TaskScheduler.UnobservedTaskException += OnUnobservedTaskException;
+        if (e.Args.Any(argument =>
+            string.Equals(
+                argument,
+                "--validate-shaders",
+                StringComparison.OrdinalIgnoreCase)))
+        {
+            try
+            {
+                Direct3D11Presenter.ValidateShaders();
+                DiagnosticLog.Write(
+                    "Самопроверка шейдеров D3D11 завершена успешно.");
+                Shutdown(0);
+            }
+            catch (Exception exception)
+            {
+                DiagnosticLog.Write(
+                    "Самопроверка шейдеров D3D11 завершилась ошибкой.",
+                    exception);
+                Shutdown(1);
+            }
+            return;
+        }
         bool startInBackground = e.Args.Any(argument =>
             string.Equals(argument, "--background", StringComparison.OrdinalIgnoreCase));
         bool forceSettings = e.Args.Any(argument =>
             string.Equals(argument, "--show-settings", StringComparison.OrdinalIgnoreCase));
+        bool forceAttack = e.Args.Any(argument =>
+            string.Equals(argument, "--attack-now", StringComparison.OrdinalIgnoreCase));
 
         _singleInstanceMutex = new Mutex(true, "Local\\WallpaperMatrix.SingleInstance", out bool isFirstInstance);
         if (!isFirstInstance)
@@ -81,6 +106,7 @@ public partial class App : System.Windows.Application
             togglePaused: TogglePaused,
             toggleImageMode: ToggleImageMode,
             nextImage: () => _wallpaperManager?.NextImage(),
+            startAttack: StartAttack,
             refreshDesktop: () => _wallpaperManager?.RefreshWindows(),
             exit: ExitApplication);
         _tray.Update(
@@ -99,6 +125,8 @@ public partial class App : System.Windows.Application
             }
             ShowSettings();
         }
+        if (forceAttack)
+            Dispatcher.BeginInvoke(StartAttack);
 
     }
 
@@ -113,6 +141,7 @@ public partial class App : System.Windows.Application
             _settingsWindow.SettingsPreviewed += PreviewSettings;
             _settingsWindow.ImageRequested += PreviewImage;
             _settingsWindow.PauseRequested += SetWallpaperPaused;
+            _settingsWindow.AttackRequested += StartAttack;
         }
 
         _settingsWindow.LoadSettings(_settings);
@@ -143,8 +172,16 @@ public partial class App : System.Windows.Application
             _wallpaperManager?.IsPausedByFullscreenApp ?? false);
     }
 
-    private void PreviewSettings(AppSettings preview) =>
+    private void PreviewSettings(AppSettings preview)
+    {
+        // Idle activation is a system policy, not a visual shader preview.
+        // Keep it on the last applied value until the operator presses Apply.
+        preview.AttackSystemEnabled = _settings.AttackSystemEnabled;
+        preview.AttackIdleMinutes = _settings.AttackIdleMinutes;
+        preview.AttackTransitionSeconds =
+            _settings.AttackTransitionSeconds;
         _wallpaperManager?.ApplySettings(preview);
+    }
 
     private void SavePlaylists(AppSettings liveDraft)
     {
@@ -162,6 +199,9 @@ public partial class App : System.Windows.Application
 
     private void SetWallpaperPaused(bool paused) =>
         _wallpaperManager?.SetPaused(paused);
+
+    private void StartAttack() =>
+        _wallpaperManager?.StartAttack();
 
     private void TogglePaused()
     {

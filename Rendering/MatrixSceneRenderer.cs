@@ -200,6 +200,13 @@ internal sealed class MatrixSceneRenderer : IDisposable
             ClearImageOverlay();
     }
 
+    public void ResetImageOverlay(PreparedImage? image)
+    {
+        _image = image;
+        _maskDirty = true;
+        ClearImageOverlay();
+    }
+
     public bool RenderIfDue(bool paused)
     {
         TimeSpan now = _clock.Elapsed;

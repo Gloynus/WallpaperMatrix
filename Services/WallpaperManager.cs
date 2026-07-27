@@ -2,6 +2,8 @@ using Microsoft.Win32;
 using System.IO;
 using System.Windows.Threading;
 using WallpaperMatrix.Models;
+using WallpaperMatrix.Native;
+using WallpaperMatrix.Rendering;
 
 namespace WallpaperMatrix.Services;
 
@@ -14,6 +16,7 @@ public sealed class WallpaperManager : IDisposable
     private readonly DispatcherTimer _imageTimer;
     private readonly DispatcherTimer _displayChangeTimer;
     private readonly DispatcherTimer _sessionResumeTimer;
+    private readonly DispatcherTimer _attackTimer;
     private readonly SemaphoreSlim _imageLoadGate = new(1, 1);
     private AppSettings _settings;
     private DateTime _imageStartedAt;
@@ -22,6 +25,11 @@ public sealed class WallpaperManager : IDisposable
     private CancellationTokenSource? _imageLoadCancellation;
     private int _imageLoadGeneration;
     private int _pendingImageLoads;
+    private CancellationTokenSource? _attackStartCancellation;
+    private AttackOverlayWindow? _attackOverlay;
+    private int _attackStartGeneration;
+    private bool _attackStartPending;
+    private DateTime _attackRetryAfterUtc;
     private bool _manualPaused;
     private bool _fullscreenPaused;
     private bool _sessionUnavailable;
@@ -35,6 +43,8 @@ public sealed class WallpaperManager : IDisposable
         _manualPaused || _fullscreenPaused || _sessionUnavailable;
     public bool IsManuallyPaused => _manualPaused;
     public bool IsPausedByFullscreenApp => _fullscreenPaused;
+    public bool IsAttackActive =>
+        _attackOverlay is not null || _attackStartPending;
     public string RuntimeStatus => _runtimeStatus;
     public bool HasRuntimeError => _hasRuntimeError;
     public string DiagnosticLogPath => DiagnosticLog.LogPath;
@@ -62,6 +72,12 @@ public sealed class WallpaperManager : IDisposable
             Interval = TimeSpan.FromMilliseconds(1200)
         };
         _sessionResumeTimer.Tick += OnSessionResumeTimer;
+        _attackTimer = new DispatcherTimer(
+            DispatcherPriority.Background)
+        {
+            Interval = TimeSpan.FromMilliseconds(500)
+        };
+        _attackTimer.Tick += OnAttackTimer;
         _fullscreenMonitor.ActivityChanged += OnFullscreenActivityChanged;
     }
 
@@ -74,6 +90,7 @@ public sealed class WallpaperManager : IDisposable
             isError: false);
         ReloadImages();
         _imageTimer.Start();
+        _attackTimer.Start();
         _fullscreenMonitor.SetEnabled(_settings.PauseDuringFullscreenApps);
         _displayTopologySignature = CaptureDisplayTopology();
         SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
@@ -94,8 +111,13 @@ public sealed class WallpaperManager : IDisposable
 
         _settings = settings.Copy();
         UpdateImageTimerInterval();
-        _output.UpdateSettings(_settings);
+        _output.UpdateSettings(
+            IsAttackActive
+                ? CreateAttackSettings(_settings)
+                : _settings);
         _fullscreenMonitor.SetEnabled(_settings.PauseDuringFullscreenApps);
+        if (!_settings.AttackSystemEnabled && IsAttackActive)
+            StopAttack();
 
         if (reloadImages)
             ReloadImages();
@@ -114,6 +136,21 @@ public sealed class WallpaperManager : IDisposable
         ApplyPauseState();
     }
 
+    public void StartAttack()
+    {
+        BeginAttack(manual: true);
+    }
+
+    public void StopAttack()
+    {
+        Interlocked.Increment(ref _attackStartGeneration);
+        _attackOverlay?.RequestExit();
+        CancellationTokenSource? pending =
+            Interlocked.Exchange(ref _attackStartCancellation, null);
+        pending?.Cancel();
+        pending?.Dispose();
+    }
+
     private void SetFullscreenPaused(bool paused)
     {
         if (_fullscreenPaused == paused)
@@ -124,6 +161,12 @@ public sealed class WallpaperManager : IDisposable
 
     private void ApplyPauseState()
     {
+        if ((_manualPaused || _fullscreenPaused || _sessionUnavailable)
+            && IsAttackActive)
+        {
+            AbortAttackImmediately();
+        }
+
         if (_sessionUnavailable)
         {
             // A renderer tied to the old desktop must never be resurrected
@@ -160,6 +203,8 @@ public sealed class WallpaperManager : IDisposable
 
     public void RefreshWindows()
     {
+        if (IsAttackActive)
+            AbortAttackImmediately();
         _displayTopologySignature = CaptureDisplayTopology();
         if (_sessionUnavailable)
         {
@@ -392,7 +437,8 @@ public sealed class WallpaperManager : IDisposable
         _currentImage = image;
         if (resetCycle)
             _imageStartedAt = DateTime.UtcNow;
-        _output.SetImage(_currentImage);
+        if (!IsAttackActive)
+            _output.SetImage(_currentImage);
     }
 
     private static bool IsEnabledImagePath(AppSettings settings, string path)
@@ -427,7 +473,11 @@ public sealed class WallpaperManager : IDisposable
 
     private void OnImageTimer(object? sender, EventArgs e)
     {
-        if (IsPaused || !_settings.ImageMode || _currentImage is null || Volatile.Read(ref _pendingImageLoads) > 0)
+        if (IsPaused
+            || IsAttackActive
+            || !_settings.ImageMode
+            || _currentImage is null
+            || Volatile.Read(ref _pendingImageLoads) > 0)
             return;
 
         double duration = _settings.ImageDurationSeconds;
@@ -526,6 +576,7 @@ public sealed class WallpaperManager : IDisposable
             return;
 
         _sessionUnavailable = true;
+        AbortAttackImmediately();
         DiagnosticLog.Write(
             $"Сеанс приостановлен ({reason}); поверхность Direct3D уничтожается.");
         _output.StopAndRestoreDesktop();
@@ -650,6 +701,241 @@ public sealed class WallpaperManager : IDisposable
             () => SetFullscreenPaused(active));
     }
 
+    private void OnAttackTimer(object? sender, EventArgs e)
+    {
+        if (_disposed
+            || !_settings.AttackSystemEnabled
+            || IsPaused
+            || IsAttackActive
+            || !_output.IsRunning
+            || DateTime.UtcNow < _attackRetryAfterUtc)
+        {
+            return;
+        }
+
+        TimeSpan threshold =
+            TimeSpan.FromMinutes(_settings.AttackIdleMinutes);
+        if (UserIdleMonitor.IdleTime >= threshold)
+            BeginAttack(manual: false);
+    }
+
+    private async void BeginAttack(bool manual)
+    {
+        if (_disposed
+            || IsPaused
+            || _attackStartPending
+            || _attackOverlay is not null
+            || !_output.IsRunning)
+        {
+            return;
+        }
+
+        _attackStartPending = true;
+        int generation = Interlocked.Increment(
+            ref _attackStartGeneration);
+        CancellationTokenSource cancellation = new();
+        CancellationTokenSource? previous = Interlocked.Exchange(
+            ref _attackStartCancellation,
+            cancellation);
+        previous?.Cancel();
+        previous?.Dispose();
+        AppSettings settings = _settings.Copy();
+        try
+        {
+            AttackStartData startData = await Task.Run(
+                () => PrepareAttackStartData(
+                    settings,
+                    cancellation.Token),
+                cancellation.Token);
+            cancellation.Token.ThrowIfCancellationRequested();
+            if (_disposed
+                || generation != Volatile.Read(
+                    ref _attackStartGeneration)
+                || IsPaused
+                || !_output.IsRunning
+                || (!manual
+                    && UserIdleMonitor.IdleTime
+                        < TimeSpan.FromMinutes(
+                            settings.AttackIdleMinutes)))
+            {
+                return;
+            }
+
+            SharedMatrixScene? scene = _output.SharedFrame;
+            if (scene is null)
+            {
+                throw new InvalidOperationException(
+                    "Общий кадр потока недоступен.");
+            }
+
+            AttackOverlayWindow overlay = new(
+                new System.Drawing.Rectangle(
+                    startData.Desktop.Left,
+                    startData.Desktop.Top,
+                    startData.Desktop.Width,
+                    startData.Desktop.Height),
+                scene,
+                startData.Desktop,
+                _settings.AttackTransitionSeconds);
+            overlay.Closed += OnAttackOverlayClosed;
+            overlay.ExitStarted += OnAttackExitStarted;
+            _attackOverlay = overlay;
+            overlay.Start();
+            _output.SetPresentationSuppressed(true);
+            AppSettings attackSettings =
+                CreateAttackSettings(_settings);
+            _output.UpdateSettings(attackSettings);
+            _output.ResetImageOverlay(startData.Prepared);
+            SetRuntimeStatus(
+                "АТАКА СИСТЕМЫ // ИНТЕРФЕЙС ПЕРЕХВАЧЕН ПОТОКОМ",
+                isError: false);
+        }
+        catch (OperationCanceledException)
+        {
+            // A setting change, pause or shutdown cancelled a pending attack.
+        }
+        catch (Exception exception)
+        {
+            AbortAttackImmediately();
+            _attackRetryAfterUtc =
+                DateTime.UtcNow.AddMinutes(1);
+            ReportWindowFailure(
+                "Не удалось начать АТАКУ СИСТЕМЫ.",
+                exception,
+                fatal: false);
+        }
+        finally
+        {
+            Interlocked.CompareExchange(
+                ref _attackStartCancellation,
+                null,
+                cancellation);
+            cancellation.Dispose();
+            _attackStartPending = false;
+        }
+    }
+
+    private AttackStartData PrepareAttackStartData(
+        AppSettings settings,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        CapturedDesktopFrame desktop =
+            DesktopCaptureService.CaptureVirtualDesktop();
+        cancellationToken.ThrowIfCancellationRequested();
+        System.Windows.Forms.Screen primary =
+            System.Windows.Forms.Screen.AllScreens
+                .FirstOrDefault(screen => screen.Primary)
+            ?? System.Windows.Forms.Screen.AllScreens[0];
+        CapturedDesktopFrame analysisFrame =
+            desktop.Crop(primary.Bounds);
+        AppSettings attackSettings =
+            CreateAttackSettings(settings);
+        PreparedImage prepared = _imagePreparation.Prepare(
+            analysisFrame.ToImageSourceFrame(),
+            attackSettings,
+            _output.TargetWidth,
+            _output.TargetHeight,
+            cancellationToken,
+            cacheResult: false);
+        return new AttackStartData(desktop, prepared);
+    }
+
+    private static AppSettings CreateAttackSettings(
+        AppSettings source)
+    {
+        AppSettings settings = source.Copy();
+        settings.ImageMode = true;
+        settings.ImageDurationSeconds =
+            AppSettings.MaximumImageDurationSeconds;
+        settings.ImageStability = 1.0;
+        settings.ImageResistance = Math.Max(
+            settings.ImageResistance,
+            0.80);
+        settings.ImageBrightness = Math.Max(
+            settings.ImageBrightness,
+            0.90);
+        settings.ImageFit = "Fill";
+        settings.Normalize();
+        return settings;
+    }
+
+    private void OnAttackOverlayClosed()
+    {
+        System.Windows.Application? application =
+            System.Windows.Application.Current;
+        if (application?.Dispatcher is null)
+            return;
+        application.Dispatcher.BeginInvoke(FinishAttack);
+    }
+
+    private void OnAttackExitStarted()
+    {
+        System.Windows.Application? application =
+            System.Windows.Application.Current;
+        if (application?.Dispatcher is null)
+            return;
+        application.Dispatcher.BeginInvoke(
+            RestoreWallpaperAfterAttack);
+    }
+
+    private void RestoreWallpaperAfterAttack()
+    {
+        if (_disposed || !_output.IsRunning)
+            return;
+        _output.SetPresentationSuppressed(false);
+        _output.UpdateSettings(_settings);
+        _output.ResetImageOverlay(
+            _settings.ImageMode ? _currentImage : null);
+    }
+
+    private void FinishAttack()
+    {
+        AttackOverlayWindow? overlay = _attackOverlay;
+        if (overlay is null)
+            return;
+        overlay.Closed -= OnAttackOverlayClosed;
+        overlay.ExitStarted -= OnAttackExitStarted;
+        _attackOverlay = null;
+        overlay.Dispose();
+        if (_disposed || !_output.IsRunning)
+            return;
+
+        RestoreWallpaperAfterAttack();
+        SetRuntimeStatus(
+            $"ВЫВОД АКТИВЕН // DIRECT3D 11 // ЭКРАНОВ: "
+                + $"{_output.WindowCount}",
+            isError: false);
+    }
+
+    private void AbortAttackImmediately()
+    {
+        Interlocked.Increment(ref _attackStartGeneration);
+        CancellationTokenSource? pending =
+            Interlocked.Exchange(ref _attackStartCancellation, null);
+        pending?.Cancel();
+        pending?.Dispose();
+
+        AttackOverlayWindow? overlay = _attackOverlay;
+        if (overlay is not null)
+        {
+            overlay.Closed -= OnAttackOverlayClosed;
+            overlay.ExitStarted -= OnAttackExitStarted;
+            _attackOverlay = null;
+            overlay.RequestExit(immediate: true);
+            overlay.WaitForClose(TimeSpan.FromMilliseconds(700));
+            overlay.Dispose();
+        }
+
+        if (!_disposed && _output.IsRunning)
+        {
+            _output.SetPresentationSuppressed(false);
+            _output.UpdateSettings(_settings);
+            _output.ResetImageOverlay(
+                _settings.ImageMode ? _currentImage : null);
+        }
+    }
+
     private void ReportWindowFailure(string context, Exception exception, bool fatal)
     {
         DiagnosticLog.Write(context, exception);
@@ -696,8 +982,10 @@ public sealed class WallpaperManager : IDisposable
         _fullscreenMonitor.ActivityChanged -= OnFullscreenActivityChanged;
         _fullscreenMonitor.Dispose();
         _imageTimer.Stop();
+        _attackTimer.Stop();
         _displayChangeTimer.Stop();
         _sessionResumeTimer.Stop();
+        AbortAttackImmediately();
         _imagePreparation.Clear();
         _output.Dispose();
     }
@@ -712,5 +1000,9 @@ public sealed class WallpaperManager : IDisposable
 
     private sealed record ImageLoadResult(
         ImageSourceFrame Source,
+        PreparedImage Prepared);
+
+    private sealed record AttackStartData(
+        CapturedDesktopFrame Desktop,
         PreparedImage Prepared);
 }

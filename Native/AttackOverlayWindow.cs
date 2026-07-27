@@ -1,0 +1,646 @@
+using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using WallpaperMatrix.Models;
+using WallpaperMatrix.Rendering;
+using WallpaperMatrix.Services;
+using DrawingRectangle = System.Drawing.Rectangle;
+
+namespace WallpaperMatrix.Native;
+
+/// <summary>
+/// Presents the already-running Matrix scene over the complete virtual
+/// desktop. It owns no simulation state, so entering and leaving the attack
+/// cannot reset streams, clocks, glyphs or image timing.
+/// </summary>
+internal sealed class AttackOverlayWindow : IDisposable
+{
+    private const double ExitTransitionSeconds = 0.18;
+    private readonly DrawingRectangle _bounds;
+    private readonly SharedMatrixScene _scene;
+    private CapturedDesktopFrame? _desktop;
+    private readonly IReadOnlyList<DrawingRectangle> _viewports;
+    private readonly double _transitionSeconds;
+    private readonly Thread _thread;
+    private readonly CancellationTokenSource _cancellation = new();
+    private readonly ManualResetEventSlim _started = new(false);
+    private readonly ManualResetEventSlim _closed = new(false);
+    private IntPtr _window;
+    private Exception? _startupError;
+    private int _exitRequested;
+    private int _immediateExit;
+    private int _disposed;
+    private long _inputArmedAt;
+
+    public event Action? Closed;
+    public event Action? ExitStarted;
+
+    public AttackOverlayWindow(
+        DrawingRectangle bounds,
+        SharedMatrixScene scene,
+        CapturedDesktopFrame desktop,
+        double transitionSeconds)
+    {
+        _bounds = bounds;
+        _scene = scene;
+        _desktop = desktop;
+        _viewports = System.Windows.Forms.Screen.AllScreens
+            .Select(screen => new DrawingRectangle(
+                screen.Bounds.Left - bounds.Left,
+                screen.Bounds.Top - bounds.Top,
+                screen.Bounds.Width,
+                screen.Bounds.Height))
+            .ToArray();
+        _transitionSeconds = Math.Clamp(transitionSeconds, 1.0, 30.0);
+        _thread = new Thread(RenderThreadMain)
+        {
+            IsBackground = true,
+            Name = "Wallpaper Matrix attack overlay",
+            Priority = ThreadPriority.BelowNormal
+        };
+        _thread.SetApartmentState(ApartmentState.MTA);
+    }
+
+    public void Start()
+    {
+        _thread.Start();
+        if (!_started.Wait(TimeSpan.FromSeconds(8)))
+        {
+            RequestExit(immediate: true);
+            throw new TimeoutException(
+                "Не удалось запустить поверхность АТАКИ СИСТЕМЫ.");
+        }
+        if (_startupError is not null)
+        {
+            throw new InvalidOperationException(
+                "Не удалось создать поверхность АТАКИ СИСТЕМЫ.",
+                _startupError);
+        }
+    }
+
+    public void RequestExit(bool immediate = false)
+    {
+        Interlocked.Exchange(ref _exitRequested, 1);
+        if (immediate)
+            Interlocked.Exchange(ref _immediateExit, 1);
+        IntPtr window = _window;
+        if (window != IntPtr.Zero)
+        {
+            NativeWindow.PostMessage(
+                window,
+                NativeWindow.WakeMessage,
+                IntPtr.Zero,
+                IntPtr.Zero);
+        }
+    }
+
+    public bool WaitForClose(TimeSpan timeout) =>
+        _closed.Wait(timeout);
+
+    private void RenderThreadMain()
+    {
+        Direct3D11Presenter? presenter = null;
+        bool started = false;
+        try
+        {
+            NativeWindow.EnsureClassRegistered();
+            _window = NativeWindow.Create(_bounds);
+            if (_window == IntPtr.Zero)
+            {
+                throw new InvalidOperationException(
+                    $"CreateWindowEx завершился с кодом "
+                    + $"{Marshal.GetLastWin32Error()}.");
+            }
+            NativeWindow.RegisterOwner(_window, this);
+
+            presenter = Direct3D11Presenter.Create(
+                _window,
+                _bounds.Width,
+                _bounds.Height,
+                _scene);
+            CapturedDesktopFrame desktop = _desktop
+                ?? throw new InvalidOperationException(
+                    "Снимок перехода недоступен.");
+            presenter.SetTransitionBackground(desktop);
+            _desktop = null;
+            presenter.SetTransitionState(1, 1);
+            presenter.Present(
+                _bounds.Width,
+                _bounds.Height,
+                _viewports);
+
+            NativeWindow.ShowAsTopmost(_window, _bounds);
+            _inputArmedAt = Stopwatch.GetTimestamp()
+                + (long)(Stopwatch.Frequency * 0.70);
+            Stopwatch attackClock = Stopwatch.StartNew();
+            Stopwatch? exitClock = null;
+            double exitStartDesktopOpacity = 0;
+            started = true;
+            _started.Set();
+            DiagnosticLog.Write(
+                $"АТАКА СИСТЕМЫ начата: "
+                + $"renderer=0x{_window.ToInt64():X}; "
+                + $"surface={_bounds.Width}x{_bounds.Height}; "
+                + $"transition={_transitionSeconds:0.##}s.");
+
+            while (!_cancellation.IsCancellationRequested)
+            {
+                while (NativeWindow.PeekMessage(
+                    out NativeWindow.NativeMessage message,
+                    IntPtr.Zero,
+                    0,
+                    0,
+                    NativeWindow.RemoveMessage))
+                {
+                    if (message.Message == NativeWindow.QuitMessage)
+                        return;
+                    NativeWindow.TranslateMessage(ref message);
+                    NativeWindow.DispatchMessage(ref message);
+                }
+
+                if (attackClock.Elapsed.TotalSeconds > 0.70
+                    && UserIdleMonitor.IdleTime
+                        < TimeSpan.FromMilliseconds(180))
+                {
+                    RequestExit();
+                }
+
+                bool exiting =
+                    Volatile.Read(ref _exitRequested) != 0;
+                if (exiting
+                    && Volatile.Read(ref _immediateExit) != 0)
+                {
+                    break;
+                }
+
+                double desktopOpacity;
+                double glyphOpacity;
+                if (exiting)
+                {
+                    if (exitClock is null)
+                    {
+                        exitClock = Stopwatch.StartNew();
+                        exitStartDesktopOpacity =
+                            AttackDesktopOpacity(attackClock.Elapsed.TotalSeconds);
+                        try
+                        {
+                            ExitStarted?.Invoke();
+                        }
+                        catch
+                        {
+                            // Exit animation must not depend on its observer.
+                        }
+                    }
+                    double progress = Math.Clamp(
+                        exitClock.Elapsed.TotalSeconds
+                            / ExitTransitionSeconds,
+                        0,
+                        1);
+                    double eased = SmoothStep(progress);
+                    desktopOpacity = exitStartDesktopOpacity
+                        + (1.0 - exitStartDesktopOpacity) * eased;
+                    glyphOpacity = 1.0 - eased;
+                    if (progress >= 1)
+                        break;
+                }
+                else
+                {
+                    desktopOpacity =
+                        AttackDesktopOpacity(attackClock.Elapsed.TotalSeconds);
+                    glyphOpacity = 1;
+                }
+
+                presenter.SetTransitionState(
+                    desktopOpacity,
+                    glyphOpacity);
+                presenter.Present(
+                    _bounds.Width,
+                    _bounds.Height,
+                    _viewports);
+
+                int frameRate = Math.Clamp(
+                    _scene.PresentationFramesPerSecond,
+                    20,
+                    60);
+                _cancellation.Token.WaitHandle.WaitOne(
+                    Math.Max(2, 1000 / frameRate));
+            }
+        }
+        catch (Exception exception)
+        {
+            _startupError = exception;
+            if (!started)
+                _started.Set();
+            DiagnosticLog.Write(
+                started
+                    ? "Поверхность АТАКИ СИСТЕМЫ аварийно остановлена."
+                    : "Не удалось запустить АТАКУ СИСТЕМЫ.",
+                exception);
+        }
+        finally
+        {
+            presenter?.Dispose();
+            IntPtr window = _window;
+            if (window != IntPtr.Zero)
+            {
+                NativeWindow.UnregisterOwner(window);
+                if (NativeWindow.IsWindow(window))
+                    NativeWindow.DestroyWindow(window);
+            }
+            _window = IntPtr.Zero;
+            _started.Set();
+            _closed.Set();
+            try
+            {
+                Closed?.Invoke();
+            }
+            catch
+            {
+                // The native surface must always finish teardown.
+            }
+            DiagnosticLog.Write("АТАКА СИСТЕМЫ завершена.");
+        }
+    }
+
+    private double AttackDesktopOpacity(double elapsedSeconds)
+    {
+        const double revealDelay = 0.35;
+        double progress = Math.Clamp(
+            (elapsedSeconds - revealDelay) / _transitionSeconds,
+            0,
+            1);
+        return 1.0 - SmoothStep(progress);
+    }
+
+    private static double SmoothStep(double value) =>
+        value * value * (3.0 - 2.0 * value);
+
+    internal void OnNativeInput()
+    {
+        if (Stopwatch.GetTimestamp()
+            < Volatile.Read(ref _inputArmedAt))
+        {
+            return;
+        }
+        RequestExit();
+    }
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            return;
+        RequestExit(immediate: true);
+        if (_thread.IsAlive && Thread.CurrentThread != _thread)
+            _thread.Join(TimeSpan.FromSeconds(2));
+        if (_thread.IsAlive)
+        {
+            _cancellation.Cancel();
+            IntPtr window = _window;
+            if (window != IntPtr.Zero)
+            {
+                NativeWindow.PostMessage(
+                    window,
+                    NativeWindow.WakeMessage,
+                    IntPtr.Zero,
+                    IntPtr.Zero);
+            }
+            if (Thread.CurrentThread != _thread)
+                _thread.Join(TimeSpan.FromSeconds(1));
+            if (_thread.IsAlive)
+                return;
+        }
+        _cancellation.Cancel();
+        _closed.Dispose();
+        _started.Dispose();
+        _cancellation.Dispose();
+    }
+
+    private static class NativeWindow
+    {
+        private const string ClassName =
+            "WallpaperMatrix.AttackOverlay.1";
+        private const uint WindowStylePopup = 0x80000000;
+        private const uint ExStyleToolWindow = 0x00000080;
+        private const int ClassAlreadyExists = 1410;
+        private const int BlackBrush = 4;
+        private const int ArrowCursor = 32512;
+        private const int ShowNormal = 5;
+        private const uint NoOwnerZOrder = 0x0200;
+        private const uint ShowWindowFlag = 0x0040;
+        private const uint SetCursorMessage = 0x0020;
+        private const uint MouseMoveMessage = 0x0200;
+        private const uint LeftButtonDownMessage = 0x0201;
+        private const uint RightButtonDownMessage = 0x0204;
+        private const uint MiddleButtonDownMessage = 0x0207;
+        private const uint MouseWheelMessage = 0x020A;
+        private const uint KeyDownMessage = 0x0100;
+        private const uint SystemKeyDownMessage = 0x0104;
+        private const uint CloseMessage = 0x0010;
+        private const uint DestroyMessage = 0x0002;
+        private const uint PaintMessage = 0x000F;
+        private const uint EraseBackgroundMessage = 0x0014;
+        private static readonly IntPtr Topmost = new(-1);
+        private static readonly object RegistrationLock = new();
+        private static readonly WindowProcedure WindowProcedureDelegate =
+            WindowProc;
+        private static readonly ConcurrentDictionary<IntPtr, AttackOverlayWindow>
+            Owners = new();
+        private static bool _registered;
+
+        public const uint WakeMessage = 0x0400 + 73;
+        public const uint RemoveMessage = 0x0001;
+        public const uint QuitMessage = 0x0012;
+
+        public static void EnsureClassRegistered()
+        {
+            lock (RegistrationLock)
+            {
+                if (_registered)
+                    return;
+                WindowClass windowClass = new()
+                {
+                    Size = (uint)Marshal.SizeOf<WindowClass>(),
+                    WindowProcedure = WindowProcedureDelegate,
+                    Instance = GetModuleHandle(null),
+                    Cursor = LoadCursor(
+                        IntPtr.Zero,
+                        new IntPtr(ArrowCursor)),
+                    Background = GetStockObject(BlackBrush),
+                    ClassName = ClassName
+                };
+                ushort atom = RegisterClassEx(ref windowClass);
+                int error = Marshal.GetLastWin32Error();
+                if (atom == 0 && error != ClassAlreadyExists)
+                {
+                    throw new InvalidOperationException(
+                        $"RegisterClassEx завершился с кодом {error}.");
+                }
+                _registered = true;
+            }
+        }
+
+        public static IntPtr Create(DrawingRectangle bounds) =>
+            CreateWindowEx(
+                ExStyleToolWindow,
+                ClassName,
+                "Wallpaper Matrix — АТАКА СИСТЕМЫ",
+                WindowStylePopup,
+                bounds.Left,
+                bounds.Top,
+                bounds.Width,
+                bounds.Height,
+                IntPtr.Zero,
+                IntPtr.Zero,
+                GetModuleHandle(null),
+                IntPtr.Zero);
+
+        public static void ShowAsTopmost(
+            IntPtr window,
+            DrawingRectangle bounds)
+        {
+            ShowWindow(window, ShowNormal);
+            SetWindowPos(
+                window,
+                Topmost,
+                bounds.Left,
+                bounds.Top,
+                bounds.Width,
+                bounds.Height,
+                NoOwnerZOrder | ShowWindowFlag);
+            SetForegroundWindow(window);
+            SetFocus(window);
+            UpdateWindow(window);
+        }
+
+        public static void RegisterOwner(
+            IntPtr window,
+            AttackOverlayWindow owner) =>
+            Owners[window] = owner;
+
+        public static void UnregisterOwner(IntPtr window) =>
+            Owners.TryRemove(window, out _);
+
+        private static IntPtr WindowProc(
+            IntPtr window,
+            uint message,
+            IntPtr wParam,
+            IntPtr lParam)
+        {
+            if (message == SetCursorMessage)
+            {
+                SetCursor(IntPtr.Zero);
+                return new IntPtr(1);
+            }
+
+            if (message is MouseMoveMessage
+                or LeftButtonDownMessage
+                or RightButtonDownMessage
+                or MiddleButtonDownMessage
+                or MouseWheelMessage
+                or KeyDownMessage
+                or SystemKeyDownMessage)
+            {
+                if (Owners.TryGetValue(
+                    window,
+                    out AttackOverlayWindow? owner))
+                {
+                    owner.OnNativeInput();
+                }
+                return IntPtr.Zero;
+            }
+
+            switch (message)
+            {
+                case WakeMessage:
+                    return IntPtr.Zero;
+                case EraseBackgroundMessage:
+                    return new IntPtr(1);
+                case PaintMessage:
+                    BeginPaint(window, out PaintStruct paint);
+                    EndPaint(window, ref paint);
+                    return IntPtr.Zero;
+                case CloseMessage:
+                    if (Owners.TryGetValue(
+                        window,
+                        out AttackOverlayWindow? owner))
+                    {
+                        owner.RequestExit(immediate: true);
+                        return IntPtr.Zero;
+                    }
+                    break;
+                case DestroyMessage:
+                    PostQuitMessage(0);
+                    return IntPtr.Zero;
+            }
+            return DefWindowProc(window, message, wParam, lParam);
+        }
+
+        [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+        private delegate IntPtr WindowProcedure(
+            IntPtr window,
+            uint message,
+            IntPtr wParam,
+            IntPtr lParam);
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct WindowClass
+        {
+            public uint Size;
+            public uint Style;
+            public WindowProcedure WindowProcedure;
+            public int ClassExtra;
+            public int WindowExtra;
+            public IntPtr Instance;
+            public IntPtr Icon;
+            public IntPtr Cursor;
+            public IntPtr Background;
+            [MarshalAs(UnmanagedType.LPWStr)] public string? MenuName;
+            [MarshalAs(UnmanagedType.LPWStr)] public string ClassName;
+            public IntPtr SmallIcon;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct NativeMessage
+        {
+            public IntPtr Window;
+            public uint Message;
+            public IntPtr WParam;
+            public IntPtr LParam;
+            public uint Time;
+            public NativePoint Point;
+            public uint Private;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct NativePoint
+        {
+            public int X;
+            public int Y;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NativeRect
+        {
+            public int Left;
+            public int Top;
+            public int Right;
+            public int Bottom;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct PaintStruct
+        {
+            public IntPtr DeviceContext;
+            public int Erase;
+            public NativeRect PaintRect;
+            public int Restore;
+            public int IncrementalUpdate;
+            public long Reserved1;
+            public long Reserved2;
+            public long Reserved3;
+            public long Reserved4;
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+        private static extern IntPtr GetModuleHandle(string? moduleName);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern ushort RegisterClassEx(
+            ref WindowClass windowClass);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr CreateWindowEx(
+            uint extendedStyle,
+            string className,
+            string windowName,
+            uint style,
+            int x,
+            int y,
+            int width,
+            int height,
+            IntPtr parent,
+            IntPtr menu,
+            IntPtr instance,
+            IntPtr parameter);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr DefWindowProc(
+            IntPtr window,
+            uint message,
+            IntPtr wParam,
+            IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr LoadCursor(
+            IntPtr instance,
+            IntPtr cursorName);
+
+        [DllImport("gdi32.dll")]
+        private static extern IntPtr GetStockObject(int objectIndex);
+
+        [DllImport("user32.dll")]
+        private static extern bool ShowWindow(IntPtr window, int command);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool SetWindowPos(
+            IntPtr window,
+            IntPtr insertAfter,
+            int x,
+            int y,
+            int width,
+            int height,
+            uint flags);
+
+        [DllImport("user32.dll")]
+        private static extern bool SetForegroundWindow(IntPtr window);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr SetFocus(IntPtr window);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr SetCursor(IntPtr cursor);
+
+        [DllImport("user32.dll")]
+        private static extern bool UpdateWindow(IntPtr window);
+
+        [DllImport("user32.dll")]
+        public static extern bool IsWindow(IntPtr window);
+
+        [DllImport("user32.dll")]
+        public static extern bool DestroyWindow(IntPtr window);
+
+        [DllImport("user32.dll")]
+        public static extern bool PostMessage(
+            IntPtr window,
+            uint message,
+            IntPtr wParam,
+            IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        public static extern bool PeekMessage(
+            out NativeMessage message,
+            IntPtr window,
+            uint minMessage,
+            uint maxMessage,
+            uint removeMessage);
+
+        [DllImport("user32.dll")]
+        public static extern bool TranslateMessage(ref NativeMessage message);
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr DispatchMessage(ref NativeMessage message);
+
+        [DllImport("user32.dll")]
+        private static extern void PostQuitMessage(int exitCode);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr BeginPaint(
+            IntPtr window,
+            out PaintStruct paint);
+
+        [DllImport("user32.dll")]
+        private static extern bool EndPaint(
+            IntPtr window,
+            ref PaintStruct paint);
+    }
+}

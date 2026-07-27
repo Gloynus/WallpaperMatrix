@@ -26,14 +26,16 @@ public sealed class ImagePreparationService
         AppSettings settings,
         int targetWidth,
         int targetHeight,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool cacheResult = true)
     {
         PreparationCacheKey key = PreparationCacheKey.Create(
             frame,
             settings,
             targetWidth,
             targetHeight);
-        if (TryGetCached(key, out PreparedImage cached))
+        if (cacheResult
+            && TryGetCached(key, out PreparedImage cached))
             return cached;
 
         cancellationToken.ThrowIfCancellationRequested();
@@ -78,7 +80,8 @@ public sealed class ImagePreparationService
             analysisWidth,
             analysisHeight,
             frame.Path);
-        AddToCache(key, prepared);
+        if (cacheResult)
+            AddToCache(key, prepared);
         return prepared;
     }
 

@@ -39,6 +39,8 @@ public partial class SettingsWindow : Window
     private double _memoryMinValue = 0.30;
     private double _memoryMaxValue = 0.30;
     private double _imageDurationSecondsValue = 30.0;
+    private double _attackIdleMinutesValue = 10.0;
+    private double _attackTransitionSecondsValue = 8.0;
     private List<CurvePoint> _speedCurve = FlowCurveProfiles.DefaultSpeed();
     private List<CurvePoint> _lengthCurve = FlowCurveProfiles.DefaultLength();
     private List<CurvePoint> _signalCurve = FlowCurveProfiles.DefaultSignal();
@@ -76,6 +78,7 @@ public partial class SettingsWindow : Window
     public event Action<AppSettings>? SettingsPreviewed;
     public event Action<AppSettings, string>? ImageRequested;
     public event Action<bool>? PauseRequested;
+    public event Action? AttackRequested;
 
     public SettingsWindow()
     {
@@ -133,6 +136,9 @@ public partial class SettingsWindow : Window
         _memoryMinValue = settings.MemoryDurationMin;
         _memoryMaxValue = settings.MemoryDurationMax;
         _imageDurationSecondsValue = settings.ImageDurationSeconds;
+        _attackIdleMinutesValue = settings.AttackIdleMinutes;
+        _attackTransitionSecondsValue =
+            settings.AttackTransitionSeconds;
         _loading = true;
         SpeedMinSlider.Value = Math.Clamp(
             settings.SpeedMin,
@@ -217,6 +223,16 @@ public partial class SettingsWindow : Window
         _source.ActivePresetId = _selectedPresetId;
         AutostartCheck.IsChecked = settings.StartWithWindows;
         PauseDuringFullscreenAppsCheck.IsChecked = settings.PauseDuringFullscreenApps;
+        AttackSystemEnabledCheck.IsChecked =
+            settings.AttackSystemEnabled;
+        AttackIdleMinutesSlider.Value = Math.Clamp(
+            settings.AttackIdleMinutes,
+            AttackIdleMinutesSlider.Minimum,
+            AttackIdleMinutesSlider.Maximum);
+        AttackTransitionSecondsSlider.Value = Math.Clamp(
+            settings.AttackTransitionSeconds,
+            AttackTransitionSecondsSlider.Minimum,
+            AttackTransitionSecondsSlider.Maximum);
         UpdateCollapsibleSections();
         EnsureFontOption(settings.FontFamily);
         SelectByTag(FontCombo, settings.FontFamily);
@@ -436,6 +452,11 @@ public partial class SettingsWindow : Window
         updated.ActiveImagePlaylistId = _activePlaylistId;
         updated.StartWithWindows = AutostartCheck.IsChecked == true;
         updated.PauseDuringFullscreenApps = PauseDuringFullscreenAppsCheck.IsChecked == true;
+        updated.AttackSystemEnabled =
+            AttackSystemEnabledCheck.IsChecked == true;
+        updated.AttackIdleMinutes = _attackIdleMinutesValue;
+        updated.AttackTransitionSeconds =
+            _attackTransitionSecondsValue;
         updated.ActivePresetId = _selectedPresetId;
         updated.FontFamily = SelectedTag(FontCombo, "MS Gothic");
         updated.ImageFit = SelectedTag(ImageFitCombo, "Uniform");
@@ -1206,6 +1227,15 @@ public partial class SettingsWindow : Window
             : "ПОТОК ВОЗОБНОВЛЁН";
     }
 
+    private void TestAttackButton_Click(
+        object sender,
+        RoutedEventArgs e)
+    {
+        AttackRequested?.Invoke();
+        StatusText.Text =
+            "АТАКА СИСТЕМЫ // ПОДГОТОВКА ПЕРЕХОДА";
+    }
+
     private void ResetParameterButton_Click(object sender, RoutedEventArgs e)
     {
         string key = (sender as FrameworkElement)?.Tag?.ToString() ?? "";
@@ -1304,6 +1334,18 @@ public partial class SettingsWindow : Window
             case "StartWithWindows": AutostartCheck.IsChecked = standard.StartWithWindows; break;
             case "PauseDuringFullscreenApps":
                 PauseDuringFullscreenAppsCheck.IsChecked = standard.PauseDuringFullscreenApps;
+                break;
+            case "AttackIdleMinutes":
+                _attackIdleMinutesValue =
+                    standard.AttackIdleMinutes;
+                AttackIdleMinutesSlider.Value =
+                    standard.AttackIdleMinutes;
+                break;
+            case "AttackTransitionSeconds":
+                _attackTransitionSecondsValue =
+                    standard.AttackTransitionSeconds;
+                AttackTransitionSecondsSlider.Value =
+                    standard.AttackTransitionSeconds;
                 break;
             case "CurrentContour":
                 ResetCurrentContour(standard);
@@ -1562,6 +1604,15 @@ public partial class SettingsWindow : Window
         PauseDuringFullscreenAppsCheck.IsChecked =
             standard.PauseDuringFullscreenApps;
         AutostartCheck.IsChecked = standard.StartWithWindows;
+        AttackSystemEnabledCheck.IsChecked =
+            standard.AttackSystemEnabled;
+        _attackIdleMinutesValue = standard.AttackIdleMinutes;
+        AttackIdleMinutesSlider.Value =
+            standard.AttackIdleMinutes;
+        _attackTransitionSecondsValue =
+            standard.AttackTransitionSeconds;
+        AttackTransitionSecondsSlider.Value =
+            standard.AttackTransitionSeconds;
     }
 
     private void AuthorButton_Click(object sender, RoutedEventArgs e)
@@ -1693,6 +1744,16 @@ public partial class SettingsWindow : Window
             return;
         if (ReferenceEquals(sender, DurationSlider))
             _imageDurationSecondsValue = DurationSlider.Value;
+        else if (ReferenceEquals(sender, AttackIdleMinutesSlider))
+            _attackIdleMinutesValue =
+                AttackIdleMinutesSlider.Value;
+        else if (ReferenceEquals(
+            sender,
+            AttackTransitionSecondsSlider))
+        {
+            _attackTransitionSecondsValue =
+                AttackTransitionSecondsSlider.Value;
+        }
         _loading = true;
         RefreshLabels();
         _loading = false;
@@ -2189,6 +2250,8 @@ public partial class SettingsWindow : Window
         CommitNumericInput(ClockVerticalMarginInput);
         CommitNumericInput(ClockBrightnessInput);
         CommitNumericInput(ClockWeightInput);
+        CommitNumericInput(AttackIdleMinutesInput);
+        CommitNumericInput(AttackTransitionSecondsInput);
     }
 
     private void CommitNumericInput(TextBox input)
@@ -2308,6 +2371,18 @@ public partial class SettingsWindow : Window
         "ClockVerticalMargin" => new NumericInputSpec(ClockVerticalMarginSlider, 1, "0"),
         "ClockBrightness" => new NumericInputSpec(ClockBrightnessSlider, 100, "0.#"),
         "ClockWeight" => new NumericInputSpec(ClockWeightSlider, 100, "0.#"),
+        "AttackIdleMinutes" => new NumericInputSpec(
+            AttackIdleMinutesSlider,
+            1,
+            "0.#",
+            1.0,
+            1440.0),
+        "AttackTransitionSeconds" => new NumericInputSpec(
+            AttackTransitionSecondsSlider,
+            1,
+            "0.#",
+            1.0,
+            30.0),
         _ => null
     };
 
@@ -2321,6 +2396,10 @@ public partial class SettingsWindow : Window
             "MemoryMin" => _memoryMinValue,
             "MemoryMax" => _memoryMaxValue,
             "Duration" => _imageDurationSecondsValue,
+            "AttackIdleMinutes" =>
+                _attackIdleMinutesValue,
+            "AttackTransitionSeconds" =>
+                _attackTransitionSecondsValue,
             _ => spec.Slider.Value
         };
 
@@ -2410,6 +2489,12 @@ public partial class SettingsWindow : Window
                 break;
             case "Duration":
                 _imageDurationSecondsValue = value;
+                break;
+            case "AttackIdleMinutes":
+                _attackIdleMinutesValue = value;
+                break;
+            case "AttackTransitionSeconds":
+                _attackTransitionSecondsValue = value;
                 break;
         }
         spec.Slider.Value = Math.Clamp(
@@ -2549,6 +2634,16 @@ public partial class SettingsWindow : Window
         UpdateNumericInput(ClockVerticalMarginInput, ClockVerticalMarginSlider.Value, "0", force);
         UpdateNumericInput(ClockBrightnessInput, ClockBrightnessSlider.Value * 100, "0.#", force);
         UpdateNumericInput(ClockWeightInput, ClockWeightSlider.Value * 100, "0.#", force);
+        UpdateNumericInput(
+            AttackIdleMinutesInput,
+            _attackIdleMinutesValue,
+            "0.#",
+            force);
+        UpdateNumericInput(
+            AttackTransitionSecondsInput,
+            _attackTransitionSecondsValue,
+            "0.#",
+            force);
         UpdateNumericInput(CalibrationDensityInput, DensitySlider.Value * 100, "0.#", force);
         UpdateNumericInput(CalibrationTrailMinInput, TrailMinSlider.Value * 100, "0.#", force);
         UpdateNumericInput(CalibrationTrailMaxInput, TrailMaxSlider.Value * 100, "0.#", force);

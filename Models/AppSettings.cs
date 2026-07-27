@@ -9,7 +9,7 @@ public sealed class AppSettings
     public const double MinimumImageDurationSeconds = 0.1;
     public const double MaximumImageDurationSeconds = 600.0;
 
-    public int SettingsVersion { get; set; } = 27;
+    public int SettingsVersion { get; set; } = 28;
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public double Speed { get; set; }
     public double SpeedMin { get; set; } = 0.20;
@@ -98,6 +98,9 @@ public sealed class AppSettings
 
     public bool StartWithWindows { get; set; }
     public bool PauseDuringFullscreenApps { get; set; } = true;
+    public bool AttackSystemEnabled { get; set; }
+    public double AttackIdleMinutes { get; set; } = 10.0;
+    public double AttackTransitionSeconds { get; set; } = 8.0;
     public bool WelcomeShown { get; set; }
     public string ActivePresetId { get; set; } = "";
 
@@ -175,6 +178,9 @@ public sealed class AppSettings
         ClockWeight = ClockWeight,
         StartWithWindows = StartWithWindows,
         PauseDuringFullscreenApps = PauseDuringFullscreenApps,
+        AttackSystemEnabled = AttackSystemEnabled,
+        AttackIdleMinutes = AttackIdleMinutes,
+        AttackTransitionSeconds = AttackTransitionSeconds,
         WelcomeShown = WelcomeShown,
         ActivePresetId = ActivePresetId
     };
@@ -440,6 +446,13 @@ public sealed class AppSettings
                 SignalBrightness = SignalColorModel.DefaultBrightness;
             SettingsVersion = 27;
         }
+        if (SettingsVersion < 28)
+        {
+            AttackSystemEnabled = false;
+            AttackIdleMinutes = 10.0;
+            AttackTransitionSeconds = 8.0;
+            SettingsVersion = 28;
+        }
         SpeedMin = Math.Clamp(
             SpeedMin,
             MinimumSpeed,
@@ -568,6 +581,11 @@ public sealed class AppSettings
         ClockVerticalMarginCells = Math.Clamp(ClockVerticalMarginCells, 0, 100);
         ClockBrightness = Math.Clamp(ClockBrightness, 0.5, 1.0);
         ClockWeight = Math.Clamp(ClockWeight, 0.0, 1.0);
+        AttackIdleMinutes = Math.Clamp(AttackIdleMinutes, 1.0, 1440.0);
+        AttackTransitionSeconds = Math.Clamp(
+            AttackTransitionSeconds,
+            1.0,
+            30.0);
         ActivePresetId = ActivePresetId?.Trim() ?? "";
     }
 

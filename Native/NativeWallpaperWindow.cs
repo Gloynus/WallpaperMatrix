@@ -27,11 +27,13 @@ internal sealed class NativeWallpaperWindow : IDisposable
     private AppSettings? _pendingSettings;
     private PreparedImage? _pendingImage;
     private bool _hasPendingImage;
+    private bool _resetPendingImageOverlay;
     private IntPtr _window;
     private SharedMatrixScene? _sharedFrame;
     private Direct3D11Presenter? _direct3DPresenter;
     private Exception? _startupError;
     private int _paused;
+    private int _presentationSuppressed;
     private bool _disposed;
     private bool _synchronizationDisposed;
 
@@ -84,6 +86,16 @@ internal sealed class NativeWallpaperWindow : IDisposable
         }
     }
 
+    public void ResetImageOverlay(PreparedImage? image)
+    {
+        lock (_commandLock)
+        {
+            _pendingImage = image;
+            _hasPendingImage = true;
+            _resetPendingImageOverlay = true;
+        }
+    }
+
     public void SetPaused(bool paused)
     {
         Volatile.Write(ref _paused, paused ? 1 : 0);
@@ -102,6 +114,11 @@ internal sealed class NativeWallpaperWindow : IDisposable
             _renderingEnabled.Set();
         }
     }
+
+    public void SetPresentationSuppressed(bool suppressed) =>
+        Volatile.Write(
+            ref _presentationSuppressed,
+            suppressed ? 1 : 0);
 
     private void RenderThreadMain()
     {
@@ -186,7 +203,8 @@ internal sealed class NativeWallpaperWindow : IDisposable
                 }
                 else
                     waitMilliseconds = 25;
-                PresentLatestFrame(ref presentedVersion);
+                if (Volatile.Read(ref _presentationSuppressed) == 0)
+                    PresentLatestFrame(ref presentedVersion);
                 if (!nonEmptyFrameConfirmed
                     && SharedFrame.InstanceCount > 0
                     && presentedVersion >= 0)
@@ -257,6 +275,7 @@ internal sealed class NativeWallpaperWindow : IDisposable
         AppSettings? settings;
         PreparedImage? image;
         bool hasImage;
+        bool resetImageOverlay;
         lock (_commandLock)
         {
             settings = _pendingSettings;
@@ -264,6 +283,8 @@ internal sealed class NativeWallpaperWindow : IDisposable
             image = _pendingImage;
             hasImage = _hasPendingImage;
             _hasPendingImage = false;
+            resetImageOverlay = _resetPendingImageOverlay;
+            _resetPendingImageOverlay = false;
         }
 
         if (settings is not null)
@@ -283,7 +304,9 @@ internal sealed class NativeWallpaperWindow : IDisposable
                 renderer.UpdateSettings(_lastGoodSettings);
             }
         }
-        if (hasImage)
+        if (resetImageOverlay)
+            renderer.ResetImageOverlay(image);
+        else if (hasImage)
             renderer.SetImage(image);
     }
 

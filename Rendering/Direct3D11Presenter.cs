@@ -8,6 +8,7 @@ using Vortice.Direct3D11;
 using Vortice.DirectComposition;
 using Vortice.DXGI;
 using Vortice.Mathematics;
+using WallpaperMatrix.Models;
 using WallpaperMatrix.Services;
 using DrawingRectangle = System.Drawing.Rectangle;
 
@@ -43,16 +44,24 @@ internal sealed class Direct3D11Presenter : IDisposable
     private readonly ID3D11VertexShader _vertexShader;
     private readonly ID3D11PixelShader _pixelShader;
     private readonly ID3D11InputLayout _inputLayout;
+    private readonly ID3D11VertexShader _transitionVertexShader;
+    private readonly ID3D11PixelShader _transitionPixelShader;
+    private readonly ID3D11InputLayout _transitionInputLayout;
     private readonly ID3D11Buffer _quadBuffer;
     private readonly ID3D11Buffer _constantBuffer;
+    private readonly ID3D11Buffer _transitionConstantBuffer;
     private readonly ID3D11SamplerState _sampler;
     private readonly ID3D11BlendState _blendState;
     private ID3D11Buffer? _instanceBuffer;
     private ID3D11Texture2D? _atlasTexture;
     private ID3D11ShaderResourceView? _atlasView;
+    private ID3D11Texture2D? _transitionTexture;
+    private ID3D11ShaderResourceView? _transitionView;
     private int _instanceCapacity;
     private long _uploadedVersion = -1;
     private long _uploadedAtlasVersion = -1;
+    private float _desktopOpacity;
+    private float _glyphOpacity = 1;
     private bool _disposed;
 
     private Direct3D11Presenter(
@@ -164,6 +173,34 @@ internal sealed class Direct3D11Presenter : IDisposable
         _inputLayout = _device.CreateInputLayout(
             inputElements,
             vertexBytecode.Span);
+        ReadOnlyMemory<byte> transitionVertexBytecode = Compiler.Compile(
+            TransitionShaderSource,
+            "VSMain",
+            "WallpaperMatrix.AttackTransition.hlsl",
+            "vs_4_0",
+            ShaderFlags.OptimizationLevel3);
+        ReadOnlyMemory<byte> transitionPixelBytecode = Compiler.Compile(
+            TransitionShaderSource,
+            "PSMain",
+            "WallpaperMatrix.AttackTransition.hlsl",
+            "ps_4_0",
+            ShaderFlags.OptimizationLevel3);
+        _transitionVertexShader =
+            _device.CreateVertexShader(transitionVertexBytecode.Span);
+        _transitionPixelShader =
+            _device.CreatePixelShader(transitionPixelBytecode.Span);
+        _transitionInputLayout = _device.CreateInputLayout(
+            [
+                new(
+                    "CORNER",
+                    0,
+                    Format.R32G32_Float,
+                    0,
+                    0,
+                    InputClassification.PerVertexData,
+                    0)
+            ],
+            transitionVertexBytecode.Span);
 
         float[] quad =
         [
@@ -177,6 +214,8 @@ internal sealed class Direct3D11Presenter : IDisposable
             BindFlags.VertexBuffer,
             ResourceUsage.Immutable);
         _constantBuffer = _device.CreateConstantBuffer<ShaderConstants>();
+        _transitionConstantBuffer =
+            _device.CreateConstantBuffer<TransitionShaderConstants>();
         _sampler = _device.CreateSamplerState(SamplerDescription.LinearClamp);
         _blendState = _device.CreateBlendState(
             BlendDescription.NonPremultiplied);
@@ -193,6 +232,91 @@ internal sealed class Direct3D11Presenter : IDisposable
         int targetHeight,
         SharedMatrixScene scene) =>
         new(window, targetWidth, targetHeight, scene);
+
+    public static void ValidateShaders()
+    {
+        Compiler.Compile(
+            ShaderSource,
+            "VSMain",
+            "WallpaperMatrix.Direct3D11.hlsl",
+            "vs_4_0",
+            ShaderFlags.OptimizationLevel3);
+        Compiler.Compile(
+            ShaderSource,
+            "PSMain",
+            "WallpaperMatrix.Direct3D11.hlsl",
+            "ps_4_0",
+            ShaderFlags.OptimizationLevel3);
+        Compiler.Compile(
+            TransitionShaderSource,
+            "VSMain",
+            "WallpaperMatrix.AttackTransition.hlsl",
+            "vs_4_0",
+            ShaderFlags.OptimizationLevel3);
+        Compiler.Compile(
+            TransitionShaderSource,
+            "PSMain",
+            "WallpaperMatrix.AttackTransition.hlsl",
+            "ps_4_0",
+            ShaderFlags.OptimizationLevel3);
+    }
+
+    public void SetTransitionBackground(CapturedDesktopFrame frame)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(frame);
+        if (frame.Width <= 0
+            || frame.Height <= 0
+            || frame.Pixels.Length != checked(frame.Width * frame.Height * 4))
+        {
+            throw new ArgumentException(
+                "Снимок перехода имеет неверный размер.",
+                nameof(frame));
+        }
+
+        _context.PSSetShaderResource(
+            0,
+            (ID3D11ShaderResourceView)null!);
+        _transitionView?.Dispose();
+        _transitionTexture?.Dispose();
+
+        Texture2DDescription description = new(
+            Format.B8G8R8A8_UNorm,
+            (uint)frame.Width,
+            (uint)frame.Height,
+            arraySize: 1,
+            mipLevels: 1,
+            BindFlags.ShaderResource,
+            ResourceUsage.Immutable);
+        GCHandle pixels = GCHandle.Alloc(
+            frame.Pixels,
+            GCHandleType.Pinned);
+        try
+        {
+            uint rowPitch = checked((uint)(frame.Width * 4));
+            SubresourceData initialData = new(
+                pixels.AddrOfPinnedObject(),
+                rowPitch,
+                checked(rowPitch * (uint)frame.Height));
+            _transitionTexture = _device.CreateTexture2D(
+                description,
+                initialData);
+            _transitionView =
+                _device.CreateShaderResourceView(_transitionTexture);
+        }
+        finally
+        {
+            pixels.Free();
+        }
+    }
+
+    public void SetTransitionState(
+        double desktopOpacity,
+        double glyphOpacity)
+    {
+        _desktopOpacity = (float)Math.Clamp(desktopOpacity, 0.0, 1.0);
+        _glyphOpacity = (float)Math.Clamp(glyphOpacity, 0.0, 1.0);
+    }
 
     public bool Present(
         int targetWidth,
@@ -337,6 +461,11 @@ internal sealed class Direct3D11Presenter : IDisposable
                 (float)parameters.BackgroundBlue,
                 1));
 
+        DrawTransitionBackground(
+            targetWidth,
+            targetHeight,
+            parameters);
+
         _context.IASetInputLayout(_inputLayout);
         _context.IASetPrimitiveTopology(PrimitiveTopology.TriangleStrip);
         if (_instanceBuffer is not null)
@@ -382,7 +511,8 @@ internal sealed class Direct3D11Presenter : IDisposable
                 parameters,
                 atlas.GlyphCount,
                 aspectScaleX,
-                aspectScaleY);
+                aspectScaleY,
+                _glyphOpacity);
             UpdateConstantBuffer(constants);
             if (_scene.InstanceCount > 0 && _instanceBuffer is not null)
             {
@@ -394,6 +524,38 @@ internal sealed class Direct3D11Presenter : IDisposable
             }
         }
 
+        _context.PSSetShaderResource(
+            0,
+            (ID3D11ShaderResourceView)null!);
+    }
+
+    private void DrawTransitionBackground(
+        int targetWidth,
+        int targetHeight,
+        MatrixRenderParameters parameters)
+    {
+        if (_transitionView is null || _desktopOpacity <= 0.0001f)
+            return;
+
+        _context.RSSetViewport(
+            new Viewport(
+                0,
+                0,
+                targetWidth,
+                targetHeight,
+                0,
+                1));
+        _context.IASetInputLayout(_transitionInputLayout);
+        _context.IASetPrimitiveTopology(PrimitiveTopology.TriangleStrip);
+        _context.IASetVertexBuffer(0, _quadBuffer, QuadStride);
+        _context.VSSetShader(_transitionVertexShader);
+        _context.PSSetShader(_transitionPixelShader);
+        _context.PSSetConstantBuffer(0, _transitionConstantBuffer);
+        _context.PSSetShaderResource(0, _transitionView);
+        _context.PSSetSampler(0, _sampler);
+        UpdateTransitionConstantBuffer(
+            new TransitionShaderConstants(parameters, _desktopOpacity));
+        _context.Draw(4, 0);
         _context.PSSetShaderResource(
             0,
             (ID3D11ShaderResourceView)null!);
@@ -419,6 +581,27 @@ internal sealed class Direct3D11Presenter : IDisposable
         }
     }
 
+    private void UpdateTransitionConstantBuffer(
+        TransitionShaderConstants constants)
+    {
+        MappedSubresource mapped = _context.Map(
+            _transitionConstantBuffer,
+            0,
+            MapMode.WriteDiscard,
+            Vortice.Direct3D11.MapFlags.None);
+        try
+        {
+            Marshal.StructureToPtr(
+                constants,
+                mapped.DataPointer,
+                false);
+        }
+        finally
+        {
+            _context.Unmap(_transitionConstantBuffer, 0);
+        }
+    }
+
     public void Dispose()
     {
         if (_disposed)
@@ -437,11 +620,17 @@ internal sealed class Direct3D11Presenter : IDisposable
 
         _atlasView?.Dispose();
         _atlasTexture?.Dispose();
+        _transitionView?.Dispose();
+        _transitionTexture?.Dispose();
         _instanceBuffer?.Dispose();
         _blendState.Dispose();
         _sampler.Dispose();
+        _transitionConstantBuffer.Dispose();
         _constantBuffer.Dispose();
         _quadBuffer.Dispose();
+        _transitionInputLayout.Dispose();
+        _transitionPixelShader.Dispose();
+        _transitionVertexShader.Dispose();
         _inputLayout.Dispose();
         _pixelShader.Dispose();
         _vertexShader.Dispose();
@@ -476,12 +665,15 @@ internal sealed class Direct3D11Presenter : IDisposable
         private readonly float _padding0;
         public readonly Vector3 BackgroundColor;
         private readonly float _padding1;
+        public readonly float GlyphOpacity;
+        private readonly Vector3 _padding2;
 
         public ShaderConstants(
             MatrixRenderParameters parameters,
             int glyphCount,
             float aspectScaleX,
-            float aspectScaleY)
+            float aspectScaleY,
+            float glyphOpacity)
         {
             SourceSize = new(
                 parameters.SourceWidth,
@@ -502,6 +694,26 @@ internal sealed class Direct3D11Presenter : IDisposable
                 (float)parameters.BackgroundGreen,
                 (float)parameters.BackgroundBlue);
             _padding1 = 0;
+            GlyphOpacity = glyphOpacity;
+            _padding2 = Vector3.Zero;
+        }
+    }
+
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    private readonly struct TransitionShaderConstants
+    {
+        public readonly Vector3 BackgroundColor;
+        public readonly float DesktopOpacity;
+
+        public TransitionShaderConstants(
+            MatrixRenderParameters parameters,
+            float desktopOpacity)
+        {
+            BackgroundColor = new(
+                (float)parameters.BackgroundRed,
+                (float)parameters.BackgroundGreen,
+                (float)parameters.BackgroundBlue);
+            DesktopOpacity = desktopOpacity;
         }
     }
 
@@ -517,6 +729,8 @@ internal sealed class Direct3D11Presenter : IDisposable
             float Padding0;
             float3 BackgroundColor;
             float Padding1;
+            float GlyphOpacity;
+            float3 Padding2;
         };
 
         Texture2D<float> Atlas : register(t0);
@@ -698,7 +912,51 @@ internal sealed class Direct3D11Presenter : IDisposable
                 center / max(center + glowAmount, 0.0001);
             return float4(
                 lerp(glowColor, body, bodyShare),
-                alpha);
+                alpha * GlyphOpacity);
+        }
+        """;
+
+    private const string TransitionShaderSource = """
+        cbuffer TransitionConstants : register(b0)
+        {
+            float3 BackgroundColor;
+            float DesktopOpacity;
+        };
+
+        Texture2D<float4> Desktop : register(t0);
+        SamplerState DesktopSampler : register(s0);
+
+        struct VertexInput
+        {
+            float2 Corner : CORNER;
+        };
+
+        struct PixelInput
+        {
+            float4 Position : SV_POSITION;
+            float2 TexturePosition : TEXCOORD0;
+        };
+
+        PixelInput VSMain(VertexInput input)
+        {
+            PixelInput output;
+            output.Position = float4(
+                input.Corner.x * 2.0 - 1.0,
+                1.0 - input.Corner.y * 2.0,
+                0.0,
+                1.0);
+            output.TexturePosition = input.Corner;
+            return output;
+        }
+
+        float4 PSMain(PixelInput input) : SV_TARGET
+        {
+            float3 desktop = Desktop.Sample(
+                DesktopSampler,
+                input.TexturePosition).rgb;
+            return float4(
+                lerp(BackgroundColor, desktop, DesktopOpacity),
+                1.0);
         }
         """;
 }

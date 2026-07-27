@@ -10,7 +10,7 @@ public static class OperatorDefaults
         ImagePlaylist playlist = new();
         AppSettings settings = new()
         {
-            SettingsVersion = 27,
+            SettingsVersion = 28,
             SpeedMin = 0.01,
             SpeedMax = 0.20,
             Density = 0.80,
@@ -76,6 +76,9 @@ public static class OperatorDefaults
             ClockWeight = 1.0,
             StartWithWindows = false,
             PauseDuringFullscreenApps = true,
+            AttackSystemEnabled = false,
+            AttackIdleMinutes = 10,
+            AttackTransitionSeconds = 8,
             WelcomeShown = false
         };
         settings.Normalize();
