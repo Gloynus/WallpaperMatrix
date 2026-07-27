@@ -1,0 +1,15 @@
+bin/
+obj/
+dist/
+dist-*/
+artifacts/
+Diagnostics/
+OperatorData/
+.vs/
+.idea/
+.vscode/
+.agents/
+*.user
+*.suo
+*.log
+*.zip

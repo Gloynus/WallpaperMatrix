@@ -1,0 +1,49 @@
+<Window x:Class="WallpaperMatrix.Views.PresetNameDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Новый пресет"
+        Icon="/Assets/WallpaperMatrix.ico"
+        Width="420" Height="180"
+        WindowStartupLocation="CenterOwner"
+        WindowStyle="None" ResizeMode="NoResize"
+        ShowInTaskbar="False" Background="#020806"
+        KeyDown="Window_KeyDown">
+    <Border BorderBrush="#238A4B" BorderThickness="1" Background="#06140C">
+        <Grid Margin="18">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+
+            <StackPanel>
+                <TextBlock Text="НОВЫЙ ОПЕРАТОРСКИЙ ПРЕСЕТ"
+                           Foreground="#9DFFBD" FontFamily="Consolas"
+                           FontWeight="Bold" FontSize="13"/>
+                <TextBlock Text="Введите имя профиля. Дата изменения будет добавлена к имени файла автоматически."
+                           Foreground="#79A888" Margin="0,5,0,0"
+                           TextWrapping="Wrap"/>
+            </StackPanel>
+
+            <TextBox x:Name="PresetNameInput" Grid.Row="1"
+                     Margin="0,14,0,0" Height="32" MaxLength="80"
+                     Padding="8,5" Background="#020A05"
+                     Foreground="#D8FFE5" CaretBrush="#9DFFBD"
+                     BorderBrush="#238A4B" BorderThickness="1"
+                     FontFamily="Consolas"/>
+
+            <StackPanel Grid.Row="2" Orientation="Horizontal"
+                        HorizontalAlignment="Right"
+                        VerticalAlignment="Bottom" Margin="0,12,0,0">
+                <Button Content="ОТМЕНА" Width="92" Height="30"
+                        Margin="0,0,8,0" Click="CancelButton_Click"
+                        Background="#071B10" Foreground="#BDECCA"
+                        BorderBrush="#164B2C"/>
+                <Button Content="СОЗДАТЬ" Width="104" Height="30"
+                        Click="CreateButton_Click"
+                        Background="#0E6B32" Foreground="White"
+                        BorderBrush="#35D774"/>
+            </StackPanel>
+        </Grid>
+    </Border>
+</Window>
