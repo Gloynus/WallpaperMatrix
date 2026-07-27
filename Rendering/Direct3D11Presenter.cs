@@ -21,7 +21,7 @@ namespace WallpaperMatrix.Rendering;
 /// </summary>
 internal sealed class Direct3D11Presenter : IDisposable
 {
-    private const uint InstanceStride = 28;
+    private const uint InstanceStride = 32;
     private const uint QuadStride = 8;
     private const int BackBufferCount = 2;
 
@@ -62,6 +62,9 @@ internal sealed class Direct3D11Presenter : IDisposable
     private long _uploadedAtlasVersion = -1;
     private float _desktopOpacity;
     private float _glyphOpacity = 1;
+    private float _attackStreamCutoff;
+    private float _attackFilterEnabled;
+    private float _screenshotInfluence;
     private bool _disposed;
 
     private Direct3D11Presenter(
@@ -164,7 +167,7 @@ internal sealed class Direct3D11Presenter : IDisposable
             new(
                 "DETAIL",
                 0,
-                Format.R32G32B32_Float,
+                Format.R32G32B32A32_Float,
                 16,
                 1,
                 InputClassification.PerInstanceData,
@@ -235,6 +238,18 @@ internal sealed class Direct3D11Presenter : IDisposable
 
     public static void ValidateShaders()
     {
+        if (Unsafe.SizeOf<GlyphInstance>() != InstanceStride)
+        {
+            throw new InvalidOperationException(
+                $"Формат экземпляра символа имеет размер "
+                + $"{Unsafe.SizeOf<GlyphInstance>()}, ожидалось "
+                + $"{InstanceStride}.");
+        }
+        if (Unsafe.SizeOf<ShaderConstants>() % 16 != 0)
+        {
+            throw new InvalidOperationException(
+                "Буфер констант D3D11 не выровнен по 16 байтам.");
+        }
         Compiler.Compile(
             ShaderSource,
             "VSMain",
@@ -316,6 +331,16 @@ internal sealed class Direct3D11Presenter : IDisposable
     {
         _desktopOpacity = (float)Math.Clamp(desktopOpacity, 0.0, 1.0);
         _glyphOpacity = (float)Math.Clamp(glyphOpacity, 0.0, 1.0);
+    }
+
+    public void SetAttackGlyphState(
+        long existingStreamCutoff,
+        double screenshotInfluence)
+    {
+        _attackStreamCutoff = existingStreamCutoff;
+        _attackFilterEnabled = 1;
+        _screenshotInfluence =
+            (float)Math.Clamp(screenshotInfluence, 0.0, 1.0);
     }
 
     public bool Present(
@@ -481,6 +506,7 @@ internal sealed class Direct3D11Presenter : IDisposable
         _context.PSSetShader(_pixelShader);
         _context.PSSetConstantBuffer(0, _constantBuffer);
         _context.PSSetShaderResource(0, _atlasView);
+        _context.PSSetShaderResource(1, _transitionView!);
         _context.PSSetSampler(0, _sampler);
 
         double sourceAspect =
@@ -512,7 +538,12 @@ internal sealed class Direct3D11Presenter : IDisposable
                 atlas.GlyphCount,
                 aspectScaleX,
                 aspectScaleY,
-                _glyphOpacity);
+                targetWidth,
+                targetHeight,
+                _glyphOpacity,
+                _attackStreamCutoff,
+                _attackFilterEnabled,
+                _screenshotInfluence);
             UpdateConstantBuffer(constants);
             if (_scene.InstanceCount > 0 && _instanceBuffer is not null)
             {
@@ -526,6 +557,9 @@ internal sealed class Direct3D11Presenter : IDisposable
 
         _context.PSSetShaderResource(
             0,
+            (ID3D11ShaderResourceView)null!);
+        _context.PSSetShaderResource(
+            1,
             (ID3D11ShaderResourceView)null!);
     }
 
@@ -659,21 +693,30 @@ internal sealed class Direct3D11Presenter : IDisposable
         public readonly Vector2 SourceSize;
         public readonly Vector2 CellSize;
         public readonly Vector2 AspectScale;
+        public readonly Vector2 TargetSize;
         public readonly float GlyphCount;
         public readonly float HeadBrightness;
-        public readonly Vector3 SignalColor;
-        private readonly float _padding0;
-        public readonly Vector3 BackgroundColor;
-        private readonly float _padding1;
         public readonly float GlyphOpacity;
-        private readonly Vector3 _padding2;
+        public readonly float AttackFilterEnabled;
+        public readonly float AttackStreamCutoff;
+        public readonly float ScreenshotInfluence;
+        private readonly Vector2 _padding0;
+        public readonly Vector3 SignalColor;
+        private readonly float _padding1;
+        public readonly Vector3 BackgroundColor;
+        private readonly float _padding2;
 
         public ShaderConstants(
             MatrixRenderParameters parameters,
             int glyphCount,
             float aspectScaleX,
             float aspectScaleY,
-            float glyphOpacity)
+            int targetWidth,
+            int targetHeight,
+            float glyphOpacity,
+            float attackStreamCutoff,
+            float attackFilterEnabled,
+            float screenshotInfluence)
         {
             SourceSize = new(
                 parameters.SourceWidth,
@@ -682,20 +725,24 @@ internal sealed class Direct3D11Presenter : IDisposable
                 parameters.CellWidth,
                 parameters.CellHeight);
             AspectScale = new(aspectScaleX, aspectScaleY);
+            TargetSize = new(targetWidth, targetHeight);
             GlyphCount = glyphCount;
             HeadBrightness = (float)parameters.HeadBrightness;
+            GlyphOpacity = glyphOpacity;
+            AttackFilterEnabled = attackFilterEnabled;
+            AttackStreamCutoff = attackStreamCutoff;
+            ScreenshotInfluence = screenshotInfluence;
+            _padding0 = Vector2.Zero;
             SignalColor = new(
                 (float)parameters.SignalRed,
                 (float)parameters.SignalGreen,
                 (float)parameters.SignalBlue);
-            _padding0 = 0;
+            _padding1 = 0;
             BackgroundColor = new(
                 (float)parameters.BackgroundRed,
                 (float)parameters.BackgroundGreen,
                 (float)parameters.BackgroundBlue);
-            _padding1 = 0;
-            GlyphOpacity = glyphOpacity;
-            _padding2 = Vector3.Zero;
+            _padding2 = 0;
         }
     }
 
@@ -723,24 +770,29 @@ internal sealed class Direct3D11Presenter : IDisposable
             float2 SourceSize;
             float2 CellSize;
             float2 AspectScale;
+            float2 TargetSize;
             float GlyphCount;
             float HeadBrightness;
-            float3 SignalColor;
-            float Padding0;
-            float3 BackgroundColor;
-            float Padding1;
             float GlyphOpacity;
-            float3 Padding2;
+            float AttackFilterEnabled;
+            float AttackStreamCutoff;
+            float ScreenshotInfluence;
+            float2 Padding0;
+            float3 SignalColor;
+            float Padding1;
+            float3 BackgroundColor;
+            float Padding2;
         };
 
         Texture2D<float> Atlas : register(t0);
+        Texture2D<float4> AttackDesktop : register(t1);
         SamplerState AtlasSampler : register(s0);
 
         struct VertexInput
         {
             float2 Corner : CORNER;
             float4 CellGlyphLevel : CELL;
-            float3 Detail : DETAIL;
+            float4 Detail : DETAIL;
         };
 
         struct PixelInput
@@ -752,6 +804,7 @@ internal sealed class Direct3D11Presenter : IDisposable
             float Style : TEXCOORD3;
             float Emphasis : TEXCOORD4;
             float Glow : TEXCOORD5;
+            nointerpolation float StreamId : TEXCOORD6;
         };
 
         PixelInput VSMain(VertexInput input)
@@ -787,6 +840,7 @@ internal sealed class Direct3D11Presenter : IDisposable
             output.Style = input.Detail.x;
             output.Emphasis = input.Detail.y;
             output.Glow = input.Detail.z;
+            output.StreamId = input.Detail.w;
             return output;
         }
 
@@ -832,6 +886,9 @@ internal sealed class Direct3D11Presenter : IDisposable
 
         float4 PSMain(PixelInput input) : SV_TARGET
         {
+            if (AttackFilterEnabled > 0.5)
+                clip(input.StreamId - AttackStreamCutoff - 0.5);
+
             float center = SampleGlyph(input, input.Local);
             float2 nearStep = 1.35 / CellSize;
             float2 wideStep = 3.60 / CellSize;
@@ -874,13 +931,34 @@ internal sealed class Direct3D11Presenter : IDisposable
                 input.Local - float2(0.0, wideStep.y));
             wideLight *= 0.25;
 
+            float level = input.Level;
+            if (ScreenshotInfluence > 0.001)
+            {
+                float2 screenPosition = saturate(
+                    input.Position.xy / max(TargetSize, 1.0));
+                float3 desktop = AttackDesktop.Sample(
+                    AtlasSampler,
+                    screenPosition).rgb;
+                float luminance = dot(
+                    desktop,
+                    float3(0.2126, 0.7152, 0.0722));
+                float imageLevel =
+                    pow(smoothstep(0.035, 0.92, luminance), 0.82);
+                float encodedLevel =
+                    max(level * 0.18, imageLevel);
+                level = lerp(
+                    level,
+                    encodedLevel,
+                    ScreenshotInfluence);
+            }
+
             float isImage = step(2.5, input.Style);
             float softLight = nearLight * 0.68 + wideLight * 0.32;
             float glowAmount =
                 pow(clamp(softLight, 0.0, 1.0), 0.72)
                 * (1.0 - center)
                 * clamp(input.Glow, 0.0, 2.0)
-                * clamp(input.Level, 0.0, 1.0)
+                * clamp(level, 0.0, 1.0)
                 * (1.0 - isImage)
                 * 1.65;
             glowAmount = min(glowAmount, 1.35);
@@ -890,7 +968,7 @@ internal sealed class Direct3D11Presenter : IDisposable
             float3 body = lerp(
                 BackgroundColor,
                 SignalColor,
-                pow(clamp(input.Level, 0.0, 1.0), 1.12));
+                pow(clamp(level, 0.0, 1.0), 1.12));
             float3 headSignal = min(
                 float3(1.0, 1.0, 1.0),
                 lerp(SignalColor, float3(1.0, 1.0, 1.0), 0.24)

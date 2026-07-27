@@ -28,6 +28,7 @@ internal static class DesktopCaptureService
             bounds.Width,
             bounds.Height,
             PixelFormat.Format32bppArgb);
+        _ = DwmFlush();
         using (Graphics graphics = Graphics.FromImage(bitmap))
         {
             IntPtr destinationDc = graphics.GetHdc();
@@ -138,4 +139,7 @@ internal static class DesktopCaptureService
         int sourceX,
         int sourceY,
         uint rasterOperation);
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmFlush();
 }

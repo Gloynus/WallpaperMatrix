@@ -360,7 +360,8 @@ internal sealed class MatrixSceneRenderer : IDisposable
                     rainLevel / (double)PaletteLevels,
                     _rainStyles[index],
                     _rainEmphasis[index],
-                    _rainGlow[index]);
+                    _rainGlow[index],
+                    _trailStreamIds[index]);
                 continue;
             }
 
@@ -374,7 +375,8 @@ internal sealed class MatrixSceneRenderer : IDisposable
                 _imageLevels[index] / (double)PaletteLevels,
                 _imageStyles[index],
                 emphasis: 0,
-                glow: 0);
+                glow: 0,
+                streamId: 0);
         }
 
         SignalRgb signal = SignalColorModel.ToRgb(
@@ -397,7 +399,12 @@ internal sealed class MatrixSceneRenderer : IDisposable
             background.Blue);
         lock (_scene.SyncRoot)
         {
-            _scene.Publish(_instances, count, _pendingAtlas, parameters);
+            _scene.Publish(
+                _instances,
+                count,
+                _pendingAtlas,
+                parameters,
+                _nextStreamId);
             _pendingAtlas = null;
         }
     }
@@ -410,7 +417,8 @@ internal sealed class MatrixSceneRenderer : IDisposable
         double level,
         float style,
         double emphasis,
-        double glow)
+        double glow,
+        long streamId)
     {
         if ((uint)count >= (uint)_instances.Length)
             return;
@@ -421,7 +429,8 @@ internal sealed class MatrixSceneRenderer : IDisposable
             level,
             style,
             emphasis,
-            glow);
+            glow,
+            streamId);
     }
 
     private void AdvanceStreams(double dt)

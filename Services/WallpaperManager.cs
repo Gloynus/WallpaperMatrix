@@ -29,6 +29,8 @@ public sealed class WallpaperManager : IDisposable
     private AttackOverlayWindow? _attackOverlay;
     private int _attackStartGeneration;
     private bool _attackStartPending;
+    private bool _attackDesktopImageActive;
+    private bool _attackPlaylistSwitchRequested;
     private DateTime _attackRetryAfterUtc;
     private bool _manualPaused;
     private bool _fullscreenPaused;
@@ -111,10 +113,7 @@ public sealed class WallpaperManager : IDisposable
 
         _settings = settings.Copy();
         UpdateImageTimerInterval();
-        _output.UpdateSettings(
-            IsAttackActive
-                ? CreateAttackSettings(_settings)
-                : _settings);
+        _output.UpdateSettings(_settings);
         _fullscreenMonitor.SetEnabled(_settings.PauseDuringFullscreenApps);
         if (!_settings.AttackSystemEnabled && IsAttackActive)
             StopAttack();
@@ -191,6 +190,8 @@ public sealed class WallpaperManager : IDisposable
     {
         if (!_settings.ImageMode || Volatile.Read(ref _pendingImageLoads) > 0)
             return;
+        if (IsAttackActive && _attackDesktopImageActive)
+            _attackPlaylistSwitchRequested = true;
         QueueImageLoad(ImageLoadKind.Next);
     }
 
@@ -437,8 +438,19 @@ public sealed class WallpaperManager : IDisposable
         _currentImage = image;
         if (resetCycle)
             _imageStartedAt = DateTime.UtcNow;
-        if (!IsAttackActive)
-            _output.SetImage(_currentImage);
+        _output.SetImage(_currentImage);
+        if (IsAttackActive
+            && _attackDesktopImageActive
+            && _attackPlaylistSwitchRequested
+            && image is not null)
+        {
+            _attackDesktopImageActive = false;
+            _attackPlaylistSwitchRequested = false;
+            _attackOverlay?.ReleaseDesktopImage();
+            DiagnosticLog.Write(
+                "АТАКА СИСТЕМЫ: временный образ интерфейса "
+                + "плавно заменяется образом плейлиста.");
+        }
     }
 
     private static bool IsEnabledImagePath(AppSettings settings, string path)
@@ -474,7 +486,7 @@ public sealed class WallpaperManager : IDisposable
     private void OnImageTimer(object? sender, EventArgs e)
     {
         if (IsPaused
-            || IsAttackActive
+            || _attackStartPending
             || !_settings.ImageMode
             || _currentImage is null
             || Volatile.Read(ref _pendingImageLoads) > 0)
@@ -744,7 +756,6 @@ public sealed class WallpaperManager : IDisposable
         {
             AttackStartData startData = await Task.Run(
                 () => PrepareAttackStartData(
-                    settings,
                     cancellation.Token),
                 cancellation.Token);
             cancellation.Token.ThrowIfCancellationRequested();
@@ -780,12 +791,11 @@ public sealed class WallpaperManager : IDisposable
             overlay.Closed += OnAttackOverlayClosed;
             overlay.ExitStarted += OnAttackExitStarted;
             _attackOverlay = overlay;
+            _attackDesktopImageActive = true;
+            _attackPlaylistSwitchRequested = false;
+            _imageStartedAt = DateTime.UtcNow;
             overlay.Start();
             _output.SetPresentationSuppressed(true);
-            AppSettings attackSettings =
-                CreateAttackSettings(_settings);
-            _output.UpdateSettings(attackSettings);
-            _output.ResetImageOverlay(startData.Prepared);
             SetRuntimeStatus(
                 "АТАКА СИСТЕМЫ // ИНТЕРФЕЙС ПЕРЕХВАЧЕН ПОТОКОМ",
                 isError: false);
@@ -815,49 +825,14 @@ public sealed class WallpaperManager : IDisposable
         }
     }
 
-    private AttackStartData PrepareAttackStartData(
-        AppSettings settings,
+    private static AttackStartData PrepareAttackStartData(
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         CapturedDesktopFrame desktop =
             DesktopCaptureService.CaptureVirtualDesktop();
         cancellationToken.ThrowIfCancellationRequested();
-        System.Windows.Forms.Screen primary =
-            System.Windows.Forms.Screen.AllScreens
-                .FirstOrDefault(screen => screen.Primary)
-            ?? System.Windows.Forms.Screen.AllScreens[0];
-        CapturedDesktopFrame analysisFrame =
-            desktop.Crop(primary.Bounds);
-        AppSettings attackSettings =
-            CreateAttackSettings(settings);
-        PreparedImage prepared = _imagePreparation.Prepare(
-            analysisFrame.ToImageSourceFrame(),
-            attackSettings,
-            _output.TargetWidth,
-            _output.TargetHeight,
-            cancellationToken,
-            cacheResult: false);
-        return new AttackStartData(desktop, prepared);
-    }
-
-    private static AppSettings CreateAttackSettings(
-        AppSettings source)
-    {
-        AppSettings settings = source.Copy();
-        settings.ImageMode = true;
-        settings.ImageDurationSeconds =
-            AppSettings.MaximumImageDurationSeconds;
-        settings.ImageStability = 1.0;
-        settings.ImageResistance = Math.Max(
-            settings.ImageResistance,
-            0.80);
-        settings.ImageBrightness = Math.Max(
-            settings.ImageBrightness,
-            0.90);
-        settings.ImageFit = "Fill";
-        settings.Normalize();
-        return settings;
+        return new AttackStartData(desktop);
     }
 
     private void OnAttackOverlayClosed()
@@ -897,6 +872,8 @@ public sealed class WallpaperManager : IDisposable
         overlay.Closed -= OnAttackOverlayClosed;
         overlay.ExitStarted -= OnAttackExitStarted;
         _attackOverlay = null;
+        _attackDesktopImageActive = false;
+        _attackPlaylistSwitchRequested = false;
         overlay.Dispose();
         if (_disposed || !_output.IsRunning)
             return;
@@ -917,6 +894,8 @@ public sealed class WallpaperManager : IDisposable
         pending?.Dispose();
 
         AttackOverlayWindow? overlay = _attackOverlay;
+        _attackDesktopImageActive = false;
+        _attackPlaylistSwitchRequested = false;
         if (overlay is not null)
         {
             overlay.Closed -= OnAttackOverlayClosed;
@@ -1003,6 +982,5 @@ public sealed class WallpaperManager : IDisposable
         PreparedImage Prepared);
 
     private sealed record AttackStartData(
-        CapturedDesktopFrame Desktop,
-        PreparedImage Prepared);
+        CapturedDesktopFrame Desktop);
 }

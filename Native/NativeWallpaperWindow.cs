@@ -130,7 +130,6 @@ internal sealed class NativeWallpaperWindow : IDisposable
             if (_window == IntPtr.Zero)
                 throw new InvalidOperationException($"CreateWindowEx завершился с кодом {Marshal.GetLastWin32Error()}.");
 
-            NativeWindow.TryExcludeFromCapture(_window);
             if (!DesktopHost.Attach(_window, _bounds))
             {
                 throw new InvalidOperationException(
@@ -385,7 +384,6 @@ internal sealed class NativeWallpaperWindow : IDisposable
         private const uint SetIconMessage = 0x0080;
         private const int IconSmall = 0;
         private const int IconBig = 1;
-        private const uint DisplayAffinityExcludeFromCapture = 0x00000011;
         private static readonly object RegistrationLock = new();
         private static readonly WindowProcedure WindowProcedureDelegate = WindowProc;
         private static IntPtr _largeIcon;
@@ -490,18 +488,6 @@ internal sealed class NativeWallpaperWindow : IDisposable
                 + $"small=0x{_smallIcon.ToInt64():X}.");
             // The class and its windows retain these HICON handles for the
             // lifetime of the process, so they are intentionally not destroyed.
-        }
-
-        public static void TryExcludeFromCapture(IntPtr window)
-        {
-            Marshal.SetLastPInvokeError(0);
-            bool excluded = SetWindowDisplayAffinity(
-                window,
-                DisplayAffinityExcludeFromCapture);
-            DiagnosticLog.Write(
-                $"Защита окна от захвата: renderer=0x{window.ToInt64():X}; "
-                + $"excluded={excluded}; "
-                + $"Win32={(excluded ? 0 : Marshal.GetLastPInvokeError())}.");
         }
 
         private static IntPtr WindowProc(IntPtr window, uint message, IntPtr wParam, IntPtr lParam)
@@ -638,11 +624,6 @@ internal sealed class NativeWallpaperWindow : IDisposable
 
         [DllImport("user32.dll", SetLastError = true)]
         public static extern bool ShowWindowAsync(IntPtr window, int command);
-
-        [DllImport("user32.dll", SetLastError = true)]
-        private static extern bool SetWindowDisplayAffinity(
-            IntPtr window,
-            uint affinity);
 
         [DllImport("user32.dll")]
         public static extern bool UpdateWindow(IntPtr window);

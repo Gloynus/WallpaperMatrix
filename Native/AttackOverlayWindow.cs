@@ -21,6 +21,7 @@ internal sealed class AttackOverlayWindow : IDisposable
     private CapturedDesktopFrame? _desktop;
     private readonly IReadOnlyList<DrawingRectangle> _viewports;
     private readonly double _transitionSeconds;
+    private readonly long _existingStreamCutoff;
     private readonly Thread _thread;
     private readonly CancellationTokenSource _cancellation = new();
     private readonly ManualResetEventSlim _started = new(false);
@@ -29,6 +30,7 @@ internal sealed class AttackOverlayWindow : IDisposable
     private Exception? _startupError;
     private int _exitRequested;
     private int _immediateExit;
+    private int _releaseDesktopImage;
     private int _disposed;
     private long _inputArmedAt;
 
@@ -52,6 +54,8 @@ internal sealed class AttackOverlayWindow : IDisposable
                 screen.Bounds.Height))
             .ToArray();
         _transitionSeconds = Math.Clamp(transitionSeconds, 1.0, 30.0);
+        lock (_scene.SyncRoot)
+            _existingStreamCutoff = _scene.LatestStreamId;
         _thread = new Thread(RenderThreadMain)
         {
             IsBackground = true,
@@ -97,6 +101,20 @@ internal sealed class AttackOverlayWindow : IDisposable
     public bool WaitForClose(TimeSpan timeout) =>
         _closed.Wait(timeout);
 
+    public void ReleaseDesktopImage()
+    {
+        Interlocked.Exchange(ref _releaseDesktopImage, 1);
+        IntPtr window = _window;
+        if (window != IntPtr.Zero)
+        {
+            NativeWindow.PostMessage(
+                window,
+                NativeWindow.WakeMessage,
+                IntPtr.Zero,
+                IntPtr.Zero);
+        }
+    }
+
     private void RenderThreadMain()
     {
         Direct3D11Presenter? presenter = null;
@@ -124,6 +142,9 @@ internal sealed class AttackOverlayWindow : IDisposable
             presenter.SetTransitionBackground(desktop);
             _desktop = null;
             presenter.SetTransitionState(1, 1);
+            presenter.SetAttackGlyphState(
+                _existingStreamCutoff,
+                screenshotInfluence: 1);
             presenter.Present(
                 _bounds.Width,
                 _bounds.Height,
@@ -134,6 +155,8 @@ internal sealed class AttackOverlayWindow : IDisposable
                 + (long)(Stopwatch.Frequency * 0.70);
             Stopwatch attackClock = Stopwatch.StartNew();
             Stopwatch? exitClock = null;
+            Stopwatch? desktopImageReleaseClock = null;
+            double nextTopmostCheckSeconds = 0.5;
             double exitStartDesktopOpacity = 0;
             started = true;
             _started.Set();
@@ -141,6 +164,8 @@ internal sealed class AttackOverlayWindow : IDisposable
                 $"АТАКА СИСТЕМЫ начата: "
                 + $"renderer=0x{_window.ToInt64():X}; "
                 + $"surface={_bounds.Width}x{_bounds.Height}; "
+                + $"viewports={_viewports.Count}; "
+                + $"streamCutoff={_existingStreamCutoff}; "
                 + $"transition={_transitionSeconds:0.##}s.");
 
             while (!_cancellation.IsCancellationRequested)
@@ -158,12 +183,35 @@ internal sealed class AttackOverlayWindow : IDisposable
                     NativeWindow.DispatchMessage(ref message);
                 }
 
-                if (attackClock.Elapsed.TotalSeconds > 0.70
+                double elapsedSeconds =
+                    attackClock.Elapsed.TotalSeconds;
+                if (elapsedSeconds > 0.70
                     && UserIdleMonitor.IdleTime
-                        < TimeSpan.FromMilliseconds(180))
+                        < TimeSpan.FromMilliseconds(350))
                 {
                     RequestExit();
                 }
+                if (elapsedSeconds >= nextTopmostCheckSeconds)
+                {
+                    NativeWindow.KeepTopmost(_window);
+                    nextTopmostCheckSeconds =
+                        elapsedSeconds + 0.5;
+                }
+
+                if (desktopImageReleaseClock is null
+                    && Volatile.Read(ref _releaseDesktopImage) != 0)
+                {
+                    desktopImageReleaseClock =
+                        Stopwatch.StartNew();
+                }
+                double screenshotInfluence =
+                    desktopImageReleaseClock is null
+                        ? 1.0
+                        : 1.0 - SmoothStep(Math.Clamp(
+                            desktopImageReleaseClock.Elapsed.TotalSeconds
+                                / 1.25,
+                            0,
+                            1));
 
                 bool exiting =
                     Volatile.Read(ref _exitRequested) != 0;
@@ -213,6 +261,9 @@ internal sealed class AttackOverlayWindow : IDisposable
                 presenter.SetTransitionState(
                     desktopOpacity,
                     glyphOpacity);
+                presenter.SetAttackGlyphState(
+                    _existingStreamCutoff,
+                    screenshotInfluence);
                 presenter.Present(
                     _bounds.Width,
                     _bounds.Height,
@@ -282,7 +333,11 @@ internal sealed class AttackOverlayWindow : IDisposable
         {
             return;
         }
-        RequestExit();
+        if (UserIdleMonitor.IdleTime
+            < TimeSpan.FromMilliseconds(500))
+        {
+            RequestExit();
+        }
     }
 
     public void Dispose()
@@ -327,6 +382,9 @@ internal sealed class AttackOverlayWindow : IDisposable
         private const int ShowNormal = 5;
         private const uint NoOwnerZOrder = 0x0200;
         private const uint ShowWindowFlag = 0x0040;
+        private const uint NoSize = 0x0001;
+        private const uint NoMove = 0x0002;
+        private const uint NoActivate = 0x0010;
         private const uint SetCursorMessage = 0x0020;
         private const uint MouseMoveMessage = 0x0200;
         private const uint LeftButtonDownMessage = 0x0201;
@@ -410,6 +468,23 @@ internal sealed class AttackOverlayWindow : IDisposable
             SetForegroundWindow(window);
             SetFocus(window);
             UpdateWindow(window);
+        }
+
+        public static void KeepTopmost(IntPtr window)
+        {
+            if (window == IntPtr.Zero || !IsWindow(window))
+                return;
+            SetWindowPos(
+                window,
+                Topmost,
+                0,
+                0,
+                0,
+                0,
+                NoSize
+                    | NoMove
+                    | NoActivate
+                    | NoOwnerZOrder);
         }
 
         public static void RegisterOwner(

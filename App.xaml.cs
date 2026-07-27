@@ -19,6 +19,7 @@ public partial class App : System.Windows.Application
     private WallpaperManager? _wallpaperManager;
     private TrayService? _tray;
     private SettingsWindow? _settingsWindow;
+    private DispatcherTimer? _attackValidationTimer;
     private bool _isExiting;
     private bool _handlingDispatcherFailure;
 
@@ -72,6 +73,13 @@ public partial class App : System.Windows.Application
             string.Equals(argument, "--show-settings", StringComparison.OrdinalIgnoreCase));
         bool forceAttack = e.Args.Any(argument =>
             string.Equals(argument, "--attack-now", StringComparison.OrdinalIgnoreCase));
+        bool validateAttackOverlay = e.Args.Any(argument =>
+            string.Equals(
+                argument,
+                "--validate-attack-overlay",
+                StringComparison.OrdinalIgnoreCase));
+        startInBackground |= validateAttackOverlay;
+        forceAttack |= validateAttackOverlay;
 
         _singleInstanceMutex = new Mutex(true, "Local\\WallpaperMatrix.SingleInstance", out bool isFirstInstance);
         if (!isFirstInstance)
@@ -142,6 +150,22 @@ public partial class App : System.Windows.Application
         }
         if (forceAttack)
             Dispatcher.BeginInvoke(StartAttack);
+        if (validateAttackOverlay)
+        {
+            _attackValidationTimer = new DispatcherTimer(
+                DispatcherPriority.Background)
+            {
+                Interval = TimeSpan.FromSeconds(12)
+            };
+            _attackValidationTimer.Tick += (_, _) =>
+            {
+                _attackValidationTimer?.Stop();
+                DiagnosticLog.Write(
+                    "Самопроверка жизненного цикла АТАКИ СИСТЕМЫ завершена.");
+                ExitApplication();
+            };
+            _attackValidationTimer.Start();
+        }
 
     }
 
@@ -292,6 +316,7 @@ public partial class App : System.Windows.Application
             return;
 
         _isExiting = true;
+        _attackValidationTimer?.Stop();
         _settingsWindow?.ForceClose();
         _tray?.Dispose();
         if (_wallpaperManager is not null)

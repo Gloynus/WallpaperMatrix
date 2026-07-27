@@ -10,6 +10,7 @@ internal sealed class SharedMatrixScene : IDisposable
 {
     private long _version;
     private long _atlasVersion;
+    private long _latestStreamId;
     private int _presentationFramesPerSecond = 24;
     private bool _disposed;
 
@@ -18,6 +19,7 @@ internal sealed class SharedMatrixScene : IDisposable
     public int Height { get; }
     public long Version => Interlocked.Read(ref _version);
     public long AtlasVersion => Interlocked.Read(ref _atlasVersion);
+    public long LatestStreamId => Interlocked.Read(ref _latestStreamId);
     public int PresentationFramesPerSecond => Volatile.Read(ref _presentationFramesPerSecond);
     public GlyphInstance[] Instances { get; private set; } = [];
     public int InstanceCount { get; private set; }
@@ -34,11 +36,13 @@ internal sealed class SharedMatrixScene : IDisposable
         GlyphInstance[] instances,
         int instanceCount,
         GlyphAtlasData? atlas,
-        MatrixRenderParameters parameters)
+        MatrixRenderParameters parameters,
+        long latestStreamId)
     {
         Instances = instances;
         InstanceCount = Math.Clamp(instanceCount, 0, instances.Length);
         Parameters = parameters;
+        Interlocked.Exchange(ref _latestStreamId, latestStreamId);
         if (atlas is not null)
         {
             Atlas = atlas;
@@ -71,6 +75,7 @@ internal struct GlyphInstance
     public float Style;
     public float Emphasis;
     public float Glow;
+    public float StreamId;
 
     public GlyphInstance(
         int column,
@@ -79,7 +84,8 @@ internal struct GlyphInstance
         double level,
         float style,
         double emphasis,
-        double glow)
+        double glow,
+        long streamId)
     {
         Column = column;
         Row = row;
@@ -88,6 +94,7 @@ internal struct GlyphInstance
         Style = style;
         Emphasis = (float)emphasis;
         Glow = (float)glow;
+        StreamId = streamId;
     }
 }
 
