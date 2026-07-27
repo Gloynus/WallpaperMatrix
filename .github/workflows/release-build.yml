@@ -1,0 +1,112 @@
+name: Release build
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build portable Windows x64 artifact
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out the tagged source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Install .NET SDK
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
+        with:
+          dotnet-version: "9.0.x"
+
+      - name: Read and validate release metadata
+        id: metadata
+        shell: pwsh
+        run: |
+          [xml]$project = Get-Content -LiteralPath "WallpaperMatrix.csproj" -Raw
+          $version = [string]$project.Project.PropertyGroup.Version
+          if ([string]::IsNullOrWhiteSpace($version)) {
+            throw "WallpaperMatrix.csproj does not contain Version."
+          }
+          if ($env:GITHUB_REF_TYPE -eq "tag" -and
+              $env:GITHUB_REF_NAME -ne "v$version") {
+            throw "Tag $env:GITHUB_REF_NAME does not match project version $version."
+          }
+
+          $packageName = "WallpaperMatrix-$version-portable-win-x64"
+          $packageDirectory = Join-Path $env:RUNNER_TEMP $packageName
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "package_name=$packageName" >> $env:GITHUB_OUTPUT
+          "package_directory=$packageDirectory" >> $env:GITHUB_OUTPUT
+
+      - name: Publish clean self-contained application
+        shell: pwsh
+        run: |
+          .\build.ps1 `
+            -Configuration Release `
+            -OutputPath "${{ steps.metadata.outputs.package_directory }}"
+
+      - name: Verify binary metadata
+        shell: pwsh
+        run: |
+          $exe = Get-Item -LiteralPath (
+            Join-Path "${{ steps.metadata.outputs.package_directory }}" `
+              "WallpaperMatrix.exe")
+          if ($exe.VersionInfo.ProductName -ne "Wallpaper Matrix") {
+            throw "Unexpected product name: $($exe.VersionInfo.ProductName)"
+          }
+          if ($exe.VersionInfo.ProductVersion -ne
+              "${{ steps.metadata.outputs.version }}") {
+            throw "Unexpected product version: $($exe.VersionInfo.ProductVersion)"
+          }
+          $signature = Get-AuthenticodeSignature -LiteralPath $exe.FullName
+          "Build signature status before signing service: $($signature.Status)"
+
+      - name: Create portable archive and checksum
+        id: package
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP (
+            "${{ steps.metadata.outputs.package_name }}.zip")
+          Compress-Archive `
+            -LiteralPath "${{ steps.metadata.outputs.package_directory }}" `
+            -DestinationPath $archive `
+            -CompressionLevel Optimal
+          $checksum = "$archive.sha256"
+          $hash = Get-FileHash -LiteralPath $archive -Algorithm SHA256
+          "$($hash.Hash)  $([IO.Path]::GetFileName($archive))" |
+            Set-Content -LiteralPath $checksum -Encoding ascii
+          "archive=$archive" >> $env:GITHUB_OUTPUT
+          "checksum=$checksum" >> $env:GITHUB_OUTPUT
+
+      - name: Upload unsigned release candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ steps.metadata.outputs.package_name }}
+          path: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.checksum }}
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Publish tagged GitHub release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$env:GITHUB_REF_NAME" `
+            "${{ steps.package.outputs.archive }}" `
+            "${{ steps.package.outputs.checksum }}" `
+            --verify-tag `
+            --latest `
+            --title "Wallpaper Matrix ${{ steps.metadata.outputs.version }}" `
+            --notes-file "RELEASE_NOTES-${{ steps.metadata.outputs.version }}.md"

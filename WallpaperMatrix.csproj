@@ -10,12 +10,22 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <AssemblyName>WallpaperMatrix</AssemblyName>
+    <AssemblyTitle>Wallpaper Matrix</AssemblyTitle>
     <RootNamespace>WallpaperMatrix</RootNamespace>
-    <Version>3.3.5</Version>
-    <AssemblyVersion>3.3.5.0</AssemblyVersion>
-    <FileVersion>3.3.5.0</FileVersion>
-    <InformationalVersion>3.3.5</InformationalVersion>
+    <Product>Wallpaper Matrix</Product>
+    <Description>Animated Matrix-style desktop wallpaper for Windows 10 and 11.</Description>
+    <Company>Gloynus Aleos</Company>
+    <Authors>Gloynus Aleos</Authors>
+    <Copyright>Copyright © 2026 Gloynus Aleos</Copyright>
+    <RepositoryUrl>https://github.com/Gloynus/WallpaperMatrix</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageLicenseExpression>GPL-3.0-only</PackageLicenseExpression>
+    <Version>3.3.6</Version>
+    <AssemblyVersion>3.3.6.0</AssemblyVersion>
+    <FileVersion>3.3.6.0</FileVersion>
+    <InformationalVersion>3.3.6</InformationalVersion>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\WallpaperMatrix.ico</ApplicationIcon>
   </PropertyGroup>
