@@ -874,7 +874,7 @@ public sealed class WallpaperManager : IDisposable
             return;
         _output.SetPresentationSuppressed(false);
         _output.UpdateSettings(_settings);
-        _output.ResetImageOverlay(
+        _output.SetImage(
             _settings.ImageMode ? _currentImage : null);
     }
 
@@ -924,7 +924,7 @@ public sealed class WallpaperManager : IDisposable
         {
             _output.SetPresentationSuppressed(false);
             _output.UpdateSettings(_settings);
-            _output.ResetImageOverlay(
+            _output.SetImage(
                 _settings.ImageMode ? _currentImage : null);
         }
     }

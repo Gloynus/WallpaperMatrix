@@ -30,11 +30,7 @@ internal static class DesktopHost
     private static IntPtr _raisedDesktopRenderer;
     private static long _nextRaisedDesktopMaintenanceTick;
     private const uint SpawnWorkerMessage = 0x052C;
-    private const uint SettingChangeMessage = 0x001A;
     private const uint SmtoAbortIfHung = 0x0002;
-    private const uint SpiSetDesktopWallpaper = 0x0014;
-    private const uint SpiGetDesktopWallpaper = 0x0073;
-    private const uint SpifSendChange = 0x0002;
     private const int ShowHide = 0;
     private const int ShowNoActivate = 4;
     private const int GwlStyle = -16;
@@ -519,13 +515,6 @@ internal static class DesktopHost
     {
         lock (HostLock)
         {
-            const uint redrawFlags = 0x0001  // RDW_INVALIDATE
-                | 0x0004                    // RDW_ERASE
-                | 0x0080                    // RDW_ALLCHILDREN
-                | 0x0100                    // RDW_UPDATENOW
-                | 0x0200                    // RDW_ERASENOW
-                | 0x0400;                   // RDW_FRAME
-
             if (restoreSystemWallpaper)
             {
                 RestoreIconViewBackground();
@@ -556,15 +545,9 @@ internal static class DesktopHost
                 }
                 else
                 {
-                    SendNotifyMessageString(
-                        new IntPtr(0xFFFF),
-                        SettingChangeMessage,
-                        new IntPtr(SpiSetDesktopWallpaper),
-                        "Control Panel\\Desktop");
-
-                    RedrawExplorerSurfaces(redrawFlags);
-                    ReapplyCurrentSystemWallpaper();
-                    RedrawExplorerSurfaces(redrawFlags);
+                    DiagnosticLog.Write(
+                        "Фоновый слой Explorer скрыт; системная поверхность "
+                        + "остаётся нетронутой и проявляется композитором DWM.");
                 }
 
                 _cachedHost = IntPtr.Zero;
@@ -572,14 +555,17 @@ internal static class DesktopHost
                 _raisedDesktopDefView = IntPtr.Zero;
                 _raisedDesktopWorker = IntPtr.Zero;
                 _raisedDesktopRenderer = IntPtr.Zero;
+                DiagnosticLog.Write(
+                    "Рабочий стол освобождён без синхронной перерисовки "
+                    + "Explorer и повторной установки системных обоев.");
                 return;
             }
 
-            RedrawExplorerSurfaces(redrawFlags);
+            InvalidateExplorerSurfaces();
         }
     }
 
-    private static void RedrawExplorerSurfaces(uint redrawFlags)
+    private static void InvalidateExplorerSurfaces()
     {
         EnumWindows((topLevel, _) =>
         {
@@ -587,64 +573,19 @@ internal static class DesktopHost
             if (className is "WorkerW" or "Progman")
             {
                 InvalidateRect(topLevel, IntPtr.Zero, erase: true);
-                RedrawWindow(topLevel, IntPtr.Zero, IntPtr.Zero, redrawFlags);
 
                 IntPtr shellView = FindDescendantWindow(
                     topLevel,
                     "SHELLDLL_DefView");
                 if (shellView != IntPtr.Zero)
-                {
                     InvalidateRect(shellView, IntPtr.Zero, erase: true);
-                    RedrawWindow(
-                        shellView,
-                        IntPtr.Zero,
-                        IntPtr.Zero,
-                        redrawFlags);
-                }
             }
             return true;
         }, IntPtr.Zero);
 
         IntPtr desktop = GetDesktopWindow();
         if (desktop != IntPtr.Zero)
-        {
             InvalidateRect(desktop, IntPtr.Zero, erase: true);
-            RedrawWindow(desktop, IntPtr.Zero, IntPtr.Zero, redrawFlags);
-        }
-    }
-
-    private static void ReapplyCurrentSystemWallpaper()
-    {
-        StringBuilder wallpaperPath = new(32768);
-        if (!SystemParametersInfoGet(
-                SpiGetDesktopWallpaper,
-                (uint)wallpaperPath.Capacity,
-                wallpaperPath,
-                0))
-        {
-            DiagnosticLog.Write(
-                $"Не удалось запросить текущие системные обои; "
-                + $"Win32={Marshal.GetLastPInvokeError()}.");
-            return;
-        }
-
-        string path = wallpaperPath.ToString();
-        if (string.IsNullOrWhiteSpace(path))
-        {
-            DiagnosticLog.Write(
-                "Системные обои используют сплошной цвет или управляются оболочкой; "
-                + "выполнена принудительная перерисовка Explorer.");
-            return;
-        }
-
-        bool reapplied = SystemParametersInfoSet(
-            SpiSetDesktopWallpaper,
-            0,
-            path,
-            SpifSendChange);
-        DiagnosticLog.Write(
-            $"Восстановление системных обоев: reapplied={reapplied}; "
-            + $"path={path}; Win32={(reapplied ? 0 : Marshal.GetLastPInvokeError())}.");
     }
 
     private static IntPtr FindDesktopHost(out DesktopSurfaceKind surfaceKind)
@@ -1604,24 +1545,4 @@ internal static class DesktopHost
         uint timeout,
         out IntPtr result);
 
-    [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "SendNotifyMessageW", SetLastError = true)]
-    private static extern bool SendNotifyMessageString(
-        IntPtr hwnd,
-        uint message,
-        IntPtr wParam,
-        string lParam);
-
-    [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "SystemParametersInfoW", SetLastError = true)]
-    private static extern bool SystemParametersInfoGet(
-        uint action,
-        uint parameter,
-        StringBuilder value,
-        uint flags);
-
-    [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "SystemParametersInfoW", SetLastError = true)]
-    private static extern bool SystemParametersInfoSet(
-        uint action,
-        uint parameter,
-        string value,
-        uint flags);
 }

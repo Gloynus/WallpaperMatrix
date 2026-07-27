@@ -185,18 +185,12 @@ internal sealed class WallpaperOutputSession : IDisposable
     private void CloseWindows(bool restoreSystemWallpaper)
     {
         if (_windows.Count == 0)
-        {
-            if (restoreSystemWallpaper)
-            {
-                DesktopHost.HideWallpaperSurface();
-                DesktopHost.RefreshDesktopSurface(restoreSystemWallpaper: true);
-            }
             return;
-        }
 
-        CloseWindowList(_windows, restoreSystemWallpaper);
+        NativeWallpaperWindow[] closingWindows = _windows.ToArray();
         _windows.Clear();
         _screenCount = 0;
+        CloseWindowList(closingWindows, restoreSystemWallpaper);
     }
 
     private static void CloseWindowList(
@@ -212,9 +206,19 @@ internal sealed class WallpaperOutputSession : IDisposable
         for (int index = windows.Count - 1; index >= 0; index--)
             windows[index].RequestClose();
 
-        TimeSpan closeBudget = restoreSystemWallpaper
-            ? TimeSpan.FromMilliseconds(900)
-            : TimeSpan.FromSeconds(3);
+        if (restoreSystemWallpaper)
+        {
+            // The visible surface is already gone. Explorer restoration and
+            // D3D teardown must not hold the WPF dispatcher: Stop should feel
+            // instantaneous even when a video driver takes time to release a
+            // swap chain.
+            DesktopHost.RefreshDesktopSurface(
+                restoreSystemWallpaper: true);
+            CompleteCloseInBackground(windows);
+            return;
+        }
+
+        TimeSpan closeBudget = TimeSpan.FromSeconds(3);
         Stopwatch closeClock = Stopwatch.StartNew();
         for (int index = windows.Count - 1; index >= 0; index--)
         {
@@ -223,6 +227,37 @@ internal sealed class WallpaperOutputSession : IDisposable
                 remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero);
         }
         DesktopHost.RefreshDesktopSurface(restoreSystemWallpaper);
+    }
+
+    private static void CompleteCloseInBackground(
+        IReadOnlyList<NativeWallpaperWindow> windows)
+    {
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                Stopwatch closeClock = Stopwatch.StartNew();
+                TimeSpan closeBudget = TimeSpan.FromSeconds(8);
+                for (int index = windows.Count - 1; index >= 0; index--)
+                {
+                    TimeSpan remaining =
+                        closeBudget - closeClock.Elapsed;
+                    windows[index].WaitForClose(
+                        remaining > TimeSpan.Zero
+                            ? remaining
+                            : TimeSpan.Zero);
+                }
+                DiagnosticLog.Write(
+                    $"Фоновое освобождение вывода завершено за "
+                    + $"{closeClock.Elapsed.TotalMilliseconds:0} мс.");
+            }
+            catch (Exception exception)
+            {
+                DiagnosticLog.Write(
+                    "Фоновое освобождение вывода завершилось ошибкой.",
+                    exception);
+            }
+        });
     }
 
     public void Dispose()

@@ -52,6 +52,7 @@ internal sealed class Direct3D11Presenter : IDisposable
     private readonly ID3D11Buffer _transitionConstantBuffer;
     private readonly ID3D11SamplerState _sampler;
     private readonly ID3D11BlendState _blendState;
+    private readonly bool _transparentSurface;
     private ID3D11Buffer? _instanceBuffer;
     private ID3D11Texture2D? _atlasTexture;
     private ID3D11ShaderResourceView? _atlasView;
@@ -73,7 +74,8 @@ internal sealed class Direct3D11Presenter : IDisposable
         IntPtr window,
         int targetWidth,
         int targetHeight,
-        SharedMatrixScene scene)
+        SharedMatrixScene scene,
+        bool transparentSurface)
     {
         if (window == IntPtr.Zero)
             throw new ArgumentException("Окно вывода D3D11 не создано.", nameof(window));
@@ -81,6 +83,7 @@ internal sealed class Direct3D11Presenter : IDisposable
             throw new ArgumentOutOfRangeException(nameof(targetWidth));
 
         _scene = scene;
+        _transparentSurface = transparentSurface;
 
         Result deviceResult = D3D11.D3D11CreateDevice(
             null,
@@ -112,7 +115,9 @@ internal sealed class Direct3D11Presenter : IDisposable
             BackBufferCount,
             Scaling.Stretch,
             SwapEffect.FlipSequential,
-            AlphaMode.Ignore,
+            transparentSurface
+                ? AlphaMode.Premultiplied
+                : AlphaMode.Ignore,
             SwapChainFlags.None);
         _swapChain = factory.CreateSwapChainForComposition(
             _device,
@@ -228,15 +233,22 @@ internal sealed class Direct3D11Presenter : IDisposable
         DiagnosticLog.Write(
             $"Direct3D 11 создан: featureLevel={FormatFeatureLevel(featureLevel)}; "
             + $"DirectComposition=True; swapChain={targetWidth}x{targetHeight}; "
-            + $"buffers={BackBufferCount}; alpha=Ignore.");
+            + $"buffers={BackBufferCount}; "
+            + $"alpha={(transparentSurface ? "Premultiplied" : "Ignore")}.");
     }
 
     public static Direct3D11Presenter Create(
         IntPtr window,
         int targetWidth,
         int targetHeight,
-        SharedMatrixScene scene) =>
-        new(window, targetWidth, targetHeight, scene);
+        SharedMatrixScene scene,
+        bool transparentSurface = false) =>
+        new(
+            window,
+            targetWidth,
+            targetHeight,
+            scene,
+            transparentSurface);
 
     public static void ValidateShaders()
     {
@@ -487,28 +499,20 @@ internal sealed class Direct3D11Presenter : IDisposable
         _context.OMSetBlendState(_blendState);
         _context.ClearRenderTargetView(
             _renderTargetView,
-            new Color4(
-                (float)parameters.BackgroundRed,
-                (float)parameters.BackgroundGreen,
-                (float)parameters.BackgroundBlue,
-                1));
+            _transparentSurface
+                ? new Color4(0, 0, 0, 0)
+                : new Color4(
+                    (float)parameters.BackgroundRed,
+                    (float)parameters.BackgroundGreen,
+                    (float)parameters.BackgroundBlue,
+                    1));
 
         if (_attackModeEnabled > 0.5f)
         {
-            // The old streams remain alive below the captured desktop. As the
-            // capture fades, they are revealed in their current state instead
-            // of exposing a frozen copy of the wallpaper.
-            DrawGlyphPass(
-                targetWidth,
-                targetHeight,
-                viewports,
-                parameters,
-                atlas,
-                streamFilterMode: 2,
-                screenshotInfluence: 0,
-                solidBody: 0,
-                haloFactor: 1);
-            DrawTransitionBackground(
+            // The attack surface starts fully transparent. The real desktop,
+            // including its already-running wallpaper, remains visible below
+            // it while this veil grows to the configured background colour.
+            DrawTakeoverVeil(
                 targetWidth,
                 targetHeight,
                 parameters);
@@ -525,10 +529,6 @@ internal sealed class Direct3D11Presenter : IDisposable
         }
         else
         {
-            DrawTransitionBackground(
-                targetWidth,
-                targetHeight,
-                parameters);
             DrawGlyphPass(
                 targetWidth,
                 targetHeight,
@@ -608,7 +608,11 @@ internal sealed class Direct3D11Presenter : IDisposable
                 solidBody,
                 haloFactor,
                 _screenshotStreamCutoff,
-                _screenshotLimitEnabled);
+                _screenshotLimitEnabled,
+                viewport.Left,
+                viewport.Top,
+                viewport.Width,
+                viewport.Height);
             UpdateConstantBuffer(constants);
             _context.DrawInstanced(
                 4,
@@ -625,12 +629,13 @@ internal sealed class Direct3D11Presenter : IDisposable
             (ID3D11ShaderResourceView)null!);
     }
 
-    private void DrawTransitionBackground(
+    private void DrawTakeoverVeil(
         int targetWidth,
         int targetHeight,
         MatrixRenderParameters parameters)
     {
-        if (_transitionView is null || _desktopOpacity <= 0.0001f)
+        float veilOpacity = 1.0f - _desktopOpacity;
+        if (veilOpacity <= 0.0001f)
             return;
 
         _context.RSSetViewport(
@@ -647,14 +652,9 @@ internal sealed class Direct3D11Presenter : IDisposable
         _context.VSSetShader(_transitionVertexShader);
         _context.PSSetShader(_transitionPixelShader);
         _context.PSSetConstantBuffer(0, _transitionConstantBuffer);
-        _context.PSSetShaderResource(0, _transitionView);
-        _context.PSSetSampler(0, _sampler);
         UpdateTransitionConstantBuffer(
-            new TransitionShaderConstants(parameters, _desktopOpacity));
+            new TransitionShaderConstants(parameters, veilOpacity));
         _context.Draw(4, 0);
-        _context.PSSetShaderResource(
-            0,
-            (ID3D11ShaderResourceView)null!);
     }
 
     private void UpdateConstantBuffer(ShaderConstants constants)
@@ -766,6 +766,8 @@ internal sealed class Direct3D11Presenter : IDisposable
         public readonly float HaloFactor;
         public readonly float ScreenshotStreamCutoff;
         public readonly float ScreenshotLimitEnabled;
+        public readonly Vector2 ViewportOrigin;
+        public readonly Vector2 ViewportSize;
         private readonly Vector2 _padding0;
         public readonly Vector3 SignalColor;
         private readonly float _padding1;
@@ -786,7 +788,11 @@ internal sealed class Direct3D11Presenter : IDisposable
             float solidBody,
             float haloFactor,
             float screenshotStreamCutoff,
-            float screenshotLimitEnabled)
+            float screenshotLimitEnabled,
+            float viewportLeft,
+            float viewportTop,
+            float viewportWidth,
+            float viewportHeight)
         {
             SourceSize = new(
                 parameters.SourceWidth,
@@ -806,6 +812,8 @@ internal sealed class Direct3D11Presenter : IDisposable
             HaloFactor = haloFactor;
             ScreenshotStreamCutoff = screenshotStreamCutoff;
             ScreenshotLimitEnabled = screenshotLimitEnabled;
+            ViewportOrigin = new(viewportLeft, viewportTop);
+            ViewportSize = new(viewportWidth, viewportHeight);
             _padding0 = Vector2.Zero;
             SignalColor = new(
                 (float)parameters.SignalRed,
@@ -855,6 +863,8 @@ internal sealed class Direct3D11Presenter : IDisposable
             float HaloFactor;
             float ScreenshotStreamCutoff;
             float ScreenshotLimitEnabled;
+            float2 ViewportOrigin;
+            float2 ViewportSize;
             float2 Padding0;
             float3 SignalColor;
             float Padding1;
@@ -883,6 +893,7 @@ internal sealed class Direct3D11Presenter : IDisposable
             float Emphasis : TEXCOORD4;
             float Glow : TEXCOORD5;
             nointerpolation float StreamId : TEXCOORD6;
+            nointerpolation float2 ScreenshotPosition : TEXCOORD7;
         };
 
         PixelInput VSMain(VertexInput input)
@@ -919,6 +930,18 @@ internal sealed class Direct3D11Presenter : IDisposable
             output.Emphasis = input.Detail.y;
             output.Glow = input.Detail.z;
             output.StreamId = input.Detail.w;
+            float2 centerPixel =
+                (input.CellGlyphLevel.xy + 0.5) * CellSize;
+            float2 centerClip = float2(
+                centerPixel.x / SourceSize.x * 2.0 - 1.0,
+                1.0 - centerPixel.y / SourceSize.y * 2.0)
+                * AspectScale;
+            float2 centerInViewport = float2(
+                centerClip.x * 0.5 + 0.5,
+                0.5 - centerClip.y * 0.5);
+            output.ScreenshotPosition =
+                (ViewportOrigin + centerInViewport * ViewportSize)
+                / max(TargetSize, 1.0);
             return output;
         }
 
@@ -1028,7 +1051,7 @@ internal sealed class Direct3D11Presenter : IDisposable
             if (screenshotMask > 0.001)
             {
                 float2 screenPosition = saturate(
-                    input.Position.xy / max(TargetSize, 1.0));
+                    input.ScreenshotPosition);
                 float3 desktop = AttackDesktop.Sample(
                     AtlasSampler,
                     screenPosition).rgb;
@@ -1058,7 +1081,7 @@ internal sealed class Direct3D11Presenter : IDisposable
             glowAmount = min(glowAmount, 1.35);
             float bodyAlpha = lerp(
                 center,
-                smoothstep(0.035, 0.30, center),
+                step(0.075, center),
                 SolidBody);
             float alpha = clamp(
                 max(bodyAlpha, glowAmount),
@@ -1087,8 +1110,12 @@ internal sealed class Direct3D11Presenter : IDisposable
                 headBody,
                 clamp(input.Emphasis, 0.0, 1.0));
             float3 glowColor = SignalColor * 0.88;
-            float bodyShare =
+            float blendedBodyShare =
                 bodyAlpha / max(bodyAlpha + glowAmount, 0.0001);
+            float bodyShare = lerp(
+                blendedBodyShare,
+                bodyAlpha,
+                SolidBody);
             return float4(
                 lerp(glowColor, body, bodyShare),
                 alpha * GlyphOpacity);
@@ -1102,9 +1129,6 @@ internal sealed class Direct3D11Presenter : IDisposable
             float DesktopOpacity;
         };
 
-        Texture2D<float4> Desktop : register(t0);
-        SamplerState DesktopSampler : register(s0);
-
         struct VertexInput
         {
             float2 Corner : CORNER;
@@ -1113,7 +1137,6 @@ internal sealed class Direct3D11Presenter : IDisposable
         struct PixelInput
         {
             float4 Position : SV_POSITION;
-            float2 TexturePosition : TEXCOORD0;
         };
 
         PixelInput VSMain(VertexInput input)
@@ -1124,16 +1147,12 @@ internal sealed class Direct3D11Presenter : IDisposable
                 1.0 - input.Corner.y * 2.0,
                 0.0,
                 1.0);
-            output.TexturePosition = input.Corner;
             return output;
         }
 
         float4 PSMain(PixelInput input) : SV_TARGET
         {
-            float3 desktop = Desktop.Sample(
-                DesktopSampler,
-                input.TexturePosition).rgb;
-            return float4(desktop, DesktopOpacity);
+            return float4(BackgroundColor, DesktopOpacity);
         }
         """;
 }

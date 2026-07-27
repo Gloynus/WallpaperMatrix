@@ -1,5 +1,6 @@
 using System.Threading;
 using System.Runtime.InteropServices;
+using System.Diagnostics;
 using System.Windows;
 using System.Windows.Threading;
 using WallpaperMatrix.Models;
@@ -20,6 +21,7 @@ public partial class App : System.Windows.Application
     private TrayService? _tray;
     private SettingsWindow? _settingsWindow;
     private DispatcherTimer? _attackValidationTimer;
+    private DispatcherTimer? _stopValidationTimer;
     private bool _isExiting;
     private bool _handlingDispatcherFailure;
 
@@ -78,7 +80,13 @@ public partial class App : System.Windows.Application
                 argument,
                 "--validate-attack-overlay",
                 StringComparison.OrdinalIgnoreCase));
+        bool validateStop = e.Args.Any(argument =>
+            string.Equals(
+                argument,
+                "--validate-stop",
+                StringComparison.OrdinalIgnoreCase));
         startInBackground |= validateAttackOverlay;
+        startInBackground |= validateStop;
         forceAttack |= validateAttackOverlay;
 
         _singleInstanceMutex = new Mutex(true, "Local\\WallpaperMatrix.SingleInstance", out bool isFirstInstance);
@@ -165,6 +173,34 @@ public partial class App : System.Windows.Application
                 ExitApplication();
             };
             _attackValidationTimer.Start();
+        }
+        if (validateStop)
+        {
+            int phase = 0;
+            _stopValidationTimer = new DispatcherTimer(
+                DispatcherPriority.Background)
+            {
+                Interval = TimeSpan.FromSeconds(3)
+            };
+            _stopValidationTimer.Tick += (_, _) =>
+            {
+                if (phase++ == 0)
+                {
+                    Stopwatch clock = Stopwatch.StartNew();
+                    _wallpaperManager?.SetPaused(true);
+                    clock.Stop();
+                    DiagnosticLog.Write(
+                        $"Самопроверка СТОП: рабочий стол освобождён за "
+                        + $"{clock.Elapsed.TotalMilliseconds:0} мс.");
+                    _stopValidationTimer!.Interval =
+                        TimeSpan.FromSeconds(2);
+                    return;
+                }
+
+                _stopValidationTimer?.Stop();
+                ExitApplication();
+            };
+            _stopValidationTimer.Start();
         }
 
     }
@@ -317,6 +353,7 @@ public partial class App : System.Windows.Application
 
         _isExiting = true;
         _attackValidationTimer?.Stop();
+        _stopValidationTimer?.Stop();
         _settingsWindow?.ForceClose();
         _tray?.Dispose();
         if (_wallpaperManager is not null)
@@ -404,6 +441,7 @@ public partial class App : System.Windows.Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        _stopValidationTimer?.Stop();
         _tray?.Dispose();
         _wallpaperManager?.Dispose();
         base.OnExit(e);

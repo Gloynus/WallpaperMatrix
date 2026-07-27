@@ -138,7 +138,8 @@ internal sealed class AttackOverlayWindow : IDisposable
                 _window,
                 _bounds.Width,
                 _bounds.Height,
-                _scene);
+                _scene,
+                transparentSurface: true);
             CapturedDesktopFrame desktop = _desktop
                 ?? throw new InvalidOperationException(
                     "Снимок перехода недоступен.");
@@ -396,8 +397,8 @@ internal sealed class AttackOverlayWindow : IDisposable
             "WallpaperMatrix.AttackOverlay.1";
         private const uint WindowStylePopup = 0x80000000;
         private const uint ExStyleToolWindow = 0x00000080;
+        private const uint ExStyleNoRedirectionBitmap = 0x00200000;
         private const int ClassAlreadyExists = 1410;
-        private const int BlackBrush = 4;
         private const int ArrowCursor = 32512;
         private const int ShowNormal = 5;
         private const uint NoOwnerZOrder = 0x0200;
@@ -443,7 +444,7 @@ internal sealed class AttackOverlayWindow : IDisposable
                     Cursor = LoadCursor(
                         IntPtr.Zero,
                         new IntPtr(ArrowCursor)),
-                    Background = GetStockObject(BlackBrush),
+                    Background = IntPtr.Zero,
                     ClassName = ClassName
                 };
                 ushort atom = RegisterClassEx(ref windowClass);
@@ -459,7 +460,7 @@ internal sealed class AttackOverlayWindow : IDisposable
 
         public static IntPtr Create(DrawingRectangle bounds) =>
             CreateWindowEx(
-                ExStyleToolWindow,
+                ExStyleToolWindow | ExStyleNoRedirectionBitmap,
                 ClassName,
                 "Wallpaper Matrix — АТАКА СИСТЕМЫ",
                 WindowStylePopup,
@@ -669,9 +670,6 @@ internal sealed class AttackOverlayWindow : IDisposable
         private static extern IntPtr LoadCursor(
             IntPtr instance,
             IntPtr cursorName);
-
-        [DllImport("gdi32.dll")]
-        private static extern IntPtr GetStockObject(int objectIndex);
 
         [DllImport("user32.dll")]
         private static extern bool ShowWindow(IntPtr window, int command);
