@@ -21,6 +21,7 @@ internal sealed class AttackOverlayWindow : IDisposable
     private CapturedDesktopFrame? _desktop;
     private readonly IReadOnlyList<DrawingRectangle> _viewports;
     private readonly double _transitionSeconds;
+    private readonly bool _autoReleaseDesktopImage;
     private readonly long _existingStreamCutoff;
     private readonly Thread _thread;
     private readonly CancellationTokenSource _cancellation = new();
@@ -41,7 +42,8 @@ internal sealed class AttackOverlayWindow : IDisposable
         DrawingRectangle bounds,
         SharedMatrixScene scene,
         CapturedDesktopFrame desktop,
-        double transitionSeconds)
+        double transitionSeconds,
+        bool autoReleaseDesktopImage)
     {
         _bounds = bounds;
         _scene = scene;
@@ -54,6 +56,7 @@ internal sealed class AttackOverlayWindow : IDisposable
                 screen.Bounds.Height))
             .ToArray();
         _transitionSeconds = Math.Clamp(transitionSeconds, 1.0, 30.0);
+        _autoReleaseDesktopImage = autoReleaseDesktopImage;
         lock (_scene.SyncRoot)
             _existingStreamCutoff = _scene.LatestStreamId;
         _thread = new Thread(RenderThreadMain)
@@ -144,7 +147,8 @@ internal sealed class AttackOverlayWindow : IDisposable
             presenter.SetTransitionState(1, 1);
             presenter.SetAttackGlyphState(
                 _existingStreamCutoff,
-                screenshotInfluence: 1);
+                screenshotStreamCutoff: null,
+                haloFactor: 1);
             presenter.Present(
                 _bounds.Width,
                 _bounds.Height,
@@ -155,7 +159,7 @@ internal sealed class AttackOverlayWindow : IDisposable
                 + (long)(Stopwatch.Frequency * 0.70);
             Stopwatch attackClock = Stopwatch.StartNew();
             Stopwatch? exitClock = null;
-            Stopwatch? desktopImageReleaseClock = null;
+            long? screenshotStreamCutoff = null;
             double nextTopmostCheckSeconds = 0.5;
             double exitStartDesktopOpacity = 0;
             started = true;
@@ -185,6 +189,13 @@ internal sealed class AttackOverlayWindow : IDisposable
 
                 double elapsedSeconds =
                     attackClock.Elapsed.TotalSeconds;
+                if (_autoReleaseDesktopImage
+                    && elapsedSeconds >= _transitionSeconds * 2.0)
+                {
+                    Interlocked.Exchange(
+                        ref _releaseDesktopImage,
+                        1);
+                }
                 if (elapsedSeconds > 0.70
                     && UserIdleMonitor.IdleTime
                         < TimeSpan.FromMilliseconds(350))
@@ -198,20 +209,15 @@ internal sealed class AttackOverlayWindow : IDisposable
                         elapsedSeconds + 0.5;
                 }
 
-                if (desktopImageReleaseClock is null
+                if (!screenshotStreamCutoff.HasValue
                     && Volatile.Read(ref _releaseDesktopImage) != 0)
                 {
-                    desktopImageReleaseClock =
-                        Stopwatch.StartNew();
+                    screenshotStreamCutoff =
+                        _scene.LatestStreamId;
+                    DiagnosticLog.Write(
+                        "АТАКА СИСТЕМЫ: отпечаток интерфейса больше не "
+                        + "назначается новым струям и будет стёрт потоком.");
                 }
-                double screenshotInfluence =
-                    desktopImageReleaseClock is null
-                        ? 1.0
-                        : 1.0 - SmoothStep(Math.Clamp(
-                            desktopImageReleaseClock.Elapsed.TotalSeconds
-                                / 1.25,
-                            0,
-                            1));
 
                 bool exiting =
                     Volatile.Read(ref _exitRequested) != 0;
@@ -263,7 +269,8 @@ internal sealed class AttackOverlayWindow : IDisposable
                     glyphOpacity);
                 presenter.SetAttackGlyphState(
                     _existingStreamCutoff,
-                    screenshotInfluence);
+                    screenshotStreamCutoff,
+                    AttackHaloFactor(elapsedSeconds));
                 presenter.Present(
                     _bounds.Width,
                     _bounds.Height,
@@ -321,6 +328,19 @@ internal sealed class AttackOverlayWindow : IDisposable
             0,
             1);
         return 1.0 - SmoothStep(progress);
+    }
+
+    private double AttackHaloFactor(double elapsedSeconds)
+    {
+        const double revealDelay = 0.35;
+        double captureProgress = Math.Clamp(
+            (elapsedSeconds - revealDelay) / _transitionSeconds,
+            0,
+            1);
+        return 1.0 - SmoothStep(Math.Clamp(
+            (captureProgress - 0.72) / 0.28,
+            0,
+            1));
     }
 
     private static double SmoothStep(double value) =>

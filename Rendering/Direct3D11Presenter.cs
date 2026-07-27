@@ -63,8 +63,10 @@ internal sealed class Direct3D11Presenter : IDisposable
     private float _desktopOpacity;
     private float _glyphOpacity = 1;
     private float _attackStreamCutoff;
-    private float _attackFilterEnabled;
-    private float _screenshotInfluence;
+    private float _attackModeEnabled;
+    private float _screenshotStreamCutoff;
+    private float _screenshotLimitEnabled;
+    private float _attackHaloFactor = 1;
     private bool _disposed;
 
     private Direct3D11Presenter(
@@ -335,12 +337,17 @@ internal sealed class Direct3D11Presenter : IDisposable
 
     public void SetAttackGlyphState(
         long existingStreamCutoff,
-        double screenshotInfluence)
+        long? screenshotStreamCutoff,
+        double haloFactor)
     {
         _attackStreamCutoff = existingStreamCutoff;
-        _attackFilterEnabled = 1;
-        _screenshotInfluence =
-            (float)Math.Clamp(screenshotInfluence, 0.0, 1.0);
+        _attackModeEnabled = 1;
+        _screenshotLimitEnabled =
+            screenshotStreamCutoff.HasValue ? 1 : 0;
+        _screenshotStreamCutoff =
+            screenshotStreamCutoff.GetValueOrDefault();
+        _attackHaloFactor =
+            (float)Math.Clamp(haloFactor, 0.0, 1.0);
     }
 
     public bool Present(
@@ -486,29 +493,83 @@ internal sealed class Direct3D11Presenter : IDisposable
                 (float)parameters.BackgroundBlue,
                 1));
 
-        DrawTransitionBackground(
-            targetWidth,
-            targetHeight,
-            parameters);
+        if (_attackModeEnabled > 0.5f)
+        {
+            // The old streams remain alive below the captured desktop. As the
+            // capture fades, they are revealed in their current state instead
+            // of exposing a frozen copy of the wallpaper.
+            DrawGlyphPass(
+                targetWidth,
+                targetHeight,
+                viewports,
+                parameters,
+                atlas,
+                streamFilterMode: 2,
+                screenshotInfluence: 0,
+                solidBody: 0,
+                haloFactor: 1);
+            DrawTransitionBackground(
+                targetWidth,
+                targetHeight,
+                parameters);
+            DrawGlyphPass(
+                targetWidth,
+                targetHeight,
+                viewports,
+                parameters,
+                atlas,
+                streamFilterMode: 1,
+                screenshotInfluence: 1,
+                solidBody: 1,
+                haloFactor: _attackHaloFactor);
+        }
+        else
+        {
+            DrawTransitionBackground(
+                targetWidth,
+                targetHeight,
+                parameters);
+            DrawGlyphPass(
+                targetWidth,
+                targetHeight,
+                viewports,
+                parameters,
+                atlas,
+                streamFilterMode: 0,
+                screenshotInfluence: 0,
+                solidBody: 0,
+                haloFactor: 1);
+        }
+    }
+
+    private void DrawGlyphPass(
+        int targetWidth,
+        int targetHeight,
+        IReadOnlyList<DrawingRectangle> viewports,
+        MatrixRenderParameters parameters,
+        GlyphAtlasData atlas,
+        float streamFilterMode,
+        float screenshotInfluence,
+        float solidBody,
+        float haloFactor)
+    {
+        if (_instanceBuffer is null || _scene.InstanceCount <= 0)
+            return;
 
         _context.IASetInputLayout(_inputLayout);
         _context.IASetPrimitiveTopology(PrimitiveTopology.TriangleStrip);
-        if (_instanceBuffer is not null)
-        {
-            _context.IASetVertexBuffers(
-                0,
-                [_quadBuffer, _instanceBuffer],
-                [QuadStride, InstanceStride],
-                [0, 0]);
-        }
+        _context.IASetVertexBuffers(
+            0,
+            [_quadBuffer, _instanceBuffer],
+            [QuadStride, InstanceStride],
+            [0, 0]);
         _context.VSSetShader(_vertexShader);
         _context.VSSetConstantBuffer(0, _constantBuffer);
         _context.PSSetShader(_pixelShader);
         _context.PSSetConstantBuffer(0, _constantBuffer);
-        _context.PSSetShaderResource(0, _atlasView);
+        _context.PSSetShaderResource(0, _atlasView!);
         _context.PSSetShaderResource(1, _transitionView!);
         _context.PSSetSampler(0, _sampler);
-
         double sourceAspect =
             parameters.SourceWidth / (double)parameters.SourceHeight;
         foreach (DrawingRectangle viewport in viewports)
@@ -542,17 +603,18 @@ internal sealed class Direct3D11Presenter : IDisposable
                 targetHeight,
                 _glyphOpacity,
                 _attackStreamCutoff,
-                _attackFilterEnabled,
-                _screenshotInfluence);
+                streamFilterMode,
+                screenshotInfluence,
+                solidBody,
+                haloFactor,
+                _screenshotStreamCutoff,
+                _screenshotLimitEnabled);
             UpdateConstantBuffer(constants);
-            if (_scene.InstanceCount > 0 && _instanceBuffer is not null)
-            {
-                _context.DrawInstanced(
-                    4,
-                    (uint)_scene.InstanceCount,
-                    0,
-                    0);
-            }
+            _context.DrawInstanced(
+                4,
+                (uint)_scene.InstanceCount,
+                0,
+                0);
         }
 
         _context.PSSetShaderResource(
@@ -697,9 +759,13 @@ internal sealed class Direct3D11Presenter : IDisposable
         public readonly float GlyphCount;
         public readonly float HeadBrightness;
         public readonly float GlyphOpacity;
-        public readonly float AttackFilterEnabled;
+        public readonly float StreamFilterMode;
         public readonly float AttackStreamCutoff;
         public readonly float ScreenshotInfluence;
+        public readonly float SolidBody;
+        public readonly float HaloFactor;
+        public readonly float ScreenshotStreamCutoff;
+        public readonly float ScreenshotLimitEnabled;
         private readonly Vector2 _padding0;
         public readonly Vector3 SignalColor;
         private readonly float _padding1;
@@ -715,8 +781,12 @@ internal sealed class Direct3D11Presenter : IDisposable
             int targetHeight,
             float glyphOpacity,
             float attackStreamCutoff,
-            float attackFilterEnabled,
-            float screenshotInfluence)
+            float streamFilterMode,
+            float screenshotInfluence,
+            float solidBody,
+            float haloFactor,
+            float screenshotStreamCutoff,
+            float screenshotLimitEnabled)
         {
             SourceSize = new(
                 parameters.SourceWidth,
@@ -729,9 +799,13 @@ internal sealed class Direct3D11Presenter : IDisposable
             GlyphCount = glyphCount;
             HeadBrightness = (float)parameters.HeadBrightness;
             GlyphOpacity = glyphOpacity;
-            AttackFilterEnabled = attackFilterEnabled;
+            StreamFilterMode = streamFilterMode;
             AttackStreamCutoff = attackStreamCutoff;
             ScreenshotInfluence = screenshotInfluence;
+            SolidBody = solidBody;
+            HaloFactor = haloFactor;
+            ScreenshotStreamCutoff = screenshotStreamCutoff;
+            ScreenshotLimitEnabled = screenshotLimitEnabled;
             _padding0 = Vector2.Zero;
             SignalColor = new(
                 (float)parameters.SignalRed,
@@ -774,9 +848,13 @@ internal sealed class Direct3D11Presenter : IDisposable
             float GlyphCount;
             float HeadBrightness;
             float GlyphOpacity;
-            float AttackFilterEnabled;
+            float StreamFilterMode;
             float AttackStreamCutoff;
             float ScreenshotInfluence;
+            float SolidBody;
+            float HaloFactor;
+            float ScreenshotStreamCutoff;
+            float ScreenshotLimitEnabled;
             float2 Padding0;
             float3 SignalColor;
             float Padding1;
@@ -886,8 +964,15 @@ internal sealed class Direct3D11Presenter : IDisposable
 
         float4 PSMain(PixelInput input) : SV_TARGET
         {
-            if (AttackFilterEnabled > 0.5)
+            if (StreamFilterMode > 0.5
+                && StreamFilterMode < 1.5)
+            {
                 clip(input.StreamId - AttackStreamCutoff - 0.5);
+            }
+            else if (StreamFilterMode > 1.5)
+            {
+                clip(AttackStreamCutoff + 0.5 - input.StreamId);
+            }
 
             float center = SampleGlyph(input, input.Local);
             float2 nearStep = 1.35 / CellSize;
@@ -932,7 +1017,15 @@ internal sealed class Direct3D11Presenter : IDisposable
             wideLight *= 0.25;
 
             float level = input.Level;
-            if (ScreenshotInfluence > 0.001)
+            float screenshotMask = ScreenshotInfluence;
+            if (ScreenshotLimitEnabled > 0.5)
+            {
+                screenshotMask *=
+                    1.0 - step(
+                        ScreenshotStreamCutoff + 0.5,
+                        input.StreamId);
+            }
+            if (screenshotMask > 0.001)
             {
                 float2 screenPosition = saturate(
                     input.Position.xy / max(TargetSize, 1.0));
@@ -949,7 +1042,7 @@ internal sealed class Direct3D11Presenter : IDisposable
                 level = lerp(
                     level,
                     encodedLevel,
-                    ScreenshotInfluence);
+                    screenshotMask);
             }
 
             float isImage = step(2.5, input.Style);
@@ -958,11 +1051,19 @@ internal sealed class Direct3D11Presenter : IDisposable
                 pow(clamp(softLight, 0.0, 1.0), 0.72)
                 * (1.0 - center)
                 * clamp(input.Glow, 0.0, 2.0)
+                * HaloFactor
                 * clamp(level, 0.0, 1.0)
                 * (1.0 - isImage)
                 * 1.65;
             glowAmount = min(glowAmount, 1.35);
-            float alpha = clamp(max(center, glowAmount), 0.0, 1.0);
+            float bodyAlpha = lerp(
+                center,
+                smoothstep(0.035, 0.30, center),
+                SolidBody);
+            float alpha = clamp(
+                max(bodyAlpha, glowAmount),
+                0.0,
+                1.0);
             clip(alpha - 0.006);
 
             float3 body = lerp(
@@ -987,7 +1088,7 @@ internal sealed class Direct3D11Presenter : IDisposable
                 clamp(input.Emphasis, 0.0, 1.0));
             float3 glowColor = SignalColor * 0.88;
             float bodyShare =
-                center / max(center + glowAmount, 0.0001);
+                bodyAlpha / max(bodyAlpha + glowAmount, 0.0001);
             return float4(
                 lerp(glowColor, body, bodyShare),
                 alpha * GlyphOpacity);
@@ -1032,9 +1133,7 @@ internal sealed class Direct3D11Presenter : IDisposable
             float3 desktop = Desktop.Sample(
                 DesktopSampler,
                 input.TexturePosition).rgb;
-            return float4(
-                lerp(BackgroundColor, desktop, DesktopOpacity),
-                1.0);
+            return float4(desktop, DesktopOpacity);
         }
         """;
 }

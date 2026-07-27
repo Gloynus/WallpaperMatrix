@@ -11,10 +11,10 @@
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <AssemblyName>WallpaperMatrix</AssemblyName>
     <RootNamespace>WallpaperMatrix</RootNamespace>
-    <Version>3.3.2</Version>
-    <AssemblyVersion>3.3.2.0</AssemblyVersion>
-    <FileVersion>3.3.2.0</FileVersion>
-    <InformationalVersion>3.3.2</InformationalVersion>
+    <Version>3.3.3</Version>
+    <AssemblyVersion>3.3.3.0</AssemblyVersion>
+    <FileVersion>3.3.3.0</FileVersion>
+    <InformationalVersion>3.3.3</InformationalVersion>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\WallpaperMatrix.ico</ApplicationIcon>

@@ -35,7 +35,7 @@ public sealed class TrayService : IDisposable
         _notifyIcon = new System.Windows.Forms.NotifyIcon
         {
             Icon = _icon,
-            Text = "Wallpaper Matrix 3.3.2",
+            Text = "Wallpaper Matrix 3.3.3",
             ContextMenuStrip = menu,
             Visible = true
         };

@@ -441,15 +441,17 @@ public sealed class WallpaperManager : IDisposable
         _output.SetImage(_currentImage);
         if (IsAttackActive
             && _attackDesktopImageActive
-            && _attackPlaylistSwitchRequested
-            && image is not null)
+            && _attackPlaylistSwitchRequested)
         {
             _attackDesktopImageActive = false;
             _attackPlaylistSwitchRequested = false;
             _attackOverlay?.ReleaseDesktopImage();
             DiagnosticLog.Write(
-                "АТАКА СИСТЕМЫ: временный образ интерфейса "
-                + "плавно заменяется образом плейлиста.");
+                image is not null
+                    ? "АТАКА СИСТЕМЫ: новые струи перешли от отпечатка "
+                        + "интерфейса к образу плейлиста."
+                    : "АТАКА СИСТЕМЫ: следующий образ недоступен; "
+                        + "отпечаток интерфейса будет стёрт потоком.");
         }
     }
 
@@ -481,6 +483,16 @@ public sealed class WallpaperManager : IDisposable
                 return false;
             }
         });
+    }
+
+    private static bool HasUsablePlaylistImage(AppSettings settings)
+    {
+        if (!settings.ImageMode)
+            return false;
+        return settings.ActiveImagePlaylist().Entries.Any(entry =>
+            entry.Enabled
+            && !string.IsNullOrWhiteSpace(entry.Path)
+            && File.Exists(entry.Path));
     }
 
     private void OnImageTimer(object? sender, EventArgs e)
@@ -787,7 +799,9 @@ public sealed class WallpaperManager : IDisposable
                     startData.Desktop.Height),
                 scene,
                 startData.Desktop,
-                _settings.AttackTransitionSeconds);
+                _settings.AttackTransitionSeconds,
+                autoReleaseDesktopImage:
+                    !HasUsablePlaylistImage(_settings));
             overlay.Closed += OnAttackOverlayClosed;
             overlay.ExitStarted += OnAttackExitStarted;
             _attackOverlay = overlay;
