@@ -37,6 +37,9 @@ Copy-Item -LiteralPath (Join-Path $PSScriptRoot "PORTABLE-README.txt") `
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "THIRD-PARTY-NOTICES.txt") `
     -Destination (Join-Path $outputPath "THIRD-PARTY-NOTICES.txt") `
     -Force
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot "LICENSE") `
+    -Destination (Join-Path $outputPath "LICENSE.txt") `
+    -Force
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "RELEASE_NOTES-3.2.2.md") `
     -Destination (Join-Path $outputPath "RELEASE_NOTES.txt") `
     -Force
