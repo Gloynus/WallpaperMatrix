@@ -32,6 +32,7 @@ internal static class SettingsFileCodec
     {
         AppSettings normalized = settings.Copy();
         normalized.Normalize();
+        OperatorPlaylistBinding.Stamp(normalized);
         JsonObject result =
             JsonSerializer.SerializeToNode(normalized, JsonOptions)
                 as JsonObject

@@ -19,8 +19,7 @@ internal sealed record MatrixScenePresentation(
     SharedMatrixScene Scene,
     DrawingRectangle TargetBounds,
     DrawingRectangle SourceBounds,
-    long AttackStreamCutoff = -1,
-    long ScreenshotStreamCutoff = -1);
+    long AttackStreamCutoff = -1);
 
 internal sealed record AttackFrameSnapshot(
     SharedMatrixScene PrimaryScene,
@@ -69,14 +68,12 @@ internal sealed class Direct3D11Presenter : IDisposable
     private readonly Dictionary<SharedMatrixScene, SceneGpuResources>
         _sceneResources =
             new(ReferenceEqualityComparer.Instance);
-    private ID3D11Texture2D? _transitionTexture;
-    private ID3D11ShaderResourceView? _transitionView;
     private float _desktopOpacity;
     private float _glyphOpacity = 1;
+    private float _surfaceBackgroundOpacity = 1;
+    private float _surfaceGlyphOpacity = 1;
     private float _attackStreamCutoff;
     private float _attackModeEnabled;
-    private float _screenshotStreamCutoff;
-    private float _screenshotLimitEnabled;
     private float _attackHaloFactor = 1;
     private long _lastSlowPresentReportTimestamp;
     private bool _disposed;
@@ -301,55 +298,6 @@ internal sealed class Direct3D11Presenter : IDisposable
             ShaderFlags.OptimizationLevel3);
     }
 
-    public void SetTransitionBackground(CapturedDesktopFrame frame)
-    {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        ArgumentNullException.ThrowIfNull(frame);
-        if (frame.Width <= 0
-            || frame.Height <= 0
-            || frame.Pixels.Length != checked(frame.Width * frame.Height * 4))
-        {
-            throw new ArgumentException(
-                "Снимок перехода имеет неверный размер.",
-                nameof(frame));
-        }
-
-        _context.PSSetShaderResource(
-            0,
-            (ID3D11ShaderResourceView)null!);
-        _transitionView?.Dispose();
-        _transitionTexture?.Dispose();
-
-        Texture2DDescription description = new(
-            Format.B8G8R8A8_UNorm,
-            (uint)frame.Width,
-            (uint)frame.Height,
-            arraySize: 1,
-            mipLevels: 1,
-            BindFlags.ShaderResource,
-            ResourceUsage.Immutable);
-        GCHandle pixels = GCHandle.Alloc(
-            frame.Pixels,
-            GCHandleType.Pinned);
-        try
-        {
-            uint rowPitch = checked((uint)(frame.Width * 4));
-            SubresourceData initialData = new(
-                pixels.AddrOfPinnedObject(),
-                rowPitch,
-                checked(rowPitch * (uint)frame.Height));
-            _transitionTexture = _device.CreateTexture2D(
-                description,
-                initialData);
-            _transitionView =
-                _device.CreateShaderResourceView(_transitionTexture);
-        }
-        finally
-        {
-            pixels.Free();
-        }
-    }
-
     public void SetTransitionState(
         double desktopOpacity,
         double glyphOpacity)
@@ -358,17 +306,22 @@ internal sealed class Direct3D11Presenter : IDisposable
         _glyphOpacity = (float)Math.Clamp(glyphOpacity, 0.0, 1.0);
     }
 
+    public void SetSurfaceReveal(
+        double backgroundOpacity,
+        double glyphOpacity)
+    {
+        _surfaceBackgroundOpacity =
+            (float)Math.Clamp(backgroundOpacity, 0.0, 1.0);
+        _surfaceGlyphOpacity =
+            (float)Math.Clamp(glyphOpacity, 0.0, 1.0);
+    }
+
     public void SetAttackGlyphState(
         long existingStreamCutoff,
-        long? screenshotStreamCutoff,
         double haloFactor)
     {
         _attackStreamCutoff = existingStreamCutoff;
         _attackModeEnabled = 1;
-        _screenshotLimitEnabled =
-            screenshotStreamCutoff.HasValue ? 1 : 0;
-        _screenshotStreamCutoff =
-            screenshotStreamCutoff.GetValueOrDefault();
         _attackHaloFactor =
             (float)Math.Clamp(haloFactor, 0.0, 1.0);
     }
@@ -644,18 +597,16 @@ internal sealed class Direct3D11Presenter : IDisposable
                 DrawBackground(
                     state.Presentation.TargetBounds,
                     state.Parameters,
-                    1);
+                    _surfaceBackgroundOpacity);
             }
             DrawGlyphPass(
-                targetWidth,
-                targetHeight,
                 state,
                 streamFilterMode:
                     _attackModeEnabled > 0.5f ? 1 : 0,
-                screenshotInfluence:
-                    _attackModeEnabled > 0.5f ? 1 : 0,
                 solidBody:
-                    _attackModeEnabled > 0.5f ? 1 : 0,
+                    _attackModeEnabled > 0.5f
+                        ? _desktopOpacity
+                        : 0,
                 haloFactor:
                     _attackModeEnabled > 0.5f
                         ? _attackHaloFactor
@@ -664,11 +615,8 @@ internal sealed class Direct3D11Presenter : IDisposable
     }
 
     private void DrawGlyphPass(
-        int targetWidth,
-        int targetHeight,
         SceneDrawState state,
         float streamFilterMode,
-        float screenshotInfluence,
         float solidBody,
         float haloFactor)
     {
@@ -693,7 +641,6 @@ internal sealed class Direct3D11Presenter : IDisposable
         _context.PSSetShaderResource(
             0,
             state.Resources.AtlasView);
-        _context.PSSetShaderResource(1, _transitionView!);
         _context.PSSetSampler(0, _sampler);
         DrawingRectangle viewport = state.Presentation.TargetBounds;
         DrawingRectangle source = state.Presentation.SourceBounds;
@@ -719,26 +666,14 @@ internal sealed class Direct3D11Presenter : IDisposable
             state.Atlas.GlyphCount,
             aspectScaleX,
             aspectScaleY,
-            targetWidth,
-            targetHeight,
-            _glyphOpacity,
+            _glyphOpacity * _surfaceGlyphOpacity,
             _attackModeEnabled > 0.5f
                 && state.Presentation.AttackStreamCutoff >= 0
                     ? state.Presentation.AttackStreamCutoff
                     : _attackStreamCutoff,
             streamFilterMode,
-            screenshotInfluence,
             solidBody,
             haloFactor,
-            _attackModeEnabled > 0.5f
-                && state.Presentation.ScreenshotStreamCutoff >= 0
-                    ? state.Presentation.ScreenshotStreamCutoff
-                    : _screenshotStreamCutoff,
-            _screenshotLimitEnabled,
-            viewport.Left,
-            viewport.Top,
-            viewport.Width,
-            viewport.Height,
             source.Left,
             source.Top,
             source.Width,
@@ -752,9 +687,6 @@ internal sealed class Direct3D11Presenter : IDisposable
 
         _context.PSSetShaderResource(
             0,
-            (ID3D11ShaderResourceView)null!);
-        _context.PSSetShaderResource(
-            1,
             (ID3D11ShaderResourceView)null!);
     }
 
@@ -849,8 +781,6 @@ internal sealed class Direct3D11Presenter : IDisposable
         foreach (SceneGpuResources resources in _sceneResources.Values)
             resources.Dispose();
         _sceneResources.Clear();
-        _transitionView?.Dispose();
-        _transitionTexture?.Dispose();
         _blendState.Dispose();
         _sampler.Dispose();
         _transitionConstantBuffer.Dispose();
@@ -916,20 +846,15 @@ internal sealed class Direct3D11Presenter : IDisposable
         public readonly Vector2 SourceOrigin;
         public readonly Vector2 SourceViewportSize;
         public readonly Vector2 AspectScale;
-        public readonly Vector2 TargetSize;
+        private readonly Vector2 _paddingTarget;
         public readonly float GlyphCount;
         public readonly float HeadBrightness;
         public readonly float GlyphOpacity;
         public readonly float StreamFilterMode;
         public readonly float AttackStreamCutoff;
-        public readonly float ScreenshotInfluence;
         public readonly float SolidBody;
         public readonly float HaloFactor;
-        public readonly float ScreenshotStreamCutoff;
-        public readonly float ScreenshotLimitEnabled;
-        public readonly Vector2 ViewportOrigin;
-        public readonly Vector2 ViewportSize;
-        private readonly Vector2 _padding0;
+        private readonly float _padding0;
         public readonly Vector3 SignalColor;
         private readonly float _padding1;
         public readonly Vector3 BackgroundColor;
@@ -940,20 +865,11 @@ internal sealed class Direct3D11Presenter : IDisposable
             int glyphCount,
             float aspectScaleX,
             float aspectScaleY,
-            int targetWidth,
-            int targetHeight,
             float glyphOpacity,
             float attackStreamCutoff,
             float streamFilterMode,
-            float screenshotInfluence,
             float solidBody,
             float haloFactor,
-            float screenshotStreamCutoff,
-            float screenshotLimitEnabled,
-            float viewportLeft,
-            float viewportTop,
-            float viewportWidth,
-            float viewportHeight,
             float sourceLeft,
             float sourceTop,
             float sourceWidth,
@@ -968,20 +884,15 @@ internal sealed class Direct3D11Presenter : IDisposable
             SourceOrigin = new(sourceLeft, sourceTop);
             SourceViewportSize = new(sourceWidth, sourceHeight);
             AspectScale = new(aspectScaleX, aspectScaleY);
-            TargetSize = new(targetWidth, targetHeight);
+            _paddingTarget = Vector2.Zero;
             GlyphCount = glyphCount;
             HeadBrightness = (float)parameters.HeadBrightness;
             GlyphOpacity = glyphOpacity;
             StreamFilterMode = streamFilterMode;
             AttackStreamCutoff = attackStreamCutoff;
-            ScreenshotInfluence = screenshotInfluence;
             SolidBody = solidBody;
             HaloFactor = haloFactor;
-            ScreenshotStreamCutoff = screenshotStreamCutoff;
-            ScreenshotLimitEnabled = screenshotLimitEnabled;
-            ViewportOrigin = new(viewportLeft, viewportTop);
-            ViewportSize = new(viewportWidth, viewportHeight);
-            _padding0 = Vector2.Zero;
+            _padding0 = 0;
             SignalColor = new(
                 (float)parameters.SignalRed,
                 (float)parameters.SignalGreen,
@@ -1021,20 +932,15 @@ internal sealed class Direct3D11Presenter : IDisposable
             float2 SourceOrigin;
             float2 SourceViewportSize;
             float2 AspectScale;
-            float2 TargetSize;
+            float2 PaddingTarget;
             float GlyphCount;
             float HeadBrightness;
             float GlyphOpacity;
             float StreamFilterMode;
             float AttackStreamCutoff;
-            float ScreenshotInfluence;
             float SolidBody;
             float HaloFactor;
-            float ScreenshotStreamCutoff;
-            float ScreenshotLimitEnabled;
-            float2 ViewportOrigin;
-            float2 ViewportSize;
-            float2 Padding0;
+            float Padding0;
             float3 SignalColor;
             float Padding1;
             float3 BackgroundColor;
@@ -1042,7 +948,6 @@ internal sealed class Direct3D11Presenter : IDisposable
         };
 
         Texture2D<float> Atlas : register(t0);
-        Texture2D<float4> AttackDesktop : register(t1);
         SamplerState AtlasSampler : register(s0);
 
         struct VertexInput
@@ -1062,7 +967,6 @@ internal sealed class Direct3D11Presenter : IDisposable
             float Emphasis : TEXCOORD4;
             float Glow : TEXCOORD5;
             nointerpolation float StreamId : TEXCOORD6;
-            nointerpolation float2 ScreenshotPosition : TEXCOORD7;
         };
 
         PixelInput VSMain(VertexInput input)
@@ -1100,20 +1004,6 @@ internal sealed class Direct3D11Presenter : IDisposable
             output.Emphasis = input.Detail.y;
             output.Glow = input.Detail.z;
             output.StreamId = input.Detail.w;
-            float2 centerPixel =
-                (input.CellGlyphLevel.xy + 0.5) * CellSize;
-            float2 localCenterPixel =
-                centerPixel - SourceOrigin;
-            float2 centerClip = float2(
-                localCenterPixel.x / SourceViewportSize.x * 2.0 - 1.0,
-                1.0 - localCenterPixel.y / SourceViewportSize.y * 2.0)
-                * AspectScale;
-            float2 centerInViewport = float2(
-                centerClip.x * 0.5 + 0.5,
-                0.5 - centerClip.y * 0.5);
-            output.ScreenshotPosition =
-                (ViewportOrigin + centerInViewport * ViewportSize)
-                / max(TargetSize, 1.0);
             return output;
         }
 
@@ -1212,55 +1102,6 @@ internal sealed class Direct3D11Presenter : IDisposable
             wideLight *= 0.25;
 
             float level = input.Level;
-            float screenshotMask = ScreenshotInfluence;
-            if (ScreenshotLimitEnabled > 0.5)
-            {
-                screenshotMask *=
-                    1.0 - step(
-                        ScreenshotStreamCutoff + 0.5,
-                        input.StreamId);
-            }
-            if (screenshotMask > 0.001)
-            {
-                float2 screenPosition = saturate(
-                    input.ScreenshotPosition);
-                float3 desktop = AttackDesktop.Sample(
-                    AtlasSampler,
-                    screenPosition).rgb;
-                float desktopEnergy = max(
-                    dot(desktop, desktop),
-                    0.0001);
-                float signalEnergy = max(
-                    dot(SignalColor, SignalColor),
-                    0.0001);
-                float signalSimilarity = dot(
-                    desktop / sqrt(desktopEnergy),
-                    SignalColor / sqrt(signalEnergy));
-                float desktopChroma =
-                    max(desktop.r, max(desktop.g, desktop.b))
-                    - min(desktop.r, min(desktop.g, desktop.b));
-                float wallpaperSignal = smoothstep(
-                    0.985,
-                    0.999,
-                    signalSimilarity)
-                    * smoothstep(0.035, 0.16, desktopChroma);
-                // The real wallpaper remains alive below the transparent
-                // attack surface. Do not reinterpret its already-rendered
-                // signal as a captured interface image: this preserves sharp
-                // glyphs while ordinary desktop colours are still absorbed.
-                screenshotMask *= 1.0 - wallpaperSignal;
-                float luminance = dot(
-                    desktop,
-                    float3(0.2126, 0.7152, 0.0722));
-                float imageLevel =
-                    pow(smoothstep(0.035, 0.92, luminance), 0.82);
-                float encodedLevel =
-                    max(level * 0.18, imageLevel);
-                level = lerp(
-                    level,
-                    encodedLevel,
-                    screenshotMask);
-            }
 
             float isImage = step(2.5, input.Style);
             float softLight = nearLight * 0.68 + wideLight * 0.32;

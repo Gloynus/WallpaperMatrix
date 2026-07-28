@@ -70,7 +70,7 @@ internal sealed class WallpaperOutputSession : IDisposable
 
         _settings = settings.Copy();
         _image = image;
-        CreateWindows();
+        CreateWindows(animateStartupReveal: true);
         SetImage(_image);
         Activate();
     }
@@ -84,7 +84,7 @@ internal sealed class WallpaperOutputSession : IDisposable
         CloseWindows(restoreSystemWallpaper: false);
         _settings = settings.Copy();
         _image = image;
-        CreateWindows();
+        CreateWindows(animateStartupReveal: false);
         SetImage(_image);
         if (suspended)
             Suspend();
@@ -187,7 +187,7 @@ internal sealed class WallpaperOutputSession : IDisposable
     public void StopAndRestoreDesktop() =>
         CloseWindows(restoreSystemWallpaper: true);
 
-    private void CreateWindows()
+    private void CreateWindows(bool animateStartupReveal)
     {
         _monitors = MonitorCatalog.Capture();
         if (_monitors.Count == 0)
@@ -242,6 +242,7 @@ internal sealed class WallpaperOutputSession : IDisposable
             NativeWallpaperWindow compositor = new(
                 _plan,
                 _settings,
+                animateStartupReveal,
                 failureHandler: _failureHandler);
             created.Add(compositor);
             compositor.Start();

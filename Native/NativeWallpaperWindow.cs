@@ -13,6 +13,8 @@ namespace WallpaperMatrix.Native;
 /// </summary>
 internal sealed class NativeWallpaperWindow : IDisposable
 {
+    private const double StartupRevealDelaySeconds = 0.25;
+    private const double StartupRevealDurationSeconds = 2.75;
     private readonly DrawingRectangle _bounds;
     private readonly Thread _thread;
     private readonly CancellationTokenSource _cancellation = new();
@@ -21,6 +23,7 @@ internal sealed class NativeWallpaperWindow : IDisposable
     private readonly object _commandLock = new();
     private readonly object _runtimeLock = new();
     private readonly AppSettings _initialSettings;
+    private readonly bool _animateStartupReveal;
     private readonly Action<string, Exception, bool>? _failureHandler;
     private MonitorOutputPlan? _pendingPlan;
     private PreparedImage? _pendingImage;
@@ -82,11 +85,13 @@ internal sealed class NativeWallpaperWindow : IDisposable
     public NativeWallpaperWindow(
         MonitorOutputPlan plan,
         AppSettings settings,
+        bool animateStartupReveal,
         Action<string, Exception, bool>? failureHandler = null)
     {
         _bounds = plan.VirtualBounds;
         _currentPlan = plan;
         _initialSettings = settings.Copy();
+        _animateStartupReveal = animateStartupReveal;
         _failureHandler = failureHandler;
         _thread = new Thread(RenderThreadMain)
         {
@@ -187,6 +192,8 @@ internal sealed class NativeWallpaperWindow : IDisposable
                 // monitor be enabled or disabled without rebuilding the
                 // native window and flashing the static wallpaper.
                 transparentSurface: true);
+            if (_animateStartupReveal)
+                _direct3DPresenter.SetSurfaceReveal(0, 1);
             NativeWindow.ShowWindow(_window, NativeWindow.ShowNoActivate);
             NativeWindow.UpdateWindow(_window);
             long presentedVersion = long.MinValue;
@@ -204,6 +211,7 @@ internal sealed class NativeWallpaperWindow : IDisposable
             _started.Set();
             Stopwatch sharedClock = Stopwatch.StartNew();
             MonitorOutputPlan activePlan = _currentPlan;
+            bool startupRevealCompleted = !_animateStartupReveal;
 
             while (!_cancellation.IsCancellationRequested)
             {
@@ -259,6 +267,26 @@ internal sealed class NativeWallpaperWindow : IDisposable
                 }
                 else
                     waitMilliseconds = 25;
+                if (!startupRevealCompleted)
+                {
+                    double progress = Math.Clamp(
+                        (sharedClock.Elapsed.TotalSeconds
+                            - StartupRevealDelaySeconds)
+                        / StartupRevealDurationSeconds,
+                        0,
+                        1);
+                    _direct3DPresenter?.SetSurfaceReveal(
+                        SmoothStep(progress),
+                        1);
+                    presentedVersion = long.MinValue;
+                    startupRevealCompleted = progress >= 1;
+                    if (startupRevealCompleted)
+                    {
+                        DiagnosticLog.Write(
+                            "Запуск обоев завершил плавное растворение "
+                            + "системного фона в поток.");
+                    }
+                }
                 PresentLatestFrame(
                     activePlan,
                     ref presentedVersion);
@@ -600,6 +628,9 @@ internal sealed class NativeWallpaperWindow : IDisposable
 
     private int TotalInstanceCount() =>
         _sceneRuntimes.Sum(runtime => runtime.Scene.InstanceCount);
+
+    private static double SmoothStep(double value) =>
+        value * value * (3.0 - 2.0 * value);
 
     private void ReportFailure(string context, Exception exception, bool fatal)
     {

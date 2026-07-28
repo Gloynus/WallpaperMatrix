@@ -58,16 +58,6 @@ public partial class App : System.Windows.Application
                     DiagnosticLog.Write(
                         "Самопроверка маршрутизации устройств вывода завершена успешно.");
                 }
-                if (validateAttack)
-                {
-                    CapturedDesktopFrame capture =
-                        DesktopCaptureService.CaptureVirtualDesktop();
-                    DiagnosticLog.Write(
-                        $"Самопроверка захвата АТАКИ СИСТЕМЫ завершена успешно: "
-                        + $"{capture.Width}x{capture.Height}; "
-                        + $"начало=({capture.Left},{capture.Top}); "
-                        + $"BGRA={capture.Pixels.Length} байт.");
-                }
                 if (validateShaders || validateAttack)
                 {
                     DiagnosticLog.Write(
@@ -174,7 +164,10 @@ public partial class App : System.Windows.Application
             _wallpaperManager.IsManuallyPaused,
             _wallpaperManager.IsPausedByFullscreenApp);
 
-        TryApplyAutostart(_settings.StartWithWindows, showError: false);
+        TryApplyAutostart(
+            _settings.StartWithWindows,
+            showError: false,
+            claimOwnership: _settings.StartWithWindows);
 
         if (forceSettings || (!_settings.WelcomeShown && !startInBackground))
         {
@@ -439,11 +432,16 @@ public partial class App : System.Windows.Application
             _tray?.ShowError(_wallpaperManager.RuntimeStatus);
     }
 
-    private static void TryApplyAutostart(bool enabled, bool showError)
+    private static void TryApplyAutostart(
+        bool enabled,
+        bool showError,
+        bool claimOwnership = true)
     {
         try
         {
-            AutostartService.SetEnabled(enabled);
+            AutostartService.SetEnabled(
+                enabled,
+                claimOwnership);
         }
         catch (Exception ex) when (showError)
         {

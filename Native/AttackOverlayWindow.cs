@@ -18,10 +18,8 @@ internal sealed class AttackOverlayWindow : IDisposable
     private const double ExitTransitionSeconds = 0.18;
     private readonly DrawingRectangle _bounds;
     private readonly SharedMatrixScene _scene;
-    private CapturedDesktopFrame? _desktop;
     private MatrixScenePresentation[] _presentations;
     private readonly double _transitionSeconds;
-    private readonly bool _autoReleaseDesktopImage;
     private readonly long _existingStreamCutoff;
     private readonly Thread _thread;
     private readonly CancellationTokenSource _cancellation = new();
@@ -31,7 +29,6 @@ internal sealed class AttackOverlayWindow : IDisposable
     private Exception? _startupError;
     private int _exitRequested;
     private int _immediateExit;
-    private int _releaseDesktopImage;
     private int _disposed;
     private long _inputArmedAt;
 
@@ -41,16 +38,12 @@ internal sealed class AttackOverlayWindow : IDisposable
     public AttackOverlayWindow(
         DrawingRectangle bounds,
         AttackFrameSnapshot frame,
-        CapturedDesktopFrame desktop,
-        double transitionSeconds,
-        bool autoReleaseDesktopImage)
+        double transitionSeconds)
     {
         _bounds = bounds;
         _scene = frame.PrimaryScene;
-        _desktop = desktop;
         _presentations = frame.Presentations.ToArray();
         _transitionSeconds = Math.Clamp(transitionSeconds, 1.0, 30.0);
-        _autoReleaseDesktopImage = autoReleaseDesktopImage;
         _existingStreamCutoff = frame.LatestStreamId;
         _thread = new Thread(RenderThreadMain)
         {
@@ -97,20 +90,6 @@ internal sealed class AttackOverlayWindow : IDisposable
     public bool WaitForClose(TimeSpan timeout) =>
         _closed.Wait(timeout);
 
-    public void ReleaseDesktopImage()
-    {
-        Interlocked.Exchange(ref _releaseDesktopImage, 1);
-        IntPtr window = _window;
-        if (window != IntPtr.Zero)
-        {
-            NativeWindow.PostMessage(
-                window,
-                NativeWindow.WakeMessage,
-                IntPtr.Zero,
-                IntPtr.Zero);
-        }
-    }
-
     private void RenderThreadMain()
     {
         Direct3D11Presenter? presenter = null;
@@ -133,15 +112,9 @@ internal sealed class AttackOverlayWindow : IDisposable
                 _bounds.Height,
                 _scene,
                 transparentSurface: true);
-            CapturedDesktopFrame desktop = _desktop
-                ?? throw new InvalidOperationException(
-                    "Снимок перехода недоступен.");
-            presenter.SetTransitionBackground(desktop);
-            _desktop = null;
             presenter.SetTransitionState(1, 1);
             presenter.SetAttackGlyphState(
                 _existingStreamCutoff,
-                screenshotStreamCutoff: null,
                 haloFactor: 1);
             presenter.Present(
                 _bounds.Width,
@@ -153,7 +126,6 @@ internal sealed class AttackOverlayWindow : IDisposable
                 + (long)(Stopwatch.Frequency * 0.70);
             Stopwatch attackClock = Stopwatch.StartNew();
             Stopwatch? exitClock = null;
-            long? screenshotStreamCutoff = null;
             double nextTopmostCheckSeconds = 0.5;
             double exitStartDesktopOpacity = 0;
             started = true;
@@ -183,13 +155,6 @@ internal sealed class AttackOverlayWindow : IDisposable
 
                 double elapsedSeconds =
                     attackClock.Elapsed.TotalSeconds;
-                if (_autoReleaseDesktopImage
-                    && elapsedSeconds >= _transitionSeconds * 2.0)
-                {
-                    Interlocked.Exchange(
-                        ref _releaseDesktopImage,
-                        1);
-                }
                 if (elapsedSeconds > 0.70
                     && UserIdleMonitor.IdleTime
                         < TimeSpan.FromMilliseconds(350))
@@ -201,31 +166,6 @@ internal sealed class AttackOverlayWindow : IDisposable
                     NativeWindow.KeepTopmost(_window);
                     nextTopmostCheckSeconds =
                         elapsedSeconds + 0.5;
-                }
-
-                if (!screenshotStreamCutoff.HasValue
-                    && Volatile.Read(ref _releaseDesktopImage) != 0)
-                {
-                    screenshotStreamCutoff =
-                        _scene.LatestStreamId;
-                    _presentations = _presentations
-                        .Select(presentation =>
-                        {
-                            long cutoff;
-                            lock (presentation.Scene.SyncRoot)
-                            {
-                                cutoff =
-                                    presentation.Scene.LatestStreamId;
-                            }
-                            return presentation with
-                            {
-                                ScreenshotStreamCutoff = cutoff
-                            };
-                        })
-                        .ToArray();
-                    DiagnosticLog.Write(
-                        "АТАКА СИСТЕМЫ: отпечаток интерфейса больше не "
-                        + "назначается новым струям и будет стёрт потоком.");
                 }
 
                 bool exiting =
@@ -278,8 +218,7 @@ internal sealed class AttackOverlayWindow : IDisposable
                     glyphOpacity);
                 presenter.SetAttackGlyphState(
                     _existingStreamCutoff,
-                    screenshotStreamCutoff,
-                    AttackHaloFactor(elapsedSeconds));
+                    haloFactor: 1);
                 presenter.Present(
                     _bounds.Width,
                     _bounds.Height,
@@ -337,19 +276,6 @@ internal sealed class AttackOverlayWindow : IDisposable
             0,
             1);
         return 1.0 - SmoothStep(progress);
-    }
-
-    private double AttackHaloFactor(double elapsedSeconds)
-    {
-        const double revealDelay = 0.35;
-        double captureProgress = Math.Clamp(
-            (elapsedSeconds - revealDelay) / _transitionSeconds,
-            0,
-            1);
-        return 1.0 - SmoothStep(Math.Clamp(
-            (captureProgress - 0.72) / 0.28,
-            0,
-            1));
     }
 
     private static double SmoothStep(double value) =>

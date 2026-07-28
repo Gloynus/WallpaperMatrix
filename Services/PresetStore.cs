@@ -9,7 +9,7 @@ public sealed class PresetStore
 {
     private const string FilePrefix = "Preset - ";
     private const string FilePattern = "Preset - *.json";
-    private const int FormatVersion = 1;
+    private const int FormatVersion = 2;
 
     public IReadOnlyList<OperatorPreset> LoadAll()
     {
@@ -105,6 +105,9 @@ public sealed class PresetStore
             PortableStorage.DataDirectory,
             BuildFileName(normalizedName, modifiedAt));
 
+        AppSettings portableSettings = settings.Copy();
+        portableSettings.Normalize();
+        OperatorPlaylistBinding.Stamp(portableSettings);
         JsonObject root = new()
         {
             ["FormatVersion"] = FormatVersion,
@@ -112,7 +115,7 @@ public sealed class PresetStore
             [nameof(OperatorPreset.Name)] = normalizedName,
             [nameof(OperatorPreset.ModifiedAt)] = modifiedAt,
             [nameof(OperatorPreset.Settings)] =
-                SettingsFileCodec.ToPresetSettingsObject(settings)
+                SettingsFileCodec.ToPresetSettingsObject(portableSettings)
         };
         AtomicFile.WriteAllText(
             destination,
@@ -121,9 +124,14 @@ public sealed class PresetStore
         string previousPath = preset.FilePath;
         preset.Name = normalizedName;
         preset.ModifiedAt = modifiedAt;
-        preset.Settings = settings.Copy();
+        preset.Settings = portableSettings;
         preset.Settings.ImagePlaylists = [];
         preset.Settings.ActiveImagePlaylistId = "";
+        foreach (MonitorProfile profile in preset.Settings.MonitorProfiles)
+        {
+            profile.Settings.ImagePlaylists = [];
+            profile.Settings.ActiveImagePlaylistId = "";
+        }
         preset.Settings.ActivePresetId = "";
         preset.FilePath = destination;
 

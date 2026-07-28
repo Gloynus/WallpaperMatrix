@@ -9,7 +9,7 @@ public sealed class AppSettings
     public const double MinimumImageDurationSeconds = 0.1;
     public const double MaximumImageDurationSeconds = 600.0;
 
-    public int SettingsVersion { get; set; } = 30;
+    public int SettingsVersion { get; set; } = 31;
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public double Speed { get; set; }
     public double SpeedMin { get; set; } = 0.20;
@@ -67,6 +67,8 @@ public sealed class AppSettings
     public bool ImageMode { get; set; }
     public List<ImagePlaylist> ImagePlaylists { get; set; } = [new ImagePlaylist()];
     public string ActiveImagePlaylistId { get; set; } = "";
+    public string OperatorPlaylistId { get; set; } = "";
+    public string OperatorPlaylistName { get; set; } = "";
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public string ImageFolder { get; set; } = "";
     public double ImageDurationSeconds { get; set; } = 30.0;
@@ -153,6 +155,8 @@ public sealed class AppSettings
         ImageMode = ImageMode,
         ImagePlaylists = ImagePlaylists.Select(playlist => playlist.Copy()).ToList(),
         ActiveImagePlaylistId = ActiveImagePlaylistId,
+        OperatorPlaylistId = OperatorPlaylistId,
+        OperatorPlaylistName = OperatorPlaylistName,
         ImageFolder = ImageFolder,
         ImageDurationSeconds = ImageDurationSeconds,
         ImageIntensity = ImageIntensity,
@@ -464,6 +468,8 @@ public sealed class AppSettings
         }
         if (SettingsVersion < 30)
             SettingsVersion = 30;
+        if (SettingsVersion < 31)
+            SettingsVersion = 31;
         SpeedMin = Math.Clamp(
             SpeedMin,
             MinimumSpeed,
@@ -598,6 +604,8 @@ public sealed class AppSettings
             1.0,
             30.0);
         ActivePresetId = ActivePresetId?.Trim() ?? "";
+        OperatorPlaylistId = OperatorPlaylistId?.Trim() ?? "";
+        OperatorPlaylistName = OperatorPlaylistName?.Trim() ?? "";
         MonitorProfiles ??= [];
         if (includeMonitorProfiles)
         {

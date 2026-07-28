@@ -29,12 +29,8 @@ public sealed class WallpaperManager : IDisposable
     private CancellationTokenSource? _imageLoadCancellation;
     private int _imageLoadGeneration;
     private int _pendingImageLoads;
-    private CancellationTokenSource? _attackStartCancellation;
     private AttackOverlayWindow? _attackOverlay;
-    private int _attackStartGeneration;
     private bool _attackStartPending;
-    private bool _attackDesktopImageActive;
-    private bool _attackPlaylistSwitchRequested;
     private DateTime _attackRetryAfterUtc;
     private bool _manualPaused;
     private bool _fullscreenPaused;
@@ -150,12 +146,7 @@ public sealed class WallpaperManager : IDisposable
 
     public void StopAttack()
     {
-        Interlocked.Increment(ref _attackStartGeneration);
         _attackOverlay?.RequestExit();
-        CancellationTokenSource? pending =
-            Interlocked.Exchange(ref _attackStartCancellation, null);
-        pending?.Cancel();
-        pending?.Dispose();
     }
 
     private void SetFullscreenPaused(bool paused)
@@ -198,8 +189,6 @@ public sealed class WallpaperManager : IDisposable
     {
         if (!_settings.ImageMode || Volatile.Read(ref _pendingImageLoads) > 0)
             return;
-        if (IsAttackActive && _attackDesktopImageActive)
-            _attackPlaylistSwitchRequested = true;
         QueueImageLoad(ImageLoadKind.Next);
     }
 
@@ -492,20 +481,6 @@ public sealed class WallpaperManager : IDisposable
         if (resetCycle)
             _imageStartedAt = DateTime.UtcNow;
         PublishDatabaseImages();
-        if (IsAttackActive
-            && _attackDesktopImageActive
-            && _attackPlaylistSwitchRequested)
-        {
-            _attackDesktopImageActive = false;
-            _attackPlaylistSwitchRequested = false;
-            _attackOverlay?.ReleaseDesktopImage();
-            DiagnosticLog.Write(
-                image is not null
-                    ? "АТАКА СИСТЕМЫ: новые струи перешли от отпечатка "
-                        + "интерфейса к образу плейлиста."
-                    : "АТАКА СИСТЕМЫ: следующий образ недоступен; "
-                        + "отпечаток интерфейса будет стёрт потоком.");
-        }
     }
 
     private static bool IsEnabledImagePath(AppSettings settings, string path)
@@ -536,16 +511,6 @@ public sealed class WallpaperManager : IDisposable
                 return false;
             }
         });
-    }
-
-    private static bool HasUsablePlaylistImage(AppSettings settings)
-    {
-        if (!settings.ImageMode)
-            return false;
-        return settings.ActiveImagePlaylist().Entries.Any(entry =>
-            entry.Enabled
-            && !string.IsNullOrWhiteSpace(entry.Path)
-            && File.Exists(entry.Path));
     }
 
     private void RefreshSecondaryDatabaseChannels(bool forceReload)
@@ -1074,7 +1039,7 @@ public sealed class WallpaperManager : IDisposable
             BeginAttack(manual: false);
     }
 
-    private async void BeginAttack(bool manual)
+    private void BeginAttack(bool manual)
     {
         if (_disposed
             || IsPaused
@@ -1086,25 +1051,10 @@ public sealed class WallpaperManager : IDisposable
         }
 
         _attackStartPending = true;
-        int generation = Interlocked.Increment(
-            ref _attackStartGeneration);
-        CancellationTokenSource cancellation = new();
-        CancellationTokenSource? previous = Interlocked.Exchange(
-            ref _attackStartCancellation,
-            cancellation);
-        previous?.Cancel();
-        previous?.Dispose();
         AppSettings settings = _settings.Copy();
         try
         {
-            AttackStartData startData = await Task.Run(
-                () => PrepareAttackStartData(
-                    cancellation.Token),
-                cancellation.Token);
-            cancellation.Token.ThrowIfCancellationRequested();
             if (_disposed
-                || generation != Volatile.Read(
-                    ref _attackStartGeneration)
                 || IsPaused
                 || !_output.IsRunning
                 || (!manual
@@ -1122,31 +1072,20 @@ public sealed class WallpaperManager : IDisposable
                     "Общий кадр потока недоступен.");
             }
 
+            System.Drawing.Rectangle bounds =
+                System.Windows.Forms.SystemInformation.VirtualScreen;
             AttackOverlayWindow overlay = new(
-                new System.Drawing.Rectangle(
-                    startData.Desktop.Left,
-                    startData.Desktop.Top,
-                    startData.Desktop.Width,
-                    startData.Desktop.Height),
+                bounds,
                 frame,
-                startData.Desktop,
-                _settings.AttackTransitionSeconds,
-                autoReleaseDesktopImage:
-                    !HasUsablePlaylistImage(_settings));
+                _settings.AttackTransitionSeconds);
             overlay.Closed += OnAttackOverlayClosed;
             overlay.ExitStarted += OnAttackExitStarted;
             _attackOverlay = overlay;
-            _attackDesktopImageActive = true;
-            _attackPlaylistSwitchRequested = false;
             _imageStartedAt = DateTime.UtcNow;
             overlay.Start();
             SetRuntimeStatus(
                 "АТАКА СИСТЕМЫ // ИНТЕРФЕЙС ПЕРЕХВАЧЕН ПОТОКОМ",
                 isError: false);
-        }
-        catch (OperationCanceledException)
-        {
-            // A setting change, pause or shutdown cancelled a pending attack.
         }
         catch (Exception exception)
         {
@@ -1160,23 +1099,8 @@ public sealed class WallpaperManager : IDisposable
         }
         finally
         {
-            Interlocked.CompareExchange(
-                ref _attackStartCancellation,
-                null,
-                cancellation);
-            cancellation.Dispose();
             _attackStartPending = false;
         }
-    }
-
-    private static AttackStartData PrepareAttackStartData(
-        CancellationToken cancellationToken)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        CapturedDesktopFrame desktop =
-            DesktopCaptureService.CaptureVirtualDesktop();
-        cancellationToken.ThrowIfCancellationRequested();
-        return new AttackStartData(desktop);
     }
 
     private void OnAttackOverlayClosed()
@@ -1214,8 +1138,6 @@ public sealed class WallpaperManager : IDisposable
         overlay.Closed -= OnAttackOverlayClosed;
         overlay.ExitStarted -= OnAttackExitStarted;
         _attackOverlay = null;
-        _attackDesktopImageActive = false;
-        _attackPlaylistSwitchRequested = false;
         overlay.Dispose();
         if (_disposed || !_output.IsRunning)
             return;
@@ -1229,15 +1151,7 @@ public sealed class WallpaperManager : IDisposable
 
     private void AbortAttackImmediately()
     {
-        Interlocked.Increment(ref _attackStartGeneration);
-        CancellationTokenSource? pending =
-            Interlocked.Exchange(ref _attackStartCancellation, null);
-        pending?.Cancel();
-        pending?.Dispose();
-
         AttackOverlayWindow? overlay = _attackOverlay;
-        _attackDesktopImageActive = false;
-        _attackPlaylistSwitchRequested = false;
         if (overlay is not null)
         {
             overlay.Closed -= OnAttackOverlayClosed;
@@ -1377,7 +1291,4 @@ public sealed class WallpaperManager : IDisposable
             current?.Dispose();
         }
     }
-
-    private sealed record AttackStartData(
-        CapturedDesktopFrame Desktop);
 }

@@ -121,8 +121,6 @@ internal static class AppSettingsComparer
         AppSettings comparablePreset = preset.Copy();
         comparableSettings.ImagePlaylists = [];
         comparablePreset.ImagePlaylists = [];
-        comparableSettings.ActiveImagePlaylistId = "";
-        comparablePreset.ActiveImagePlaylistId = "";
         comparableSettings.ActivePresetId = "";
         comparablePreset.ActivePresetId = "";
         ClearMonitorPlaylists(comparableSettings);
@@ -235,7 +233,6 @@ internal static class AppSettingsComparer
         foreach (MonitorProfile profile in settings.MonitorProfiles)
         {
             profile.Settings.ImagePlaylists = [];
-            profile.Settings.ActiveImagePlaylistId = "";
         }
     }
 

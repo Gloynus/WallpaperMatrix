@@ -1073,23 +1073,7 @@ public partial class SettingsWindow : Window
             preset.Settings,
             current,
             monitors);
-        result.ImagePlaylists = current.ImagePlaylists
-            .Select(playlist => playlist.Copy())
-            .ToList();
-        result.ActiveImagePlaylistId = current.ActiveImagePlaylistId;
-        foreach (MonitorProfile profile in result.MonitorProfiles)
-        {
-            MonitorProfile? currentProfile = MonitorTopology.Find(
-                current.MonitorProfiles,
-                profile.MonitorId);
-            if (currentProfile is null)
-                continue;
-            profile.Settings.ImagePlaylists = currentProfile.Settings.ImagePlaylists
-                .Select(playlist => playlist.Copy())
-                .ToList();
-            profile.Settings.ActiveImagePlaylistId =
-                currentProfile.Settings.ActiveImagePlaylistId;
-        }
+        OperatorPlaylistBinding.Apply(result, current);
         result.WelcomeShown = current.WelcomeShown;
         result.ActivePresetId = preset.Id;
         result.Normalize();
@@ -1137,6 +1121,7 @@ public partial class SettingsWindow : Window
             preset.Settings,
             settings,
             monitors);
+        OperatorPlaylistBinding.Apply(baseline, settings);
         return AppSettingsComparer.PresetEquivalent(
             settings,
             baseline);
