@@ -10,7 +10,7 @@ public static class OperatorDefaults
         ImagePlaylist playlist = new();
         AppSettings settings = new()
         {
-            SettingsVersion = 28,
+            SettingsVersion = 30,
             SpeedMin = 0.01,
             SpeedMax = 0.20,
             Density = 0.80,

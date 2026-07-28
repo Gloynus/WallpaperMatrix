@@ -1,9 +1,9 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using WallpaperMatrix.Models;
 using WallpaperMatrix.Rendering;
 using WallpaperMatrix.Services;
 using DrawingRectangle = System.Drawing.Rectangle;
-using DrawingSize = System.Drawing.Size;
 
 namespace WallpaperMatrix.Native;
 
@@ -14,8 +14,7 @@ namespace WallpaperMatrix.Native;
 internal sealed class NativeWallpaperWindow : IDisposable
 {
     private readonly DrawingRectangle _bounds;
-    private readonly DrawingSize _sceneSize;
-    private IReadOnlyList<DrawingRectangle> _viewports;
+    private readonly MonitorOutputPlan _initialPlan;
     private readonly Thread _thread;
     private readonly CancellationTokenSource _cancellation = new();
     private readonly ManualResetEventSlim _started = new(false);
@@ -23,39 +22,55 @@ internal sealed class NativeWallpaperWindow : IDisposable
     private readonly object _commandLock = new();
     private readonly AppSettings _initialSettings;
     private readonly Action<string, Exception, bool>? _failureHandler;
-    private AppSettings _lastGoodSettings;
-    private AppSettings? _pendingSettings;
+    private MonitorOutputPlan? _pendingPlan;
     private PreparedImage? _pendingImage;
+    private IReadOnlyDictionary<string, PreparedImage?>? _pendingDatabaseImages;
     private bool _hasPendingImage;
     private bool _resetPendingImageOverlay;
     private IntPtr _window;
-    private SharedMatrixScene? _sharedFrame;
+    private readonly List<SceneRuntime> _sceneRuntimes = [];
     private Direct3D11Presenter? _direct3DPresenter;
     private Exception? _startupError;
     private int _paused;
     private bool _disposed;
     private bool _synchronizationDisposed;
 
-    public SharedMatrixScene SharedFrame => _sharedFrame
+    public SharedMatrixScene SharedFrame => _sceneRuntimes
+        .FirstOrDefault()?.Scene
         ?? throw new InvalidOperationException("Общий кадр ещё не создан.");
 
+    public AttackFrameSnapshot CaptureAttackFrame()
+    {
+        IReadOnlyList<MatrixScenePresentation> presentations =
+            BuildPresentations(
+                _initialPlan,
+                captureAttackCutoff: true);
+        long latestStreamId = _sceneRuntimes.Count == 0
+            ? 0
+            : _sceneRuntimes.Max(runtime =>
+            {
+                lock (runtime.Scene.SyncRoot)
+                    return runtime.Scene.LatestStreamId;
+            });
+        return new AttackFrameSnapshot(
+            SharedFrame,
+            presentations,
+            latestStreamId);
+    }
+
     public NativeWallpaperWindow(
-        DrawingRectangle bounds,
-        DrawingSize sceneSize,
-        IReadOnlyList<DrawingRectangle> monitorBounds,
+        MonitorOutputPlan plan,
         AppSettings settings,
         Action<string, Exception, bool>? failureHandler = null)
     {
-        _bounds = bounds;
-        _sceneSize = sceneSize;
-        _viewports = BuildViewports(bounds, monitorBounds);
+        _bounds = plan.VirtualBounds;
+        _initialPlan = plan;
         _initialSettings = settings.Copy();
-        _lastGoodSettings = settings.Copy();
         _failureHandler = failureHandler;
         _thread = new Thread(RenderThreadMain)
         {
             IsBackground = true,
-            Name = $"Wallpaper compositor {bounds.Width}x{bounds.Height}",
+            Name = $"Wallpaper compositor {_bounds.Width}x{_bounds.Height}",
             Priority = ThreadPriority.Lowest
         };
         _thread.SetApartmentState(ApartmentState.MTA);
@@ -70,10 +85,10 @@ internal sealed class NativeWallpaperWindow : IDisposable
             throw new InvalidOperationException("Не удалось создать слой живых обоев.", _startupError);
     }
 
-    public void UpdateSettings(AppSettings settings)
+    public void UpdateSettings(MonitorOutputPlan plan)
     {
         lock (_commandLock)
-            _pendingSettings = settings.Copy();
+            _pendingPlan = plan;
     }
 
     public void SetImage(PreparedImage? image)
@@ -83,6 +98,15 @@ internal sealed class NativeWallpaperWindow : IDisposable
             _pendingImage = image;
             _hasPendingImage = true;
         }
+    }
+
+    public void SetDatabaseImages(
+        IReadOnlyDictionary<string, PreparedImage?> images)
+    {
+        lock (_commandLock)
+            _pendingDatabaseImages = new Dictionary<string, PreparedImage?>(
+                images,
+                StringComparer.OrdinalIgnoreCase);
     }
 
     public void ResetImageOverlay(PreparedImage? image)
@@ -116,7 +140,6 @@ internal sealed class NativeWallpaperWindow : IDisposable
 
     private void RenderThreadMain()
     {
-        MatrixSceneRenderer? renderer = null;
         try
         {
             NativeWindow.EnsureClassRegistered();
@@ -130,36 +153,80 @@ internal sealed class NativeWallpaperWindow : IDisposable
                     "Explorer не предоставил безопасную поверхность под значками "
                     + "рабочего стола.");
             }
-            _sharedFrame = new SharedMatrixScene(
-                _sceneSize.Width,
-                _sceneSize.Height);
-            renderer = new MatrixSceneRenderer(
-                _window,
-                _sharedFrame,
-                _initialSettings);
+            foreach (MonitorScenePlan scenePlan in _initialPlan.Scenes)
+            {
+                SharedMatrixScene scene = new(
+                    Math.Max(1, scenePlan.CanvasBounds.Width),
+                    Math.Max(1, scenePlan.CanvasBounds.Height));
+                MatrixSceneRenderer renderer = new(
+                    _window,
+                    scene,
+                    scenePlan.Settings,
+                    scenePlan.RandomSeed);
+                _sceneRuntimes.Add(new SceneRuntime(
+                    scenePlan.Id,
+                    scenePlan.DatabaseRootMonitorId,
+                    scenePlan.ImageProjection,
+                    scene,
+                    renderer,
+                    scenePlan.Settings.Copy(
+                        includeMonitorProfiles: false)));
+            }
+            if (_sceneRuntimes.Count == 0)
+            {
+                SharedMatrixScene emptyScene = new(1, 1);
+                _sceneRuntimes.Add(new SceneRuntime(
+                    "DISABLED",
+                    "",
+                    new MatrixImageProjection(
+                        1,
+                        1,
+                        new DrawingRectangle(0, 0, 1, 1),
+                        new DrawingRectangle(0, 0, 1, 1)),
+                    emptyScene,
+                    new MatrixSceneRenderer(
+                        _window,
+                        emptyScene,
+                        _initialSettings,
+                        0),
+                    _initialSettings.Copy(
+                        includeMonitorProfiles: false)));
+            }
             _direct3DPresenter = Direct3D11Presenter.Create(
                 _window,
                 _bounds.Width,
                 _bounds.Height,
-                SharedFrame);
+                SharedFrame,
+                transparentSurface:
+                    _initialPlan.ActiveMonitorCount
+                    < System.Windows.Forms.Screen.AllScreens.Length);
             NativeWindow.ShowWindow(_window, NativeWindow.ShowNoActivate);
             NativeWindow.UpdateWindow(_window);
-            long presentedVersion = -1;
+            long presentedVersion = long.MinValue;
             bool nonEmptyFrameConfirmed = false;
-            PresentLatestFrame(ref presentedVersion);
+            PresentLatestFrame(
+                _initialPlan,
+                ref presentedVersion);
             DiagnosticLog.Write(
                 $"Первый кадр передан: renderer=0x{_window.ToInt64():X}; "
-                + $"compositor=True; viewports={_viewports.Count}; "
+                + $"compositor=True; scenes={_initialPlan.Scenes.Count}; "
+                + $"viewports={_initialPlan.ActiveMonitorCount}; "
                 + $"frameVersion={presentedVersion}; "
-                + $"instances={SharedFrame.InstanceCount}; "
+                + $"instances={TotalInstanceCount()}; "
                 + $"surface={_bounds.Width}x{_bounds.Height}.");
             _started.Set();
+            Stopwatch sharedClock = Stopwatch.StartNew();
+            MonitorOutputPlan activePlan = _initialPlan;
 
             while (!_cancellation.IsCancellationRequested)
             {
                 if (Volatile.Read(ref _paused) != 0)
                 {
-                    renderer?.RenderIfDue(paused: true);
+                    TimeSpan pausedAt = sharedClock.Elapsed;
+                    foreach (SceneRuntime runtime in _sceneRuntimes)
+                        runtime.Renderer.RenderIfDue(
+                            paused: true,
+                            pausedAt);
                     try
                     {
                         _renderingEnabled.Wait(_cancellation.Token);
@@ -188,17 +255,26 @@ internal sealed class NativeWallpaperWindow : IDisposable
                 DesktopHost.MaintainDesktopPlacement(_window);
 
                 int waitMilliseconds;
-                if (renderer is not null)
+                if (_sceneRuntimes.Count > 0)
                 {
-                    ApplyPendingCommands(renderer);
-                    renderer.RenderIfDue(paused: false);
-                    waitMilliseconds = renderer.RecommendedWaitMilliseconds(paused: false);
+                    activePlan = ApplyPendingCommands(activePlan);
+                    TimeSpan now = sharedClock.Elapsed;
+                    foreach (SceneRuntime runtime in _sceneRuntimes)
+                        runtime.Renderer.RenderIfDue(
+                            paused: false,
+                            now);
+                    waitMilliseconds = _sceneRuntimes
+                        .Min(runtime =>
+                            runtime.Renderer.RecommendedWaitMilliseconds(
+                                paused: false));
                 }
                 else
                     waitMilliseconds = 25;
-                PresentLatestFrame(ref presentedVersion);
+                PresentLatestFrame(
+                    activePlan,
+                    ref presentedVersion);
                 if (!nonEmptyFrameConfirmed
-                    && SharedFrame.InstanceCount > 0
+                    && TotalInstanceCount() > 0
                     && presentedVersion >= 0)
                 {
                     nonEmptyFrameConfirmed = true;
@@ -206,7 +282,7 @@ internal sealed class NativeWallpaperWindow : IDisposable
                         $"Первый непустой кадр подтверждён: "
                         + $"renderer=0x{_window.ToInt64():X}; "
                         + $"frameVersion={presentedVersion}; "
-                        + $"instances={SharedFrame.InstanceCount}; "
+                        + $"instances={TotalInstanceCount()}; "
                         + $"surface={_bounds.Width}x{_bounds.Height}.");
                 }
                 _cancellation.Token.WaitHandle.WaitOne(waitMilliseconds);
@@ -226,81 +302,170 @@ internal sealed class NativeWallpaperWindow : IDisposable
         }
         finally
         {
-            renderer?.Dispose();
+            foreach (SceneRuntime runtime in _sceneRuntimes)
+                runtime.Dispose();
+            _sceneRuntimes.Clear();
             _direct3DPresenter?.Dispose();
-            _sharedFrame?.Dispose();
             if (_window != IntPtr.Zero && NativeWindow.IsWindow(_window))
                 NativeWindow.DestroyWindow(_window);
             _window = IntPtr.Zero;
         }
     }
 
-    private void PresentLatestFrame(ref long presentedVersion)
+    private void PresentLatestFrame(
+        MonitorOutputPlan plan,
+        ref long presentedVersion)
     {
-        SharedMatrixScene? frame = _sharedFrame;
-        if (frame is null)
+        if (_sceneRuntimes.Count == 0)
             return;
 
-        long version = frame.Version;
+        long version = CombinedSceneVersion();
         if (version == presentedVersion)
             return;
+        IReadOnlyList<MatrixScenePresentation> presentations =
+            BuildPresentations(plan);
         if (_direct3DPresenter?.Present(
                 _bounds.Width,
                 _bounds.Height,
-                _viewports) == true)
+                presentations) == true)
+        {
             presentedVersion = version;
+        }
     }
 
-    private static IReadOnlyList<DrawingRectangle> BuildViewports(
-        DrawingRectangle bounds,
-        IEnumerable<DrawingRectangle> monitorBounds) =>
-        monitorBounds
-            .Select(monitor => new DrawingRectangle(
-                monitor.Left - bounds.Left,
-                monitor.Top - bounds.Top,
-                monitor.Width,
-                monitor.Height))
-            .ToArray();
-
-    private void ApplyPendingCommands(MatrixSceneRenderer renderer)
+    private IReadOnlyList<MatrixScenePresentation> BuildPresentations(
+        MonitorOutputPlan plan,
+        bool captureAttackCutoff = false)
     {
-        AppSettings? settings;
+        Dictionary<string, SceneRuntime> runtimes = _sceneRuntimes
+            .ToDictionary(
+                runtime => runtime.Id,
+                StringComparer.OrdinalIgnoreCase);
+        List<MatrixScenePresentation> presentations = [];
+        foreach (MonitorScenePlan scenePlan in plan.Scenes)
+        {
+            if (!runtimes.TryGetValue(
+                    scenePlan.Id,
+                    out SceneRuntime? runtime))
+            {
+                continue;
+            }
+            presentations.AddRange(scenePlan.Targets.Select(target =>
+            {
+                long attackCutoff = -1;
+                if (captureAttackCutoff)
+                {
+                    lock (runtime.Scene.SyncRoot)
+                        attackCutoff = runtime.Scene.LatestStreamId;
+                }
+                return new MatrixScenePresentation(
+                    runtime.Scene,
+                    target.TargetBounds,
+                    target.SourceBounds,
+                    attackCutoff);
+            }));
+        }
+        return presentations;
+    }
+
+    private MonitorOutputPlan ApplyPendingCommands(
+        MonitorOutputPlan activePlan)
+    {
+        MonitorOutputPlan? pendingPlan;
         PreparedImage? image;
+        IReadOnlyDictionary<string, PreparedImage?>? databaseImages;
         bool hasImage;
         bool resetImageOverlay;
         lock (_commandLock)
         {
-            settings = _pendingSettings;
-            _pendingSettings = null;
+            pendingPlan = _pendingPlan;
+            _pendingPlan = null;
             image = _pendingImage;
+            databaseImages = _pendingDatabaseImages;
+            _pendingDatabaseImages = null;
             hasImage = _hasPendingImage;
             _hasPendingImage = false;
             resetImageOverlay = _resetPendingImageOverlay;
             _resetPendingImageOverlay = false;
         }
 
-        if (settings is not null)
+        if (pendingPlan is not null)
         {
-            try
+            Dictionary<string, MonitorScenePlan> scenes =
+                pendingPlan.Scenes.ToDictionary(
+                    scene => scene.Id,
+                    StringComparer.OrdinalIgnoreCase);
+            foreach (SceneRuntime runtime in _sceneRuntimes)
             {
-                renderer.UpdateSettings(settings);
-                _lastGoodSettings = settings.Copy();
+                if (!scenes.TryGetValue(
+                    runtime.Id,
+                    out MonitorScenePlan? scenePlan))
+                {
+                    continue;
+                }
+                try
+                {
+                    runtime.Renderer.UpdateSettings(
+                        scenePlan.Settings);
+                    runtime.LastGoodSettings =
+                        scenePlan.Settings.Copy(
+                            includeMonitorProfiles: false);
+                }
+                catch (Exception exception)
+                {
+                    ReportFailure(
+                        $"Настройка рендера отклонена; восстановлен размер "
+                        + $"{runtime.LastGoodSettings.FontSize:0.##} px.",
+                        exception,
+                        fatal: false);
+                    runtime.Renderer.UpdateSettings(
+                        runtime.LastGoodSettings);
+                }
             }
-            catch (Exception exception)
-            {
-                ReportFailure(
-                    $"Настройка рендера отклонена; восстановлен размер "
-                    + $"{_lastGoodSettings.FontSize:0.##} px.",
-                    exception,
-                    fatal: false);
-                renderer.UpdateSettings(_lastGoodSettings);
-            }
+            activePlan = pendingPlan;
         }
         if (resetImageOverlay)
-            renderer.ResetImageOverlay(image);
+        {
+            foreach (SceneRuntime runtime in _sceneRuntimes)
+                runtime.Renderer.ResetImageOverlay(image);
+        }
         else if (hasImage)
-            renderer.SetImage(image);
+        {
+            foreach (SceneRuntime runtime in _sceneRuntimes)
+            {
+                runtime.Renderer.SetImage(
+                    image,
+                    runtime.ImageProjection);
+            }
+        }
+        if (databaseImages is not null)
+        {
+            foreach (SceneRuntime runtime in _sceneRuntimes)
+            {
+                databaseImages.TryGetValue(
+                    runtime.DatabaseRootMonitorId,
+                    out PreparedImage? databaseImage);
+                runtime.Renderer.SetImage(
+                    databaseImage,
+                    runtime.ImageProjection);
+            }
+        }
+        return activePlan;
     }
+
+    private long CombinedSceneVersion()
+    {
+        unchecked
+        {
+            long version = 17;
+            foreach (SceneRuntime runtime in _sceneRuntimes)
+                version = version * 31 + runtime.Scene.Version;
+            return version;
+        }
+    }
+
+    private int TotalInstanceCount() =>
+        _sceneRuntimes.Sum(runtime => runtime.Scene.InstanceCount);
 
     private void ReportFailure(string context, Exception exception, bool fatal)
     {
@@ -324,6 +489,38 @@ internal sealed class NativeWallpaperWindow : IDisposable
     {
         RequestClose();
         WaitForClose(TimeSpan.FromSeconds(2));
+    }
+
+    private sealed class SceneRuntime : IDisposable
+    {
+        public string Id { get; }
+        public string DatabaseRootMonitorId { get; }
+        public MatrixImageProjection ImageProjection { get; }
+        public SharedMatrixScene Scene { get; }
+        public MatrixSceneRenderer Renderer { get; }
+        public AppSettings LastGoodSettings { get; set; }
+
+        public SceneRuntime(
+            string id,
+            string databaseRootMonitorId,
+            MatrixImageProjection imageProjection,
+            SharedMatrixScene scene,
+            MatrixSceneRenderer renderer,
+            AppSettings lastGoodSettings)
+        {
+            Id = id;
+            DatabaseRootMonitorId = databaseRootMonitorId;
+            ImageProjection = imageProjection;
+            Scene = scene;
+            Renderer = renderer;
+            LastGoodSettings = lastGoodSettings;
+        }
+
+        public void Dispose()
+        {
+            Renderer.Dispose();
+            Scene.Dispose();
+        }
     }
 
     public void RequestClose()

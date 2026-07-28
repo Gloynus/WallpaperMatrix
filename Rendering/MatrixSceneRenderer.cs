@@ -27,10 +27,11 @@ internal sealed class MatrixSceneRenderer : IDisposable
     private readonly int _width;
     private readonly int _height;
     private readonly double _dpiScale;
-    private readonly Random _random = new();
+    private readonly Random _random;
     private readonly Stopwatch _clock = Stopwatch.StartNew();
     private AppSettings _settings;
     private PreparedImage? _image;
+    private MatrixImageProjection _imageProjection;
     private byte[]? _imageMask;
     private GlyphAtlasData? _pendingAtlas;
     private bool _maskDirty = true;
@@ -97,13 +98,22 @@ internal sealed class MatrixSceneRenderer : IDisposable
     public MatrixSceneRenderer(
         IntPtr referenceWindow,
         SharedMatrixScene scene,
-        AppSettings settings)
+        AppSettings settings,
+        int? randomSeed = null)
     {
         _referenceWindow = referenceWindow;
         _scene = scene;
         _width = scene.Width;
         _height = scene.Height;
+        _imageProjection = new MatrixImageProjection(
+            _width,
+            _height,
+            new System.Drawing.Rectangle(0, 0, _width, _height),
+            new System.Drawing.Rectangle(0, 0, _width, _height));
         _settings = settings.Copy();
+        _random = randomSeed.HasValue
+            ? new Random(randomSeed.Value)
+            : new Random();
         uint dpi = NativeMethods.GetDpiForWindow(referenceWindow);
         _dpiScale = dpi > 0 ? dpi / 96.0 : 1.0;
         RebuildCurveLookups();
@@ -202,6 +212,17 @@ internal sealed class MatrixSceneRenderer : IDisposable
             ClearImageOverlay();
     }
 
+    public void SetImage(
+        PreparedImage? image,
+        MatrixImageProjection projection)
+    {
+        _image = image;
+        _imageProjection = projection;
+        _maskDirty = true;
+        if (image is null)
+            ClearImageOverlay();
+    }
+
     public void ResetImageOverlay(PreparedImage? image)
     {
         _image = image;
@@ -209,9 +230,11 @@ internal sealed class MatrixSceneRenderer : IDisposable
         ClearImageOverlay();
     }
 
-    public bool RenderIfDue(bool paused)
+    public bool RenderIfDue(bool paused) =>
+        RenderIfDue(paused, _clock.Elapsed);
+
+    public bool RenderIfDue(bool paused, TimeSpan now)
     {
-        TimeSpan now = _clock.Elapsed;
         if (paused)
         {
             _lastFrameAt = now;
@@ -1525,15 +1548,21 @@ internal sealed class MatrixSceneRenderer : IDisposable
         {
             int sourceWidth = _image.Width;
             int sourceHeight = _image.Height;
-            double scaleX = _width / (double)sourceWidth;
-            double scaleY = _height / (double)sourceHeight;
+            int canvasWidth = Math.Max(1, _imageProjection.CanvasWidth);
+            int canvasHeight = Math.Max(1, _imageProjection.CanvasHeight);
+            System.Drawing.Rectangle viewport =
+                _imageProjection.ViewportBounds;
+            System.Drawing.Rectangle destination =
+                _imageProjection.DestinationBounds;
+            double scaleX = canvasWidth / (double)sourceWidth;
+            double scaleY = canvasHeight / (double)sourceHeight;
             double scale = _settings.ImageFit == "Fill"
                 ? Math.Max(scaleX, scaleY)
                 : Math.Min(scaleX, scaleY);
             double drawnWidth = sourceWidth * scale;
             double drawnHeight = sourceHeight * scale;
-            double offsetX = (_width - drawnWidth) * 0.5;
-            double offsetY = (_height - drawnHeight) * 0.5;
+            double offsetX = (canvasWidth - drawnWidth) * 0.5;
+            double offsetY = (canvasHeight - drawnHeight) * 0.5;
             byte[] mask = new byte[_columns * _rows];
             double[] offsets = [0.25, 0.75];
             for (int row = 0; row < _rows; row++)
@@ -1549,8 +1578,25 @@ internal sealed class MatrixSceneRenderer : IDisposable
                             samples++;
                             double sampleX = (column + xOffset) * _cellWidth;
                             double sampleY = (row + yOffset) * _cellHeight;
-                            double sourceX = (sampleX - offsetX) / scale;
-                            double sourceY = (sampleY - offsetY) / scale;
+                            if (sampleX < destination.Left
+                                || sampleX >= destination.Right
+                                || sampleY < destination.Top
+                                || sampleY >= destination.Bottom
+                                || destination.Width <= 0
+                                || destination.Height <= 0)
+                            {
+                                continue;
+                            }
+                            double databaseX = viewport.Left
+                                + (sampleX - destination.Left)
+                                * viewport.Width
+                                / destination.Width;
+                            double databaseY = viewport.Top
+                                + (sampleY - destination.Top)
+                                * viewport.Height
+                                / destination.Height;
+                            double sourceX = (databaseX - offsetX) / scale;
+                            double sourceY = (databaseY - offsetY) / scale;
                             if (sourceX < 0
                                 || sourceX >= sourceWidth
                                 || sourceY < 0

@@ -2,7 +2,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:local="clr-namespace:WallpaperMatrix.Views"
-        Title="Wallpaper Matrix 3.2.2 — Operator Console"
+        Title="Wallpaper Matrix — Operator Console"
         Icon="/Assets/WallpaperMatrix.ico"
         Width="740" Height="780" MinWidth="660" MinHeight="620"
         WindowStartupLocation="CenterScreen" WindowStyle="None"
@@ -674,7 +674,7 @@
                      </Grid.ColumnDefinitions>
                     <StackPanel VerticalAlignment="Center">
                         <TextBlock Text="WALLPAPER MATRIX" FontFamily="Consolas" FontSize="20" FontWeight="Bold" Foreground="#9DFFBD"/>
-                        <TextBlock Text="OPERATOR CONSOLE // SIGNAL MODEL 3.2.2" FontFamily="Consolas" FontSize="10" Foreground="#45A967"/>
+                        <TextBlock x:Name="VersionText" Text="OPERATOR CONSOLE" FontFamily="Consolas" FontSize="10" Foreground="#45A967"/>
                     </StackPanel>
                     <Button Grid.Column="1" Content="Gloynus Aleos" Margin="0,0,10,0"
                             Padding="10,6" VerticalAlignment="Center"
@@ -729,6 +729,78 @@
                                         ToolTip="Открыть журнал диагностики"/>
                             </StackPanel>
                         </Grid>
+                    </Border>
+                    <Border Style="{StaticResource SectionBorder}">
+                        <StackPanel>
+                            <StackPanel Orientation="Horizontal"
+                                        Margin="0,0,0,10">
+                                <TextBlock Text="УСТРОЙСТВА ВЫВОДА"
+                                           FontFamily="Consolas"
+                                           FontWeight="Bold"
+                                           Foreground="#00E667"/>
+                                <Button Style="{StaticResource HelpButton}"
+                                        VerticalAlignment="Center"
+                                        ToolTip="Настраивает способ вывода потока и образов на каждом подключённом экране."/>
+                            </StackPanel>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition/>
+                                    <ColumnDefinition Width="18"/>
+                                    <ColumnDefinition/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel>
+                                    <TextBlock Text="Устройство вывода"
+                                               Margin="0,0,0,5"/>
+                                    <ComboBox x:Name="MonitorDeviceCombo"
+                                              SelectionChanged="MonitorDeviceCombo_SelectionChanged">
+                                        <ComboBox.ItemTemplate>
+                                            <DataTemplate>
+                                                <TextBlock Text="{Binding Label}"
+                                                           TextTrimming="CharacterEllipsis"/>
+                                            </DataTemplate>
+                                        </ComboBox.ItemTemplate>
+                                    </ComboBox>
+                                </StackPanel>
+                                <StackPanel Grid.Column="2">
+                                    <TextBlock Text="Поток данных"
+                                               Margin="0,0,0,5"/>
+                                    <ComboBox x:Name="MonitorFlowModeCombo"
+                                              SelectionChanged="MonitorFlowModeCombo_SelectionChanged">
+                                        <ComboBox.ItemTemplate>
+                                            <DataTemplate>
+                                                <TextBlock Text="{Binding Label}"
+                                                           TextTrimming="CharacterEllipsis"/>
+                                            </DataTemplate>
+                                        </ComboBox.ItemTemplate>
+                                    </ComboBox>
+                                </StackPanel>
+                            </Grid>
+                            <Grid Margin="0,9,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition/>
+                                    <ColumnDefinition Width="18"/>
+                                    <ColumnDefinition/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock x:Name="MonitorDeviceDetails"
+                                           VerticalAlignment="Center"
+                                           Foreground="{StaticResource MutedBrush}"
+                                           FontFamily="Consolas"
+                                           TextWrapping="Wrap"/>
+                                <StackPanel Grid.Column="2">
+                                    <TextBlock Text="База данных"
+                                               Margin="0,0,0,5"/>
+                                    <ComboBox x:Name="MonitorDatabaseModeCombo"
+                                              SelectionChanged="MonitorDatabaseModeCombo_SelectionChanged">
+                                        <ComboBox.ItemTemplate>
+                                            <DataTemplate>
+                                                <TextBlock Text="{Binding Label}"
+                                                           TextTrimming="CharacterEllipsis"/>
+                                            </DataTemplate>
+                                        </ComboBox.ItemTemplate>
+                                    </ComboBox>
+                                </StackPanel>
+                            </Grid>
+                        </StackPanel>
                     </Border>
                     <Border Style="{StaticResource SectionBorder}" Visibility="Collapsed">
                         <StackPanel>
@@ -929,10 +1001,44 @@
                                             ToolTip="Настраивает оформление терминала и характеристики струй."/>
                                 </StackPanel>
                                 <Button Grid.Column="1"
+                                        x:Name="CalibratorResetButton"
                                         Style="{StaticResource ResetParameterButton}"
                                         Tag="CurrentContour"
                                         ToolTip="Сбросить выбранный контур целиком"/>
                             </Grid>
+                            <Border x:Name="FlowRoutingNotice"
+                                    Visibility="Collapsed"
+                                    Background="#04140B"
+                                    BorderBrush="#1A6B38"
+                                    BorderThickness="1"
+                                    CornerRadius="4"
+                                    Padding="14,12"
+                                    Margin="0,8,0,0">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel>
+                                        <TextBlock x:Name="FlowRoutingNoticeTitle"
+                                                   Text="КОНТУР ПОЛУЧЕН ИЗ ДРУГОГО УЗЛА"
+                                                   FontFamily="Consolas"
+                                                   FontWeight="Bold"
+                                                   Foreground="#83FFAA"/>
+                                        <TextBlock x:Name="FlowRoutingNoticeText"
+                                                   Margin="0,5,12,0"
+                                                   Foreground="{StaticResource MutedBrush}"
+                                                   TextWrapping="Wrap"/>
+                                    </StackPanel>
+                                    <Button Grid.Column="1"
+                                            x:Name="OpenFlowSourceButton"
+                                            Content="ПЕРЕЙТИ К ИСТОЧНИКУ"
+                                            Padding="11,4"
+                                            VerticalAlignment="Center"
+                                            Style="{StaticResource ActionButton}"
+                                            Click="OpenFlowSourceButton_Click"/>
+                                </Grid>
+                            </Border>
                             <ListBox x:Name="CurveKindCombo"
                                      Style="{StaticResource ContourTabs}"
                                      PreviewMouseLeftButtonDown="CurveKindTabs_PreviewMouseLeftButtonDown"
@@ -1799,7 +1905,7 @@
 
                     <Border Style="{StaticResource SectionBorder}">
                         <StackPanel>
-                            <Grid>
+                            <Grid x:Name="DatabaseHeaderPanel">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition/>
                                     <ColumnDefinition Width="Auto"/>
@@ -1816,6 +1922,38 @@
                                         Tag="DatabaseBlock" VerticalAlignment="Center"
                                         ToolTip="Сбросить всю базу данных"/>
                             </Grid>
+                            <Border x:Name="DatabaseRoutingNotice"
+                                    Visibility="Collapsed"
+                                    Background="#04140B"
+                                    BorderBrush="#1A6B38"
+                                    BorderThickness="1"
+                                    CornerRadius="4"
+                                    Padding="14,12"
+                                    Margin="0,10,0,0">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel>
+                                        <TextBlock x:Name="DatabaseRoutingNoticeTitle"
+                                                   FontFamily="Consolas"
+                                                   FontWeight="Bold"
+                                                   Foreground="#83FFAA"/>
+                                        <TextBlock x:Name="DatabaseRoutingNoticeText"
+                                                   Margin="0,5,12,0"
+                                                   Foreground="{StaticResource MutedBrush}"
+                                                   TextWrapping="Wrap"/>
+                                    </StackPanel>
+                                    <Button Grid.Column="1"
+                                            x:Name="OpenDatabaseSourceButton"
+                                            Content="ПЕРЕЙТИ К ИСТОЧНИКУ"
+                                            Padding="11,4"
+                                            VerticalAlignment="Center"
+                                            Style="{StaticResource ActionButton}"
+                                            Click="OpenDatabaseSourceButton_Click"/>
+                                </Grid>
+                            </Border>
                             <StackPanel x:Name="DatabaseContentPanel">
                             <Border Style="{StaticResource SubsectionBorder}">
                             <StackPanel>

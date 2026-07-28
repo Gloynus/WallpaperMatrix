@@ -16,12 +16,21 @@ internal sealed class WallpaperOutputSession : IDisposable
     private readonly Action<string, Exception, bool> _failureHandler;
     private AppSettings _settings = new();
     private PreparedImage? _image;
+    private IReadOnlyDictionary<string, PreparedImage?> _databaseImages =
+        new Dictionary<string, PreparedImage?>();
+    private IReadOnlyList<MonitorDescriptor> _monitors = [];
+    private MonitorOutputPlan? _plan;
+    private bool _suspended;
     private bool _disposed;
     private int _screenCount;
 
     public bool IsRunning => _windows.Count > 0;
     public SharedMatrixScene? SharedFrame =>
         _windows.Count > 0 ? _windows[0].SharedFrame : null;
+    public AttackFrameSnapshot? CaptureAttackFrame() =>
+        _windows.Count > 0
+            ? _windows[0].CaptureAttackFrame()
+            : null;
     public int WindowCount => _screenCount;
     public int TargetWidth { get; private set; } = 2560;
     public int TargetHeight { get; private set; } = 1440;
@@ -64,8 +73,18 @@ internal sealed class WallpaperOutputSession : IDisposable
     public void UpdateSettings(AppSettings settings)
     {
         _settings = settings.Copy();
+        MonitorTopology.EnsureProfiles(_settings, _monitors);
+        MonitorOutputPlan nextPlan =
+            MonitorOutputPlan.Create(_settings, _monitors);
+        if (_plan is null
+            || !TopologyEquivalent(_plan, nextPlan))
+        {
+            Restart(_settings, _image, _suspended);
+            return;
+        }
+        _plan = nextPlan;
         foreach (NativeWallpaperWindow window in _windows)
-            window.UpdateSettings(_settings);
+            window.UpdateSettings(nextPlan);
     }
 
     public void SetImage(PreparedImage? image)
@@ -73,6 +92,16 @@ internal sealed class WallpaperOutputSession : IDisposable
         _image = image;
         foreach (NativeWallpaperWindow window in _windows)
             window.SetImage(image);
+    }
+
+    public void SetDatabaseImages(
+        IReadOnlyDictionary<string, PreparedImage?> images)
+    {
+        _databaseImages = new Dictionary<string, PreparedImage?>(
+            images,
+            StringComparer.OrdinalIgnoreCase);
+        foreach (NativeWallpaperWindow window in _windows)
+            window.SetDatabaseImages(_databaseImages);
     }
 
     public void ResetImageOverlay(PreparedImage? image)
@@ -84,6 +113,7 @@ internal sealed class WallpaperOutputSession : IDisposable
 
     public void Activate()
     {
+        _suspended = false;
         foreach (NativeWallpaperWindow window in _windows)
             window.SetPaused(false);
         DesktopHost.ShowWallpaperSurface();
@@ -119,6 +149,7 @@ internal sealed class WallpaperOutputSession : IDisposable
 
     public void Suspend()
     {
+        _suspended = true;
         foreach (NativeWallpaperWindow window in _windows)
             window.SetPaused(true);
         DesktopHost.HideWallpaperSurface();
@@ -134,40 +165,69 @@ internal sealed class WallpaperOutputSession : IDisposable
 
     private void CreateWindows()
     {
-        System.Windows.Forms.Screen[] screens = System.Windows.Forms.Screen.AllScreens
-            .OrderByDescending(screen => screen.Primary)
-            .ToArray();
-        if (screens.Length == 0)
+        _monitors = MonitorCatalog.Capture();
+        if (_monitors.Count == 0)
             throw new InvalidOperationException(
                 "Windows не сообщила ни об одном активном экране.");
+        MonitorTopology.EnsureProfiles(_settings, _monitors);
+        _plan = MonitorOutputPlan.Create(_settings, _monitors);
 
         DiagnosticLog.Write(
             "Обнаружены экраны: "
             + string.Join(
                 "; ",
-                screens.Select(screen =>
-                    $"{screen.DeviceName} {screen.Bounds.Width}x{screen.Bounds.Height} "
-                    + $"@ ({screen.Bounds.Left},{screen.Bounds.Top}) "
-                    + $"primary={screen.Primary}")));
+                _monitors.Select(monitor =>
+                    $"{monitor.SystemName} «{monitor.FriendlyName}» "
+                    + $"{monitor.Bounds.Width}x{monitor.Bounds.Height} "
+                    + $"@ ({monitor.Bounds.Left},{monitor.Bounds.Top}) "
+                    + $"primary={monitor.Primary}")));
+        IReadOnlyDictionary<string, MonitorRoute> flowRoutes =
+            MonitorTopology.Resolve(
+                    _settings.MonitorProfiles,
+                    _monitors,
+                    MonitorRouteDomain.Flow)
+                .ToDictionary(
+                    route => route.MonitorId,
+                    StringComparer.OrdinalIgnoreCase);
+        IReadOnlyDictionary<string, MonitorRoute> databaseRoutes =
+            MonitorTopology.Resolve(
+                    _settings.MonitorProfiles,
+                    _monitors,
+                    MonitorRouteDomain.Database)
+                .ToDictionary(
+                    route => route.MonitorId,
+                    StringComparer.OrdinalIgnoreCase);
+        DiagnosticLog.Write(
+            "Маршрутизация устройств: "
+            + string.Join(
+                "; ",
+                _monitors.Select(monitor =>
+                {
+                    MonitorRoute flow = flowRoutes[monitor.Id];
+                    MonitorRoute database = databaseRoutes[monitor.Id];
+                    return $"{monitor.FriendlyName}: "
+                        + $"поток={flow.Mode}->{flow.RootMonitorId}; "
+                        + $"база={database.Mode}->{database.RootMonitorId}";
+                }))
+            + $"; сцен={_plan.Scenes.Count}; "
+            + $"активных устройств={_plan.ActiveMonitorCount}.");
 
         List<NativeWallpaperWindow> created = [];
         try
         {
-            System.Drawing.Rectangle virtualBounds =
-                System.Windows.Forms.SystemInformation.VirtualScreen;
             NativeWallpaperWindow compositor = new(
-                virtualBounds,
-                screens[0].Bounds.Size,
-                screens.Select(screen => screen.Bounds).ToArray(),
+                _plan,
                 _settings,
                 failureHandler: _failureHandler);
             created.Add(compositor);
             compositor.Start();
-            TargetWidth = compositor.SharedFrame.Width;
-            TargetHeight = compositor.SharedFrame.Height;
+            TargetWidth = Math.Max(1, _plan.VirtualBounds.Width);
+            TargetHeight = Math.Max(1, _plan.VirtualBounds.Height);
 
             _windows.AddRange(created);
-            _screenCount = screens.Length;
+            _screenCount = _monitors.Count;
+            if (_databaseImages.Count > 0)
+                compositor.SetDatabaseImages(_databaseImages);
         }
         catch
         {
@@ -184,7 +244,57 @@ internal sealed class WallpaperOutputSession : IDisposable
         NativeWallpaperWindow[] closingWindows = _windows.ToArray();
         _windows.Clear();
         _screenCount = 0;
+        _plan = null;
         CloseWindowList(closingWindows, restoreSystemWallpaper);
+    }
+
+    private static bool TopologyEquivalent(
+        MonitorOutputPlan left,
+        MonitorOutputPlan right)
+    {
+        if (left.VirtualBounds != right.VirtualBounds
+            || left.Scenes.Count != right.Scenes.Count
+            || left.ActiveMonitorCount != right.ActiveMonitorCount)
+        {
+            return false;
+        }
+        for (int sceneIndex = 0;
+             sceneIndex < left.Scenes.Count;
+             sceneIndex++)
+        {
+            MonitorScenePlan leftScene = left.Scenes[sceneIndex];
+            MonitorScenePlan rightScene = right.Scenes[sceneIndex];
+            if (!string.Equals(
+                    leftScene.Id,
+                    rightScene.Id,
+                    StringComparison.OrdinalIgnoreCase)
+                || leftScene.CanvasBounds != rightScene.CanvasBounds
+                || leftScene.Targets.Count != rightScene.Targets.Count)
+            {
+                return false;
+            }
+            for (int targetIndex = 0;
+                 targetIndex < leftScene.Targets.Count;
+                 targetIndex++)
+            {
+                MonitorSceneTarget leftTarget =
+                    leftScene.Targets[targetIndex];
+                MonitorSceneTarget rightTarget =
+                    rightScene.Targets[targetIndex];
+                if (!string.Equals(
+                        leftTarget.MonitorId,
+                        rightTarget.MonitorId,
+                        StringComparison.OrdinalIgnoreCase)
+                    || leftTarget.TargetBounds
+                        != rightTarget.TargetBounds
+                    || leftTarget.SourceBounds
+                        != rightTarget.SourceBounds)
+                {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     private static void CloseWindowList(

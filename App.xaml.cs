@@ -41,11 +41,23 @@ public partial class App : System.Windows.Application
                 argument,
                 "--validate-attack",
                 StringComparison.OrdinalIgnoreCase));
-        if (validateShaders || validateAttack)
+        bool validateTopology = e.Args.Any(argument =>
+            string.Equals(
+                argument,
+                "--validate-topology",
+                StringComparison.OrdinalIgnoreCase));
+        if (validateShaders || validateAttack || validateTopology)
         {
             try
             {
-                Direct3D11Presenter.ValidateShaders();
+                if (validateShaders || validateAttack)
+                    Direct3D11Presenter.ValidateShaders();
+                if (validateTopology)
+                {
+                    MonitorTopologyValidation.Validate();
+                    DiagnosticLog.Write(
+                        "Самопроверка маршрутизации устройств вывода завершена успешно.");
+                }
                 if (validateAttack)
                 {
                     CapturedDesktopFrame capture =
@@ -56,14 +68,17 @@ public partial class App : System.Windows.Application
                         + $"начало=({capture.Left},{capture.Top}); "
                         + $"BGRA={capture.Pixels.Length} байт.");
                 }
-                DiagnosticLog.Write(
-                    "Самопроверка шейдеров D3D11 завершена успешно.");
+                if (validateShaders || validateAttack)
+                {
+                    DiagnosticLog.Write(
+                        "Самопроверка шейдеров D3D11 завершена успешно.");
+                }
                 Shutdown(0);
             }
             catch (Exception exception)
             {
                 DiagnosticLog.Write(
-                    "Самопроверка шейдеров D3D11 завершилась ошибкой.",
+                    "Самопроверка Wallpaper Matrix завершилась ошибкой.",
                     exception);
                 Shutdown(1);
             }
@@ -103,8 +118,16 @@ public partial class App : System.Windows.Application
 
         _settingsStore = new SettingsStore();
         _settings = _settingsStore.Load();
+        IReadOnlyList<MonitorDescriptor> startupMonitors =
+            MonitorCatalog.Capture();
+        MonitorTopology.EnsureProfiles(
+            _settings,
+            startupMonitors);
         _playlistStore = new PlaylistStore();
         _playlistStore.LoadInto(_settings);
+        MonitorSettingsSynchronizer.SynchronizePrimary(
+            _settings,
+            startupMonitors);
 
         _wallpaperManager = new WallpaperManager(_settings);
         _wallpaperManager.PauseStateChanged += OnWallpaperPauseStateChanged;
@@ -264,13 +287,30 @@ public partial class App : System.Windows.Application
             .Select(playlist => playlist.Copy())
             .ToList();
         _settings.ActiveImagePlaylistId = liveDraft.ActiveImagePlaylistId;
+        foreach (MonitorProfile liveProfile in liveDraft.MonitorProfiles)
+        {
+            MonitorProfile? savedProfile = MonitorTopology.Find(
+                _settings.MonitorProfiles,
+                liveProfile.MonitorId);
+            if (savedProfile is null)
+                continue;
+            savedProfile.Settings.ImagePlaylists =
+                liveProfile.Settings.ImagePlaylists
+                    .Select(playlist => playlist.Copy())
+                    .ToList();
+            savedProfile.Settings.ActiveImagePlaylistId =
+                liveProfile.Settings.ActiveImagePlaylistId;
+        }
         _settings.Normalize();
         _playlistStore?.Save(_settings);
         _wallpaperManager?.ApplySettings(liveDraft);
     }
 
-    private void PreviewImage(AppSettings preview, string path) =>
-        _wallpaperManager?.ShowImage(preview, path);
+    private void PreviewImage(
+        AppSettings preview,
+        string path,
+        string monitorId) =>
+        _wallpaperManager?.ShowImage(preview, path, monitorId);
 
     private void SetWallpaperPaused(bool paused) =>
         _wallpaperManager?.SetPaused(paused);

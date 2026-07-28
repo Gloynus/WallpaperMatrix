@@ -8,7 +8,15 @@ public sealed class PlaylistStore
 {
     private sealed class PlaylistDocument
     {
-        public int FormatVersion { get; set; } = 1;
+        public int FormatVersion { get; set; } = 2;
+        public string ActivePlaylistId { get; set; } = "";
+        public List<ImagePlaylist> Playlists { get; set; } = [];
+        public List<MonitorPlaylistDocument> MonitorPlaylists { get; set; } = [];
+    }
+
+    private sealed class MonitorPlaylistDocument
+    {
+        public string MonitorId { get; set; } = "";
         public string ActivePlaylistId { get; set; } = "";
         public List<ImagePlaylist> Playlists { get; set; } = [];
     }
@@ -40,6 +48,35 @@ public sealed class PlaylistStore
                 .Select(playlist => playlist.Copy())
                 .ToList();
             settings.ActiveImagePlaylistId = document.ActivePlaylistId;
+            if (document.MonitorPlaylists is null
+                || document.MonitorPlaylists.Count == 0)
+            {
+                foreach (MonitorProfile profile in settings.MonitorProfiles)
+                {
+                    profile.Settings.ImagePlaylists =
+                        settings.ImagePlaylists
+                            .Select(playlist => playlist.Copy())
+                            .ToList();
+                    profile.Settings.ActiveImagePlaylistId =
+                        settings.ActiveImagePlaylistId;
+                }
+            }
+            foreach (MonitorPlaylistDocument monitorDocument
+                     in document.MonitorPlaylists ?? [])
+            {
+                MonitorProfile? profile = MonitorTopology.Find(
+                    settings.MonitorProfiles,
+                    monitorDocument.MonitorId);
+                if (profile is null)
+                    continue;
+                profile.Settings.ImagePlaylists =
+                    (monitorDocument.Playlists ?? [])
+                        .Select(playlist => playlist.Copy())
+                        .ToList();
+                profile.Settings.ActiveImagePlaylistId =
+                    monitorDocument.ActivePlaylistId;
+                profile.Settings.Normalize(includeMonitorProfiles: false);
+            }
             settings.Normalize();
         }
         catch (Exception exception)
@@ -65,6 +102,17 @@ public sealed class PlaylistStore
                 ActivePlaylistId = normalized.ActiveImagePlaylistId,
                 Playlists = normalized.ImagePlaylists
                     .Select(playlist => playlist.Copy())
+                    .ToList(),
+                MonitorPlaylists = normalized.MonitorProfiles
+                    .Select(profile => new MonitorPlaylistDocument
+                    {
+                        MonitorId = profile.MonitorId,
+                        ActivePlaylistId =
+                            profile.Settings.ActiveImagePlaylistId,
+                        Playlists = profile.Settings.ImagePlaylists
+                            .Select(playlist => playlist.Copy())
+                            .ToList()
+                    })
                     .ToList()
             };
             AtomicFile.WriteAllText(

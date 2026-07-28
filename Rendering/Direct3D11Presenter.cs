@@ -15,6 +15,18 @@ using DrawingRectangle = System.Drawing.Rectangle;
 
 namespace WallpaperMatrix.Rendering;
 
+internal sealed record MatrixScenePresentation(
+    SharedMatrixScene Scene,
+    DrawingRectangle TargetBounds,
+    DrawingRectangle SourceBounds,
+    long AttackStreamCutoff = -1,
+    long ScreenshotStreamCutoff = -1);
+
+internal sealed record AttackFrameSnapshot(
+    SharedMatrixScene PrimaryScene,
+    IReadOnlyList<MatrixScenePresentation> Presentations,
+    long LatestStreamId);
+
 /// <summary>
 /// Draws the shared glyph scene with Direct3D 11 and presents it through a
 /// DirectComposition swap chain. The compositor path works for both ordinary
@@ -34,7 +46,7 @@ internal sealed class Direct3D11Presenter : IDisposable
         FeatureLevel.Level_10_0
     ];
 
-    private readonly SharedMatrixScene _scene;
+    private readonly SharedMatrixScene _defaultScene;
     private readonly ID3D11Device _device;
     private readonly ID3D11DeviceContext _context;
     private readonly IDXGISwapChain1 _swapChain;
@@ -54,14 +66,11 @@ internal sealed class Direct3D11Presenter : IDisposable
     private readonly ID3D11SamplerState _sampler;
     private readonly ID3D11BlendState _blendState;
     private readonly bool _transparentSurface;
-    private ID3D11Buffer? _instanceBuffer;
-    private ID3D11Texture2D? _atlasTexture;
-    private ID3D11ShaderResourceView? _atlasView;
+    private readonly Dictionary<SharedMatrixScene, SceneGpuResources>
+        _sceneResources =
+            new(ReferenceEqualityComparer.Instance);
     private ID3D11Texture2D? _transitionTexture;
     private ID3D11ShaderResourceView? _transitionView;
-    private int _instanceCapacity;
-    private long _uploadedVersion = -1;
-    private long _uploadedAtlasVersion = -1;
     private float _desktopOpacity;
     private float _glyphOpacity = 1;
     private float _attackStreamCutoff;
@@ -84,7 +93,7 @@ internal sealed class Direct3D11Presenter : IDisposable
         if (targetWidth <= 0 || targetHeight <= 0)
             throw new ArgumentOutOfRangeException(nameof(targetWidth));
 
-        _scene = scene;
+        _defaultScene = scene;
         _transparentSurface = transparentSurface;
 
         Result deviceResult = D3D11.D3D11CreateDevice(
@@ -367,27 +376,50 @@ internal sealed class Direct3D11Presenter : IDisposable
     public bool Present(
         int targetWidth,
         int targetHeight,
-        IReadOnlyList<DrawingRectangle> viewports)
+        IReadOnlyList<DrawingRectangle> viewports) =>
+        Present(
+            targetWidth,
+            targetHeight,
+            viewports.Select(viewport => new MatrixScenePresentation(
+                    _defaultScene,
+                    viewport,
+                    new DrawingRectangle(
+                        0,
+                        0,
+                        _defaultScene.Width,
+                        _defaultScene.Height)))
+                .ToArray());
+
+    public bool Present(
+        int targetWidth,
+        int targetHeight,
+        IReadOnlyList<MatrixScenePresentation> presentations)
     {
         if (_disposed || targetWidth <= 0 || targetHeight <= 0)
             return false;
 
         long frameStartedAt = Stopwatch.GetTimestamp();
-        MatrixRenderParameters parameters;
-        GlyphAtlasData atlas;
-        int instanceCount;
-        lock (_scene.SyncRoot)
+        List<SceneDrawState> drawStates = [];
+        foreach (MatrixScenePresentation presentation in presentations)
         {
-            UploadAtlasIfNeeded();
-            long version = _scene.Version;
-            if (_uploadedVersion != version)
+            SharedMatrixScene scene = presentation.Scene;
+            SceneGpuResources resources = ResourcesFor(scene);
+            lock (scene.SyncRoot)
             {
-                UploadInstances();
-                _uploadedVersion = version;
+                UploadAtlasIfNeeded(scene, resources);
+                long version = scene.Version;
+                if (resources.UploadedVersion != version)
+                {
+                    UploadInstances(scene, resources);
+                    resources.UploadedVersion = version;
+                }
+                drawStates.Add(new SceneDrawState(
+                    presentation,
+                    resources,
+                    scene.Parameters,
+                    scene.Atlas,
+                    scene.InstanceCount));
             }
-            parameters = _scene.Parameters;
-            atlas = _scene.Atlas;
-            instanceCount = _scene.InstanceCount;
         }
         long uploadFinishedAt = Stopwatch.GetTimestamp();
 
@@ -397,10 +429,7 @@ internal sealed class Direct3D11Presenter : IDisposable
         Draw(
             targetWidth,
             targetHeight,
-            viewports,
-            parameters,
-            atlas,
-            instanceCount);
+            drawStates);
         Result presentResult = _swapChain.Present(0, PresentFlags.None);
         if (presentResult.Failure)
         {
@@ -448,21 +477,36 @@ internal sealed class Direct3D11Presenter : IDisposable
             + $"поверхность={(_transparentSurface ? "АТАКА" : "рабочий стол")}.");
     }
 
-    private void UploadAtlasIfNeeded()
+    private SceneGpuResources ResourcesFor(SharedMatrixScene scene)
     {
-        long atlasVersion = _scene.AtlasVersion;
-        if (_uploadedAtlasVersion == atlasVersion)
+        if (_sceneResources.TryGetValue(
+            scene,
+            out SceneGpuResources? resources))
+        {
+            return resources;
+        }
+        resources = new SceneGpuResources();
+        _sceneResources.Add(scene, resources);
+        return resources;
+    }
+
+    private void UploadAtlasIfNeeded(
+        SharedMatrixScene scene,
+        SceneGpuResources resources)
+    {
+        long atlasVersion = scene.AtlasVersion;
+        if (resources.UploadedAtlasVersion == atlasVersion)
             return;
 
-        GlyphAtlasData atlas = _scene.Atlas;
+        GlyphAtlasData atlas = scene.Atlas;
         if (atlas.Width <= 0 || atlas.Height <= 0 || atlas.Pixels.Length == 0)
             throw new InvalidOperationException("Атлас символов пуст.");
 
         _context.PSSetShaderResource(
             0,
             (ID3D11ShaderResourceView)null!);
-        _atlasView?.Dispose();
-        _atlasTexture?.Dispose();
+        resources.AtlasView?.Dispose();
+        resources.AtlasTexture?.Dispose();
 
         Texture2DDescription description = new(
             Format.R8_UNorm,
@@ -479,38 +523,42 @@ internal sealed class Direct3D11Presenter : IDisposable
                 pixels.AddrOfPinnedObject(),
                 (uint)atlas.Width,
                 (uint)(atlas.Width * atlas.Height));
-            _atlasTexture = _device.CreateTexture2D(
+            resources.AtlasTexture = _device.CreateTexture2D(
                 description,
                 initialData);
-            _atlasView = _device.CreateShaderResourceView(_atlasTexture);
+            resources.AtlasView = _device.CreateShaderResourceView(
+                resources.AtlasTexture);
         }
         finally
         {
             pixels.Free();
         }
 
-        _uploadedAtlasVersion = atlasVersion;
+        resources.UploadedAtlasVersion = atlasVersion;
     }
 
-    private unsafe void UploadInstances()
+    private unsafe void UploadInstances(
+        SharedMatrixScene scene,
+        SceneGpuResources resources)
     {
-        int count = _scene.InstanceCount;
+        int count = scene.InstanceCount;
         if (count <= 0)
             return;
 
-        EnsureInstanceCapacity(count);
+        EnsureInstanceCapacity(resources, count);
         MappedSubresource mapped = _context.Map(
-            _instanceBuffer!,
+            resources.InstanceBuffer!,
             0,
             MapMode.WriteDiscard,
             Vortice.Direct3D11.MapFlags.None);
         GCHandle instances = GCHandle.Alloc(
-            _scene.Instances,
+            scene.Instances,
             GCHandleType.Pinned);
         try
         {
             long byteCount = checked((long)count * InstanceStride);
-            long destinationSize = checked((long)_instanceCapacity * InstanceStride);
+            long destinationSize = checked(
+                (long)resources.InstanceCapacity * InstanceStride);
             Buffer.MemoryCopy(
                 instances.AddrOfPinnedObject().ToPointer(),
                 mapped.DataPointer.ToPointer(),
@@ -520,21 +568,27 @@ internal sealed class Direct3D11Presenter : IDisposable
         finally
         {
             instances.Free();
-            _context.Unmap(_instanceBuffer!, 0);
+            _context.Unmap(resources.InstanceBuffer!, 0);
         }
     }
 
-    private void EnsureInstanceCapacity(int requiredCount)
+    private void EnsureInstanceCapacity(
+        SceneGpuResources resources,
+        int requiredCount)
     {
-        if (_instanceBuffer is not null && _instanceCapacity >= requiredCount)
+        if (resources.InstanceBuffer is not null
+            && resources.InstanceCapacity >= requiredCount)
+        {
             return;
+        }
 
-        _instanceBuffer?.Dispose();
-        _instanceCapacity = Math.Max(
+        resources.InstanceBuffer?.Dispose();
+        resources.InstanceCapacity = Math.Max(
             requiredCount,
-            Math.Max(1024, _instanceCapacity * 2));
-        uint byteWidth = checked((uint)(_instanceCapacity * InstanceStride));
-        _instanceBuffer = _device.CreateBuffer(
+            Math.Max(1024, resources.InstanceCapacity * 2));
+        uint byteWidth = checked(
+            (uint)(resources.InstanceCapacity * InstanceStride));
+        resources.InstanceBuffer = _device.CreateBuffer(
             new BufferDescription(
                 byteWidth,
                 BindFlags.VertexBuffer,
@@ -545,142 +599,144 @@ internal sealed class Direct3D11Presenter : IDisposable
     private void Draw(
         int targetWidth,
         int targetHeight,
-        IReadOnlyList<DrawingRectangle> viewports,
-        MatrixRenderParameters parameters,
-        GlyphAtlasData atlas,
-        int instanceCount)
+        IReadOnlyList<SceneDrawState> states)
     {
-        if (_atlasView is null)
-            return;
-
         _context.OMSetRenderTargets(_renderTargetView);
         _context.OMSetBlendState(_blendState);
         _context.ClearRenderTargetView(
             _renderTargetView,
             _transparentSurface
                 ? new Color4(0, 0, 0, 0)
-                : new Color4(
-                    (float)parameters.BackgroundRed,
-                    (float)parameters.BackgroundGreen,
-                    (float)parameters.BackgroundBlue,
-                    1));
+                : new Color4(0, 0, 0, 1));
 
-        if (_attackModeEnabled > 0.5f)
+        foreach (SceneDrawState state in states)
         {
-            // The attack surface starts fully transparent. The real desktop,
-            // including its already-running wallpaper, remains visible below
-            // it while this veil grows to the configured background colour.
-            DrawTakeoverVeil(
-                targetWidth,
-                targetHeight,
-                parameters);
+            if (state.Presentation.TargetBounds.Width <= 0
+                || state.Presentation.TargetBounds.Height <= 0
+                || state.Resources.AtlasView is null)
+            {
+                continue;
+            }
+
+            if (_attackModeEnabled > 0.5f)
+            {
+                // The attack surface starts fully transparent. The real
+                // desktop remains visible below it while this veil grows.
+                DrawBackground(
+                    state.Presentation.TargetBounds,
+                    state.Parameters,
+                    1.0f - _desktopOpacity);
+            }
+            else
+            {
+                DrawBackground(
+                    state.Presentation.TargetBounds,
+                    state.Parameters,
+                    1);
+            }
             DrawGlyphPass(
                 targetWidth,
                 targetHeight,
-                viewports,
-                parameters,
-                atlas,
-                instanceCount,
-                streamFilterMode: 1,
-                screenshotInfluence: 1,
-                solidBody: 1,
-                haloFactor: _attackHaloFactor);
-        }
-        else
-        {
-            DrawGlyphPass(
-                targetWidth,
-                targetHeight,
-                viewports,
-                parameters,
-                atlas,
-                instanceCount,
-                streamFilterMode: 0,
-                screenshotInfluence: 0,
-                solidBody: 0,
-                haloFactor: 1);
+                state,
+                streamFilterMode:
+                    _attackModeEnabled > 0.5f ? 1 : 0,
+                screenshotInfluence:
+                    _attackModeEnabled > 0.5f ? 1 : 0,
+                solidBody:
+                    _attackModeEnabled > 0.5f ? 1 : 0,
+                haloFactor:
+                    _attackModeEnabled > 0.5f
+                        ? _attackHaloFactor
+                        : 1);
         }
     }
 
     private void DrawGlyphPass(
         int targetWidth,
         int targetHeight,
-        IReadOnlyList<DrawingRectangle> viewports,
-        MatrixRenderParameters parameters,
-        GlyphAtlasData atlas,
-        int instanceCount,
+        SceneDrawState state,
         float streamFilterMode,
         float screenshotInfluence,
         float solidBody,
         float haloFactor)
     {
-        if (_instanceBuffer is null || instanceCount <= 0)
+        if (state.Resources.InstanceBuffer is null
+            || state.InstanceCount <= 0
+            || state.Resources.AtlasView is null)
+        {
             return;
+        }
 
         _context.IASetInputLayout(_inputLayout);
         _context.IASetPrimitiveTopology(PrimitiveTopology.TriangleStrip);
         _context.IASetVertexBuffers(
             0,
-            [_quadBuffer, _instanceBuffer],
+            [_quadBuffer, state.Resources.InstanceBuffer],
             [QuadStride, InstanceStride],
             [0, 0]);
         _context.VSSetShader(_vertexShader);
         _context.VSSetConstantBuffer(0, _constantBuffer);
         _context.PSSetShader(_pixelShader);
         _context.PSSetConstantBuffer(0, _constantBuffer);
-        _context.PSSetShaderResource(0, _atlasView!);
+        _context.PSSetShaderResource(
+            0,
+            state.Resources.AtlasView);
         _context.PSSetShaderResource(1, _transitionView!);
         _context.PSSetSampler(0, _sampler);
-        double sourceAspect =
-            parameters.SourceWidth / (double)parameters.SourceHeight;
-        foreach (DrawingRectangle viewport in viewports)
-        {
-            if (viewport.Width <= 0 || viewport.Height <= 0)
-                continue;
+        DrawingRectangle viewport = state.Presentation.TargetBounds;
+        DrawingRectangle source = state.Presentation.SourceBounds;
+        double sourceAspect = source.Width / (double)source.Height;
+        double viewportAspect = viewport.Width / (double)viewport.Height;
+        float aspectScaleX = viewportAspect < sourceAspect
+            ? (float)(sourceAspect / viewportAspect)
+            : 1;
+        float aspectScaleY = viewportAspect > sourceAspect
+            ? (float)(viewportAspect / sourceAspect)
+            : 1;
 
-            double viewportAspect =
-                viewport.Width / (double)viewport.Height;
-            float aspectScaleX = viewportAspect < sourceAspect
-                ? (float)(sourceAspect / viewportAspect)
-                : 1;
-            float aspectScaleY = viewportAspect > sourceAspect
-                ? (float)(viewportAspect / sourceAspect)
-                : 1;
-
-            _context.RSSetViewport(
-                new Viewport(
-                    viewport.Left,
-                    viewport.Top,
-                    viewport.Width,
-                    viewport.Height,
-                    0,
-                    1));
-            ShaderConstants constants = new(
-                parameters,
-                atlas.GlyphCount,
-                aspectScaleX,
-                aspectScaleY,
-                targetWidth,
-                targetHeight,
-                _glyphOpacity,
-                _attackStreamCutoff,
-                streamFilterMode,
-                screenshotInfluence,
-                solidBody,
-                haloFactor,
-                _screenshotStreamCutoff,
-                _screenshotLimitEnabled,
+        _context.RSSetViewport(
+            new Viewport(
                 viewport.Left,
                 viewport.Top,
                 viewport.Width,
-                viewport.Height);
-            UpdateConstantBuffer(constants);
-            _context.DrawInstanced(
-                4,
-                (uint)instanceCount,
+                viewport.Height,
                 0,
-                0);
-        }
+                1));
+        ShaderConstants constants = new(
+            state.Parameters,
+            state.Atlas.GlyphCount,
+            aspectScaleX,
+            aspectScaleY,
+            targetWidth,
+            targetHeight,
+            _glyphOpacity,
+            _attackModeEnabled > 0.5f
+                && state.Presentation.AttackStreamCutoff >= 0
+                    ? state.Presentation.AttackStreamCutoff
+                    : _attackStreamCutoff,
+            streamFilterMode,
+            screenshotInfluence,
+            solidBody,
+            haloFactor,
+            _attackModeEnabled > 0.5f
+                && state.Presentation.ScreenshotStreamCutoff >= 0
+                    ? state.Presentation.ScreenshotStreamCutoff
+                    : _screenshotStreamCutoff,
+            _screenshotLimitEnabled,
+            viewport.Left,
+            viewport.Top,
+            viewport.Width,
+            viewport.Height,
+            source.Left,
+            source.Top,
+            source.Width,
+            source.Height);
+        UpdateConstantBuffer(constants);
+        _context.DrawInstanced(
+            4,
+            (uint)state.InstanceCount,
+            0,
+            0);
 
         _context.PSSetShaderResource(
             0,
@@ -690,21 +746,24 @@ internal sealed class Direct3D11Presenter : IDisposable
             (ID3D11ShaderResourceView)null!);
     }
 
-    private void DrawTakeoverVeil(
-        int targetWidth,
-        int targetHeight,
-        MatrixRenderParameters parameters)
+    private void DrawBackground(
+        DrawingRectangle target,
+        MatrixRenderParameters parameters,
+        float opacity)
     {
-        float veilOpacity = 1.0f - _desktopOpacity;
-        if (veilOpacity <= 0.0001f)
+        if (opacity <= 0.0001f
+            || target.Width <= 0
+            || target.Height <= 0)
+        {
             return;
+        }
 
         _context.RSSetViewport(
             new Viewport(
-                0,
-                0,
-                targetWidth,
-                targetHeight,
+                target.Left,
+                target.Top,
+                target.Width,
+                target.Height,
                 0,
                 1));
         _context.IASetInputLayout(_transitionInputLayout);
@@ -714,7 +773,7 @@ internal sealed class Direct3D11Presenter : IDisposable
         _context.PSSetShader(_transitionPixelShader);
         _context.PSSetConstantBuffer(0, _transitionConstantBuffer);
         UpdateTransitionConstantBuffer(
-            new TransitionShaderConstants(parameters, veilOpacity));
+            new TransitionShaderConstants(parameters, opacity));
         _context.Draw(4, 0);
     }
 
@@ -775,11 +834,11 @@ internal sealed class Direct3D11Presenter : IDisposable
             // A removed graphics device must not prevent desktop restoration.
         }
 
-        _atlasView?.Dispose();
-        _atlasTexture?.Dispose();
+        foreach (SceneGpuResources resources in _sceneResources.Values)
+            resources.Dispose();
+        _sceneResources.Clear();
         _transitionView?.Dispose();
         _transitionTexture?.Dispose();
-        _instanceBuffer?.Dispose();
         _blendState.Dispose();
         _sampler.Dispose();
         _transitionConstantBuffer.Dispose();
@@ -800,6 +859,33 @@ internal sealed class Direct3D11Presenter : IDisposable
         _device.Dispose();
     }
 
+    private sealed class SceneGpuResources : IDisposable
+    {
+        public ID3D11Buffer? InstanceBuffer;
+        public ID3D11Texture2D? AtlasTexture;
+        public ID3D11ShaderResourceView? AtlasView;
+        public int InstanceCapacity;
+        public long UploadedVersion = -1;
+        public long UploadedAtlasVersion = -1;
+
+        public void Dispose()
+        {
+            AtlasView?.Dispose();
+            AtlasTexture?.Dispose();
+            InstanceBuffer?.Dispose();
+            AtlasView = null;
+            AtlasTexture = null;
+            InstanceBuffer = null;
+        }
+    }
+
+    private sealed record SceneDrawState(
+        MatrixScenePresentation Presentation,
+        SceneGpuResources Resources,
+        MatrixRenderParameters Parameters,
+        GlyphAtlasData Atlas,
+        int InstanceCount);
+
     private static string FormatFeatureLevel(FeatureLevel level) =>
         level switch
         {
@@ -815,6 +901,8 @@ internal sealed class Direct3D11Presenter : IDisposable
     {
         public readonly Vector2 SourceSize;
         public readonly Vector2 CellSize;
+        public readonly Vector2 SourceOrigin;
+        public readonly Vector2 SourceViewportSize;
         public readonly Vector2 AspectScale;
         public readonly Vector2 TargetSize;
         public readonly float GlyphCount;
@@ -853,7 +941,11 @@ internal sealed class Direct3D11Presenter : IDisposable
             float viewportLeft,
             float viewportTop,
             float viewportWidth,
-            float viewportHeight)
+            float viewportHeight,
+            float sourceLeft,
+            float sourceTop,
+            float sourceWidth,
+            float sourceHeight)
         {
             SourceSize = new(
                 parameters.SourceWidth,
@@ -861,6 +953,8 @@ internal sealed class Direct3D11Presenter : IDisposable
             CellSize = new(
                 parameters.CellWidth,
                 parameters.CellHeight);
+            SourceOrigin = new(sourceLeft, sourceTop);
+            SourceViewportSize = new(sourceWidth, sourceHeight);
             AspectScale = new(aspectScaleX, aspectScaleY);
             TargetSize = new(targetWidth, targetHeight);
             GlyphCount = glyphCount;
@@ -912,6 +1006,8 @@ internal sealed class Direct3D11Presenter : IDisposable
         {
             float2 SourceSize;
             float2 CellSize;
+            float2 SourceOrigin;
+            float2 SourceViewportSize;
             float2 AspectScale;
             float2 TargetSize;
             float GlyphCount;
@@ -967,9 +1063,10 @@ internal sealed class Direct3D11Presenter : IDisposable
                 input.Corner * (1.0 + expansion * 2.0) - expansion;
             float2 pixel =
                 (input.CellGlyphLevel.xy + localCorner) * CellSize;
+            float2 localPixel = pixel - SourceOrigin;
             float2 clip = float2(
-                pixel.x / SourceSize.x * 2.0 - 1.0,
-                1.0 - pixel.y / SourceSize.y * 2.0);
+                localPixel.x / SourceViewportSize.x * 2.0 - 1.0,
+                1.0 - localPixel.y / SourceViewportSize.y * 2.0);
             output.Position = float4(clip * AspectScale, 0.0, 1.0);
 
             float atlasStyle = 0.0;
@@ -993,9 +1090,11 @@ internal sealed class Direct3D11Presenter : IDisposable
             output.StreamId = input.Detail.w;
             float2 centerPixel =
                 (input.CellGlyphLevel.xy + 0.5) * CellSize;
+            float2 localCenterPixel =
+                centerPixel - SourceOrigin;
             float2 centerClip = float2(
-                centerPixel.x / SourceSize.x * 2.0 - 1.0,
-                1.0 - centerPixel.y / SourceSize.y * 2.0)
+                localCenterPixel.x / SourceViewportSize.x * 2.0 - 1.0,
+                1.0 - localCenterPixel.y / SourceViewportSize.y * 2.0)
                 * AspectScale;
             float2 centerInViewport = float2(
                 centerClip.x * 0.5 + 0.5,

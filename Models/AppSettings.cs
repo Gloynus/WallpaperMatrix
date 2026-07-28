@@ -9,7 +9,7 @@ public sealed class AppSettings
     public const double MinimumImageDurationSeconds = 0.1;
     public const double MaximumImageDurationSeconds = 600.0;
 
-    public int SettingsVersion { get; set; } = 28;
+    public int SettingsVersion { get; set; } = 30;
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public double Speed { get; set; }
     public double SpeedMin { get; set; } = 0.20;
@@ -103,8 +103,9 @@ public sealed class AppSettings
     public double AttackTransitionSeconds { get; set; } = 8.0;
     public bool WelcomeShown { get; set; }
     public string ActivePresetId { get; set; } = "";
+    public List<MonitorProfile> MonitorProfiles { get; set; } = [];
 
-    public AppSettings Copy() => new()
+    public AppSettings Copy(bool includeMonitorProfiles = true) => new()
     {
         SettingsVersion = SettingsVersion,
         Speed = Speed,
@@ -182,10 +183,13 @@ public sealed class AppSettings
         AttackIdleMinutes = AttackIdleMinutes,
         AttackTransitionSeconds = AttackTransitionSeconds,
         WelcomeShown = WelcomeShown,
-        ActivePresetId = ActivePresetId
+        ActivePresetId = ActivePresetId,
+        MonitorProfiles = includeMonitorProfiles
+            ? MonitorProfiles.Select(profile => profile.Copy()).ToList()
+            : []
     };
 
-    public void Normalize()
+    public void Normalize(bool includeMonitorProfiles = true)
     {
         if (SettingsVersion < 2)
         {
@@ -453,6 +457,13 @@ public sealed class AppSettings
             AttackTransitionSeconds = 8.0;
             SettingsVersion = 28;
         }
+        if (SettingsVersion < 29)
+        {
+            MonitorProfiles = [];
+            SettingsVersion = 29;
+        }
+        if (SettingsVersion < 30)
+            SettingsVersion = 30;
         SpeedMin = Math.Clamp(
             SpeedMin,
             MinimumSpeed,
@@ -587,6 +598,28 @@ public sealed class AppSettings
             1.0,
             30.0);
         ActivePresetId = ActivePresetId?.Trim() ?? "";
+        MonitorProfiles ??= [];
+        if (includeMonitorProfiles)
+        {
+            HashSet<string> monitorIds =
+                new(StringComparer.OrdinalIgnoreCase);
+            MonitorProfiles = MonitorProfiles
+                .Where(profile => profile is not null)
+                .Select(profile =>
+                {
+                    profile.Normalize();
+                    return profile;
+                })
+                .Where(profile =>
+                    !string.IsNullOrWhiteSpace(profile.MonitorId)
+                    && monitorIds.Add(profile.MonitorId))
+                .Take(32)
+                .ToList();
+        }
+        else
+        {
+            MonitorProfiles = [];
+        }
     }
 
     public ImagePlaylist ActiveImagePlaylist() =>

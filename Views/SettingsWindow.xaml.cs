@@ -27,7 +27,23 @@ public partial class SettingsWindow : Window
             : $"Изменён: {Preset.ModifiedLabel}";
     }
 
+    private sealed class MonitorChoice
+    {
+        public required MonitorDescriptor Monitor { get; init; }
+        public string Label => Monitor.Label;
+    }
+
+    private sealed class MonitorRouteChoice
+    {
+        public required MonitorLinkMode Mode { get; init; }
+        public string SourceMonitorId { get; init; } = "";
+        public required string Label { get; init; }
+    }
+
     private AppSettings _source = new();
+    private AppSettings _draftSettings = new();
+    private IReadOnlyList<MonitorDescriptor> _monitors = [];
+    private string _selectedMonitorId = "";
     private readonly DispatcherTimer _previewTimer;
     private readonly DispatcherTimer _fontPreviewTimer;
     private readonly DispatcherTimer _colorPreviewTimer;
@@ -76,13 +92,16 @@ public partial class SettingsWindow : Window
     public event Action<AppSettings>? SettingsApplied;
     public event Action<AppSettings>? PlaylistsSaved;
     public event Action<AppSettings>? SettingsPreviewed;
-    public event Action<AppSettings, string>? ImageRequested;
+    public event Action<AppSettings, string, string>? ImageRequested;
     public event Action<bool>? PauseRequested;
     public event Action? AttackRequested;
 
     public SettingsWindow()
     {
         InitializeComponent();
+        Title = $"{AppVersion.DisplayName} — Operator Console";
+        VersionText.Text =
+            $"OPERATOR CONSOLE // SIGNAL MODEL {AppVersion.Current}";
         _previewTimer = new DispatcherTimer(DispatcherPriority.Background)
         {
             Interval = TimeSpan.FromMilliseconds(280)
@@ -127,125 +146,143 @@ public partial class SettingsWindow : Window
 
     public void LoadSettings(AppSettings settings)
     {
-        _source = settings.Copy();
-        _livePreviewFontSize = settings.FontSize;
-        _livePreviewGlyphStretch = settings.GlyphStretch;
-        _livePreviewGlyphWeight = settings.GlyphWeight;
-        _speedMinValue = settings.SpeedMin;
-        _speedMaxValue = settings.SpeedMax;
-        _memoryMinValue = settings.MemoryDurationMin;
-        _memoryMaxValue = settings.MemoryDurationMax;
-        _imageDurationSecondsValue = settings.ImageDurationSeconds;
-        _attackIdleMinutesValue = settings.AttackIdleMinutes;
+        LoadSettingsCore(settings, preserveAppliedSettings: false);
+    }
+
+    private void LoadSettingsCore(
+        AppSettings settings,
+        bool preserveAppliedSettings)
+    {
+        AppSettings container = settings.Copy();
+        _monitors = MonitorCatalog.Capture();
+        MonitorTopology.EnsureProfiles(container, _monitors);
+        if (!preserveAppliedSettings)
+            _source = container.Copy();
+        _draftSettings = container.Copy();
+        EnsureSelectedMonitor();
+        AppSettings displaySettings = SelectedMonitorSettings(_draftSettings);
+
+        _livePreviewFontSize = displaySettings.FontSize;
+        _livePreviewGlyphStretch = displaySettings.GlyphStretch;
+        _livePreviewGlyphWeight = displaySettings.GlyphWeight;
+        _speedMinValue = displaySettings.SpeedMin;
+        _speedMaxValue = displaySettings.SpeedMax;
+        _memoryMinValue = displaySettings.MemoryDurationMin;
+        _memoryMaxValue = displaySettings.MemoryDurationMax;
+        _imageDurationSecondsValue = displaySettings.ImageDurationSeconds;
+        _attackIdleMinutesValue = container.AttackIdleMinutes;
         _attackTransitionSecondsValue =
-            settings.AttackTransitionSeconds;
+            container.AttackTransitionSeconds;
         _loading = true;
+        RefreshMonitorTopologyUi();
         SpeedMinSlider.Value = Math.Clamp(
-            settings.SpeedMin,
+            displaySettings.SpeedMin,
             SpeedMinSlider.Minimum,
             SpeedMinSlider.Maximum);
         SpeedMaxSlider.Value = Math.Clamp(
-            settings.SpeedMax,
+            displaySettings.SpeedMax,
             SpeedMaxSlider.Minimum,
             SpeedMaxSlider.Maximum);
-        DensitySlider.Value = settings.Density;
-        TrailMinSlider.Value = settings.TrailLengthMin;
-        TrailMaxSlider.Value = settings.TrailLengthMax;
+        DensitySlider.Value = displaySettings.Density;
+        TrailMinSlider.Value = displaySettings.TrailLengthMin;
+        TrailMaxSlider.Value = displaySettings.TrailLengthMax;
         MemoryMinSlider.Value = Math.Clamp(
-            settings.MemoryDurationMin,
+            displaySettings.MemoryDurationMin,
             MemoryMinSlider.Minimum,
             MemoryMinSlider.Maximum);
         MemoryMaxSlider.Value = Math.Clamp(
-            settings.MemoryDurationMax,
+            displaySettings.MemoryDurationMax,
             MemoryMaxSlider.Minimum,
             MemoryMaxSlider.Maximum);
-        SignalMinSlider.Value = settings.SignalStrengthMin;
-        SignalMaxSlider.Value = settings.SignalStrengthMax;
-        SignalGlowKeysSlider.Value = settings.SignalGlowKeys;
-        SignalGlowPrioritySlider.Value = settings.SignalGlowPriority;
-        HeadBrightnessSlider.Value = settings.HeadBrightness;
-        HeadGlowSlider.Value = settings.HeadGlow;
-        HeadImpulseDecaySlider.Value = settings.HeadImpulseDecay;
-        HeadImpulseProbabilitySlider.Value = settings.HeadImpulseProbability;
-        HeadWeightSlider.Value = settings.HeadWeight;
-        InterceptionSlider.Value = settings.InterceptionRate;
-        StreamLifetimeMinSlider.Value = settings.StreamLifetimeMin;
-        StreamLifetimeMaxSlider.Value = settings.StreamLifetimeMax;
-        FontSizeSlider.Value = settings.FontSize;
-        GlyphStretchSlider.Value = settings.GlyphStretch;
-        GlyphWeightSlider.Value = settings.GlyphWeight;
-        SignalHueSlider.Value = settings.SignalHue;
-        SignalBrightnessSlider.Value = settings.SignalBrightness;
-        BackgroundHueSlider.Value = settings.BackgroundHue;
-        BackgroundBrightnessSlider.Value = settings.BackgroundBrightness;
+        SignalMinSlider.Value = displaySettings.SignalStrengthMin;
+        SignalMaxSlider.Value = displaySettings.SignalStrengthMax;
+        SignalGlowKeysSlider.Value = displaySettings.SignalGlowKeys;
+        SignalGlowPrioritySlider.Value = displaySettings.SignalGlowPriority;
+        HeadBrightnessSlider.Value = displaySettings.HeadBrightness;
+        HeadGlowSlider.Value = displaySettings.HeadGlow;
+        HeadImpulseDecaySlider.Value = displaySettings.HeadImpulseDecay;
+        HeadImpulseProbabilitySlider.Value = displaySettings.HeadImpulseProbability;
+        HeadWeightSlider.Value = displaySettings.HeadWeight;
+        InterceptionSlider.Value = displaySettings.InterceptionRate;
+        StreamLifetimeMinSlider.Value = displaySettings.StreamLifetimeMin;
+        StreamLifetimeMaxSlider.Value = displaySettings.StreamLifetimeMax;
+        FontSizeSlider.Value = displaySettings.FontSize;
+        GlyphStretchSlider.Value = displaySettings.GlyphStretch;
+        GlyphWeightSlider.Value = displaySettings.GlyphWeight;
+        SignalHueSlider.Value = displaySettings.SignalHue;
+        SignalBrightnessSlider.Value = displaySettings.SignalBrightness;
+        BackgroundHueSlider.Value = displaySettings.BackgroundHue;
+        BackgroundBrightnessSlider.Value = displaySettings.BackgroundBrightness;
         DurationSlider.Value = Math.Clamp(
-            settings.ImageDurationSeconds,
+            displaySettings.ImageDurationSeconds,
             DurationSlider.Minimum,
             DurationSlider.Maximum);
-        ImageExpressivenessSlider.Value = settings.ImageExpressiveness;
-        ImageGlyphMatchSlider.Value = settings.ImageGlyphMatch;
-        ImageStabilitySlider.Value = settings.ImageStability;
-        ImageResistanceSlider.Value = settings.ImageResistance;
-        ImageBrightnessSlider.Value = settings.ImageBrightness;
-        ImageLocalContrastSlider.Value = settings.ImageLocalContrast;
-        ImageDetailStrengthSlider.Value = settings.ImageDetailStrength;
-        ImageEdgeStrengthSlider.Value = settings.ImageEdgeStrength;
-        ImageShadowBalanceSlider.Value = settings.ImageShadowBalance;
-        ImagePaletteAdaptationSlider.Value = settings.ImagePaletteAdaptation;
-        ImageToneCalmnessSlider.Value = settings.ImageToneCalmness;
-        _lengthCurve = FlowCurveMath.Normalize(settings.TrailLengthCurve, increasing: true);
-        _speedCurve = FlowCurveMath.Normalize(settings.SpeedCurve, increasing: true);
-        _signalCurve = FlowCurveMath.Normalize(settings.SignalCurve, increasing: true);
-        _filterCurve = FlowCurveMath.Normalize(settings.StreamFilterCurve, increasing: true);
-        _memoryCurve = FlowCurveMath.Normalize(settings.MemoryCurve, increasing: true);
+        ImageExpressivenessSlider.Value = displaySettings.ImageExpressiveness;
+        ImageGlyphMatchSlider.Value = displaySettings.ImageGlyphMatch;
+        ImageStabilitySlider.Value = displaySettings.ImageStability;
+        ImageResistanceSlider.Value = displaySettings.ImageResistance;
+        ImageBrightnessSlider.Value = displaySettings.ImageBrightness;
+        ImageLocalContrastSlider.Value = displaySettings.ImageLocalContrast;
+        ImageDetailStrengthSlider.Value = displaySettings.ImageDetailStrength;
+        ImageEdgeStrengthSlider.Value = displaySettings.ImageEdgeStrength;
+        ImageShadowBalanceSlider.Value = displaySettings.ImageShadowBalance;
+        ImagePaletteAdaptationSlider.Value = displaySettings.ImagePaletteAdaptation;
+        ImageToneCalmnessSlider.Value = displaySettings.ImageToneCalmness;
+        _lengthCurve = FlowCurveMath.Normalize(displaySettings.TrailLengthCurve, increasing: true);
+        _speedCurve = FlowCurveMath.Normalize(displaySettings.SpeedCurve, increasing: true);
+        _signalCurve = FlowCurveMath.Normalize(displaySettings.SignalCurve, increasing: true);
+        _filterCurve = FlowCurveMath.Normalize(displaySettings.StreamFilterCurve, increasing: true);
+        _memoryCurve = FlowCurveMath.Normalize(displaySettings.MemoryCurve, increasing: true);
         _curveAdjustments[FlowCurveProfiles.SpeedKind] =
-            settings.SpeedCurveAdjustment.Copy();
+            displaySettings.SpeedCurveAdjustment.Copy();
         _curveAdjustments[FlowCurveProfiles.LengthKind] =
-            settings.TrailLengthCurveAdjustment.Copy();
+            displaySettings.TrailLengthCurveAdjustment.Copy();
         _curveAdjustments[FlowCurveProfiles.SignalKind] =
-            settings.SignalCurveAdjustment.Copy();
+            displaySettings.SignalCurveAdjustment.Copy();
         _curveAdjustments[FlowCurveProfiles.FilterKind] =
-            settings.StreamFilterCurveAdjustment.Copy();
+            displaySettings.StreamFilterCurveAdjustment.Copy();
         _curveAdjustments[FlowCurveProfiles.MemoryKind] =
-            settings.MemoryCurveAdjustment.Copy();
-        ImageModeCheck.IsChecked = settings.ImageMode;
-        ClockEnabledCheck.IsChecked = settings.ClockEnabled;
-        ClockHorizontalMarginSlider.Value = settings.ClockHorizontalMarginCells;
-        ClockVerticalMarginSlider.Value = settings.ClockVerticalMarginCells;
-        ClockBrightnessSlider.Value = settings.ClockBrightness;
-        ClockWeightSlider.Value = settings.ClockWeight;
-        _playlists = settings.ImagePlaylists
+            displaySettings.MemoryCurveAdjustment.Copy();
+        ImageModeCheck.IsChecked = displaySettings.ImageMode;
+        ClockEnabledCheck.IsChecked = displaySettings.ClockEnabled;
+        ClockHorizontalMarginSlider.Value = displaySettings.ClockHorizontalMarginCells;
+        ClockVerticalMarginSlider.Value = displaySettings.ClockVerticalMarginCells;
+        ClockBrightnessSlider.Value = displaySettings.ClockBrightness;
+        ClockWeightSlider.Value = displaySettings.ClockWeight;
+        _playlists = displaySettings.ImagePlaylists
             .Select(playlist => playlist.Copy())
             .ToList();
-        _activePlaylistId = settings.ActiveImagePlaylistId;
+        _activePlaylistId = displaySettings.ActiveImagePlaylistId;
         RefreshPlaylistUi();
-        RefreshPresetCatalog(settings.ActivePresetId);
+        RefreshPresetCatalog(container.ActivePresetId);
         _source.ActivePresetId = _selectedPresetId;
-        AutostartCheck.IsChecked = settings.StartWithWindows;
-        PauseDuringFullscreenAppsCheck.IsChecked = settings.PauseDuringFullscreenApps;
+        AutostartCheck.IsChecked = container.StartWithWindows;
+        PauseDuringFullscreenAppsCheck.IsChecked = container.PauseDuringFullscreenApps;
         AttackSystemEnabledCheck.IsChecked =
-            settings.AttackSystemEnabled;
+            container.AttackSystemEnabled;
         AttackIdleMinutesSlider.Value = Math.Clamp(
-            settings.AttackIdleMinutes,
+            container.AttackIdleMinutes,
             AttackIdleMinutesSlider.Minimum,
             AttackIdleMinutesSlider.Maximum);
         AttackTransitionSecondsSlider.Value = Math.Clamp(
-            settings.AttackTransitionSeconds,
+            container.AttackTransitionSeconds,
             AttackTransitionSecondsSlider.Minimum,
             AttackTransitionSecondsSlider.Maximum);
         UpdateCollapsibleSections();
-        EnsureFontOption(settings.FontFamily);
-        SelectByTag(FontCombo, settings.FontFamily);
-        SelectByTag(ImageFitCombo, settings.ImageFit);
-        SelectByTag(ImagePreparationModeCombo, settings.ImagePreparationMode);
-        SelectByTag(ImageStructureModeCombo, settings.ImageStructureMode);
-        SelectByTag(ClockPositionCombo, settings.ClockPosition);
-        SelectByTag(FpsCombo, settings.FramesPerSecond.ToString());
+        EnsureFontOption(displaySettings.FontFamily);
+        SelectByTag(FontCombo, displaySettings.FontFamily);
+        SelectByTag(ImageFitCombo, displaySettings.ImageFit);
+        SelectByTag(ImagePreparationModeCombo, displaySettings.ImagePreparationMode);
+        SelectByTag(ImageStructureModeCombo, displaySettings.ImageStructureMode);
+        SelectByTag(ClockPositionCombo, displaySettings.ClockPosition);
+        SelectByTag(FpsCombo, container.FramesPerSecond.ToString());
         if (CurveKindCombo.SelectedIndex < 0)
             SelectByTag(CurveKindCombo, FlowCurveProfiles.TerminalKind);
         RefreshCurveEditor();
         UpdateImagePreparationUi();
-        _hasPendingChanges = false;
+        UpdateMonitorRouteNotices();
+        _hasPendingChanges = preserveAppliedSettings
+            && !AppSettingsComparer.Equivalent(_source, _draftSettings);
         _previewTimer.Stop();
         _fontPreviewTimer.Stop();
         _colorPreviewTimer.Stop();
@@ -371,9 +408,11 @@ public partial class SettingsWindow : Window
             return;
         SettingsApplied?.Invoke(updated);
         _source = updated.Copy();
-        _livePreviewFontSize = updated.FontSize;
-        _livePreviewGlyphStretch = updated.GlyphStretch;
-        _livePreviewGlyphWeight = updated.GlyphWeight;
+        _draftSettings = updated.Copy();
+        AppSettings appliedDisplay = SelectedMonitorSettings(_draftSettings);
+        _livePreviewFontSize = appliedDisplay.FontSize;
+        _livePreviewGlyphStretch = appliedDisplay.GlyphStretch;
+        _livePreviewGlyphWeight = appliedDisplay.GlyphWeight;
         _hasPendingChanges = false;
         UpdateFooterButtons();
         StatusText.Text = updated.ImageMode && !HasAvailablePlaylistImages(updated)
@@ -383,73 +422,75 @@ public partial class SettingsWindow : Window
 
     private AppSettings ReadSettingsFromControls()
     {
-        AppSettings updated = _source.Copy();
-        updated.SpeedMin = _speedMinValue;
-        updated.SpeedMax = _speedMaxValue;
-        updated.Density = DensitySlider.Value;
-        updated.TrailLengthMin = TrailMinSlider.Value;
-        updated.TrailLengthMax = TrailMaxSlider.Value;
-        updated.MemoryDurationMin = _memoryMinValue;
-        updated.MemoryDurationMax = _memoryMaxValue;
-        updated.SignalStrengthMin = SignalMinSlider.Value;
-        updated.SignalStrengthMax = SignalMaxSlider.Value;
-        updated.SignalGlowKeys = SignalGlowKeysSlider.Value;
-        updated.SignalGlowPriority = SignalGlowPrioritySlider.Value;
-        updated.HeadBrightness = HeadBrightnessSlider.Value;
-        updated.HeadGlow = HeadGlowSlider.Value;
-        updated.HeadImpulseDecay = HeadImpulseDecaySlider.Value;
-        updated.HeadImpulseProbability = HeadImpulseProbabilitySlider.Value;
-        updated.HeadWeight = HeadWeightSlider.Value;
-        updated.InterceptionRate = InterceptionSlider.Value;
-        updated.StreamLifetimeMin = StreamLifetimeMinSlider.Value;
-        updated.StreamLifetimeMax = StreamLifetimeMaxSlider.Value;
-        updated.SpeedCurve = _speedCurve.Select(point => point.Copy()).ToList();
-        updated.TrailLengthCurve = _lengthCurve.Select(point => point.Copy()).ToList();
-        updated.SignalCurve = _signalCurve.Select(point => point.Copy()).ToList();
-        updated.StreamFilterCurve = _filterCurve.Select(point => point.Copy()).ToList();
-        updated.MemoryCurve = _memoryCurve.Select(point => point.Copy()).ToList();
-        updated.SpeedCurveAdjustment =
+        AppSettings updated = _draftSettings.Copy();
+        MonitorTopology.EnsureProfiles(updated, _monitors);
+        AppSettings display = SelectedMonitorSettings(updated);
+        display.SpeedMin = _speedMinValue;
+        display.SpeedMax = _speedMaxValue;
+        display.Density = DensitySlider.Value;
+        display.TrailLengthMin = TrailMinSlider.Value;
+        display.TrailLengthMax = TrailMaxSlider.Value;
+        display.MemoryDurationMin = _memoryMinValue;
+        display.MemoryDurationMax = _memoryMaxValue;
+        display.SignalStrengthMin = SignalMinSlider.Value;
+        display.SignalStrengthMax = SignalMaxSlider.Value;
+        display.SignalGlowKeys = SignalGlowKeysSlider.Value;
+        display.SignalGlowPriority = SignalGlowPrioritySlider.Value;
+        display.HeadBrightness = HeadBrightnessSlider.Value;
+        display.HeadGlow = HeadGlowSlider.Value;
+        display.HeadImpulseDecay = HeadImpulseDecaySlider.Value;
+        display.HeadImpulseProbability = HeadImpulseProbabilitySlider.Value;
+        display.HeadWeight = HeadWeightSlider.Value;
+        display.InterceptionRate = InterceptionSlider.Value;
+        display.StreamLifetimeMin = StreamLifetimeMinSlider.Value;
+        display.StreamLifetimeMax = StreamLifetimeMaxSlider.Value;
+        display.SpeedCurve = _speedCurve.Select(point => point.Copy()).ToList();
+        display.TrailLengthCurve = _lengthCurve.Select(point => point.Copy()).ToList();
+        display.SignalCurve = _signalCurve.Select(point => point.Copy()).ToList();
+        display.StreamFilterCurve = _filterCurve.Select(point => point.Copy()).ToList();
+        display.MemoryCurve = _memoryCurve.Select(point => point.Copy()).ToList();
+        display.SpeedCurveAdjustment =
             AdjustmentFor(FlowCurveProfiles.SpeedKind).Copy();
-        updated.TrailLengthCurveAdjustment =
+        display.TrailLengthCurveAdjustment =
             AdjustmentFor(FlowCurveProfiles.LengthKind).Copy();
-        updated.SignalCurveAdjustment =
+        display.SignalCurveAdjustment =
             AdjustmentFor(FlowCurveProfiles.SignalKind).Copy();
-        updated.StreamFilterCurveAdjustment =
+        display.StreamFilterCurveAdjustment =
             AdjustmentFor(FlowCurveProfiles.FilterKind).Copy();
-        updated.MemoryCurveAdjustment =
+        display.MemoryCurveAdjustment =
             AdjustmentFor(FlowCurveProfiles.MemoryKind).Copy();
-        updated.FontSize = FontSizeSlider.Value;
-        updated.GlyphStretch = GlyphStretchSlider.Value;
-        updated.GlyphWeight = GlyphWeightSlider.Value;
-        updated.SignalHue = SignalHueSlider.Value;
-        updated.SignalBrightness = SignalBrightnessSlider.Value;
-        updated.BackgroundHue = BackgroundHueSlider.Value;
-        updated.BackgroundBrightness = BackgroundBrightnessSlider.Value;
-        updated.ImageDurationSeconds = _imageDurationSecondsValue;
-        updated.ImageExpressiveness = ImageExpressivenessSlider.Value;
-        updated.ImageGlyphMatch = ImageGlyphMatchSlider.Value;
-        updated.ImageStability = ImageStabilitySlider.Value;
-        updated.ImageResistance = ImageResistanceSlider.Value;
-        updated.ImageBrightness = ImageBrightnessSlider.Value;
-        updated.ImagePreparationMode = SelectedTag(ImagePreparationModeCombo, "Auto");
-        updated.ImageLocalContrast = ImageLocalContrastSlider.Value;
-        updated.ImageDetailStrength = ImageDetailStrengthSlider.Value;
-        updated.ImageEdgeStrength = ImageEdgeStrengthSlider.Value;
-        updated.ImageShadowBalance = ImageShadowBalanceSlider.Value;
-        updated.ImagePaletteAdaptation = ImagePaletteAdaptationSlider.Value;
-        updated.ImageToneCalmness = ImageToneCalmnessSlider.Value;
-        updated.ImageStructureMode = SelectedTag(ImageStructureModeCombo, "Tonal");
-        updated.ImageMode = ImageModeCheck.IsChecked == true;
-        updated.ClockEnabled = ClockEnabledCheck.IsChecked == true;
-        updated.ClockPosition = SelectedTag(ClockPositionCombo, "TopRight");
-        updated.ClockHorizontalMarginCells = (int)Math.Round(ClockHorizontalMarginSlider.Value);
-        updated.ClockVerticalMarginCells = (int)Math.Round(ClockVerticalMarginSlider.Value);
-        updated.ClockBrightness = ClockBrightnessSlider.Value;
-        updated.ClockWeight = ClockWeightSlider.Value;
-        updated.ImagePlaylists = _playlists
+        display.FontSize = FontSizeSlider.Value;
+        display.GlyphStretch = GlyphStretchSlider.Value;
+        display.GlyphWeight = GlyphWeightSlider.Value;
+        display.SignalHue = SignalHueSlider.Value;
+        display.SignalBrightness = SignalBrightnessSlider.Value;
+        display.BackgroundHue = BackgroundHueSlider.Value;
+        display.BackgroundBrightness = BackgroundBrightnessSlider.Value;
+        display.ImageDurationSeconds = _imageDurationSecondsValue;
+        display.ImageExpressiveness = ImageExpressivenessSlider.Value;
+        display.ImageGlyphMatch = ImageGlyphMatchSlider.Value;
+        display.ImageStability = ImageStabilitySlider.Value;
+        display.ImageResistance = ImageResistanceSlider.Value;
+        display.ImageBrightness = ImageBrightnessSlider.Value;
+        display.ImagePreparationMode = SelectedTag(ImagePreparationModeCombo, "Auto");
+        display.ImageLocalContrast = ImageLocalContrastSlider.Value;
+        display.ImageDetailStrength = ImageDetailStrengthSlider.Value;
+        display.ImageEdgeStrength = ImageEdgeStrengthSlider.Value;
+        display.ImageShadowBalance = ImageShadowBalanceSlider.Value;
+        display.ImagePaletteAdaptation = ImagePaletteAdaptationSlider.Value;
+        display.ImageToneCalmness = ImageToneCalmnessSlider.Value;
+        display.ImageStructureMode = SelectedTag(ImageStructureModeCombo, "Tonal");
+        display.ImageMode = ImageModeCheck.IsChecked == true;
+        display.ClockEnabled = ClockEnabledCheck.IsChecked == true;
+        display.ClockPosition = SelectedTag(ClockPositionCombo, "TopRight");
+        display.ClockHorizontalMarginCells = (int)Math.Round(ClockHorizontalMarginSlider.Value);
+        display.ClockVerticalMarginCells = (int)Math.Round(ClockVerticalMarginSlider.Value);
+        display.ClockBrightness = ClockBrightnessSlider.Value;
+        display.ClockWeight = ClockWeightSlider.Value;
+        display.ImagePlaylists = _playlists
             .Select(playlist => playlist.Copy())
             .ToList();
-        updated.ActiveImagePlaylistId = _activePlaylistId;
+        display.ActiveImagePlaylistId = _activePlaylistId;
         updated.StartWithWindows = AutostartCheck.IsChecked == true;
         updated.PauseDuringFullscreenApps = PauseDuringFullscreenAppsCheck.IsChecked == true;
         updated.AttackSystemEnabled =
@@ -458,11 +499,339 @@ public partial class SettingsWindow : Window
         updated.AttackTransitionSeconds =
             _attackTransitionSecondsValue;
         updated.ActivePresetId = _selectedPresetId;
-        updated.FontFamily = SelectedTag(FontCombo, "MS Gothic");
-        updated.ImageFit = SelectedTag(ImageFitCombo, "Uniform");
+        display.FontFamily = SelectedTag(FontCombo, "MS Gothic");
+        display.ImageFit = SelectedTag(ImageFitCombo, "Uniform");
         updated.FramesPerSecond = int.TryParse(SelectedTag(FpsCombo, "24"), out int fps) ? fps : 24;
+        display.Normalize(includeMonitorProfiles: false);
+        SynchronizeLegacySettings(updated);
         updated.Normalize();
         return updated;
+    }
+
+    private void EnsureSelectedMonitor()
+    {
+        if (_monitors.Count == 0)
+        {
+            _selectedMonitorId = "";
+            return;
+        }
+        if (_monitors.Any(monitor => string.Equals(
+                monitor.Id,
+                _selectedMonitorId,
+                StringComparison.OrdinalIgnoreCase)))
+        {
+            return;
+        }
+        _selectedMonitorId = _monitors
+            .FirstOrDefault(monitor => monitor.Primary)?.Id
+            ?? _monitors[0].Id;
+    }
+
+    private MonitorProfile SelectedMonitorProfile(AppSettings settings)
+    {
+        MonitorTopology.EnsureProfiles(settings, _monitors);
+        return MonitorTopology.Find(
+                settings.MonitorProfiles,
+                _selectedMonitorId)
+            ?? settings.MonitorProfiles.First();
+    }
+
+    private AppSettings SelectedMonitorSettings(AppSettings settings) =>
+        SelectedMonitorProfile(settings).Settings;
+
+    private void RefreshMonitorTopologyUi()
+    {
+        if (MonitorDeviceCombo is null
+            || MonitorFlowModeCombo is null
+            || MonitorDatabaseModeCombo is null)
+        {
+            return;
+        }
+
+        MonitorProfile selected = SelectedMonitorProfile(_draftSettings);
+        List<MonitorChoice> devices = _monitors
+            .Select(monitor => new MonitorChoice { Monitor = monitor })
+            .ToList();
+        MonitorDeviceCombo.ItemsSource = devices;
+        MonitorDeviceCombo.SelectedItem = devices.FirstOrDefault(choice =>
+            string.Equals(
+                choice.Monitor.Id,
+                selected.MonitorId,
+                StringComparison.OrdinalIgnoreCase));
+
+        MonitorDescriptor? descriptor = _monitors.FirstOrDefault(monitor =>
+            string.Equals(
+                monitor.Id,
+                selected.MonitorId,
+                StringComparison.OrdinalIgnoreCase));
+        MonitorDeviceDetails.Text = descriptor is null
+            ? selected.LastKnownName
+            : $"{descriptor.SystemName} // "
+                + $"{descriptor.Bounds.Width}×{descriptor.Bounds.Height} // "
+                + $"X {descriptor.Bounds.Left}, Y {descriptor.Bounds.Top}";
+
+        List<MonitorRouteChoice> flowChoices =
+            CreateRouteChoices(MonitorRouteDomain.Flow, selected.MonitorId);
+        MonitorFlowModeCombo.ItemsSource = flowChoices;
+        MonitorFlowModeCombo.SelectedItem = MatchRouteChoice(
+            flowChoices,
+            selected.FlowMode,
+            selected.FlowSourceMonitorId);
+
+        List<MonitorRouteChoice> databaseChoices =
+            CreateRouteChoices(MonitorRouteDomain.Database, selected.MonitorId);
+        MonitorDatabaseModeCombo.ItemsSource = databaseChoices;
+        MonitorDatabaseModeCombo.SelectedItem = MatchRouteChoice(
+            databaseChoices,
+            selected.DatabaseMode,
+            selected.DatabaseSourceMonitorId);
+        UpdateMonitorRouteNotices();
+    }
+
+    private List<MonitorRouteChoice> CreateRouteChoices(
+        MonitorRouteDomain domain,
+        string selectedMonitorId)
+    {
+        string isolated = domain == MonitorRouteDomain.Flow
+            ? "ИЗОЛИРОВАННЫЙ"
+            : "ИЗОЛИРОВАТЬ";
+        string disabled = domain == MonitorRouteDomain.Flow
+            ? "ОТКЛЮЧЁН"
+            : "ОТКЛЮЧЕНА";
+        List<MonitorRouteChoice> result =
+        [
+            new MonitorRouteChoice
+            {
+                Mode = MonitorLinkMode.Isolated,
+                Label = isolated
+            },
+            new MonitorRouteChoice
+            {
+                Mode = MonitorLinkMode.Disabled,
+                Label = disabled
+            }
+        ];
+        foreach (MonitorDescriptor source in _monitors.Where(monitor =>
+                     !string.Equals(
+                         monitor.Id,
+                         selectedMonitorId,
+                         StringComparison.OrdinalIgnoreCase)))
+        {
+            result.Add(new MonitorRouteChoice
+            {
+                Mode = MonitorLinkMode.Relay,
+                SourceMonitorId = source.Id,
+                Label = $"РЕТРАНСЛИРОВАТЬ — {source.Label}"
+            });
+            result.Add(new MonitorRouteChoice
+            {
+                Mode = MonitorLinkMode.Extend,
+                SourceMonitorId = source.Id,
+                Label = $"РАСШИРИТЬ — {source.Label}"
+            });
+        }
+        return result;
+    }
+
+    private static MonitorRouteChoice? MatchRouteChoice(
+        IEnumerable<MonitorRouteChoice> choices,
+        MonitorLinkMode mode,
+        string sourceMonitorId) =>
+        choices.FirstOrDefault(choice =>
+            choice.Mode == mode
+            && (mode is MonitorLinkMode.Isolated or MonitorLinkMode.Disabled
+                || string.Equals(
+                    choice.SourceMonitorId,
+                    sourceMonitorId,
+                    StringComparison.OrdinalIgnoreCase)));
+
+    private void MonitorDeviceCombo_SelectionChanged(
+        object sender,
+        SelectionChangedEventArgs e)
+    {
+        e.Handled = true;
+        if (_loading
+            || MonitorDeviceCombo.SelectedItem is not MonitorChoice choice
+            || string.Equals(
+                choice.Monitor.Id,
+                _selectedMonitorId,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        _draftSettings = ReadSettingsFromControls();
+        _selectedMonitorId = choice.Monitor.Id;
+        LoadSettingsCore(_draftSettings, preserveAppliedSettings: true);
+        QueuePreview();
+    }
+
+    private void MonitorFlowModeCombo_SelectionChanged(
+        object sender,
+        SelectionChangedEventArgs e)
+    {
+        e.Handled = true;
+        ApplyMonitorRouteSelection(
+            MonitorRouteDomain.Flow,
+            MonitorFlowModeCombo.SelectedItem as MonitorRouteChoice);
+    }
+
+    private void MonitorDatabaseModeCombo_SelectionChanged(
+        object sender,
+        SelectionChangedEventArgs e)
+    {
+        e.Handled = true;
+        ApplyMonitorRouteSelection(
+            MonitorRouteDomain.Database,
+            MonitorDatabaseModeCombo.SelectedItem as MonitorRouteChoice);
+    }
+
+    private void ApplyMonitorRouteSelection(
+        MonitorRouteDomain domain,
+        MonitorRouteChoice? choice)
+    {
+        if (_loading || choice is null)
+            return;
+
+        AppSettings current = ReadSettingsFromControls();
+        MonitorTopology.SetRoute(
+            current.MonitorProfiles,
+            _monitors,
+            domain,
+            _selectedMonitorId,
+            choice.Mode,
+            choice.SourceMonitorId);
+        _draftSettings = current;
+        bool previousLoading = _loading;
+        _loading = true;
+        RefreshMonitorTopologyUi();
+        _loading = previousLoading;
+        UpdateDraftStatus();
+        QueuePreview();
+    }
+
+    private void OpenFlowSourceButton_Click(
+        object sender,
+        RoutedEventArgs e) =>
+        OpenRouteSource(MonitorRouteDomain.Flow);
+
+    private void OpenDatabaseSourceButton_Click(
+        object sender,
+        RoutedEventArgs e) =>
+        OpenRouteSource(MonitorRouteDomain.Database);
+
+    private void OpenRouteSource(MonitorRouteDomain domain)
+    {
+        MonitorProfile selected = SelectedMonitorProfile(_draftSettings);
+        string source = domain == MonitorRouteDomain.Flow
+            ? selected.FlowSourceMonitorId
+            : selected.DatabaseSourceMonitorId;
+        if (string.IsNullOrWhiteSpace(source))
+            return;
+        MonitorChoice? choice = (MonitorDeviceCombo.ItemsSource
+                as IEnumerable<MonitorChoice>)
+            ?.FirstOrDefault(item => string.Equals(
+                item.Monitor.Id,
+                source,
+                StringComparison.OrdinalIgnoreCase));
+        if (choice is not null)
+            MonitorDeviceCombo.SelectedItem = choice;
+    }
+
+    private void UpdateMonitorRouteNotices()
+    {
+        if (FlowRoutingNotice is null)
+            return;
+        MonitorProfile selected = SelectedMonitorProfile(_draftSettings);
+        UpdateFlowRouteNotice(selected);
+        UpdateDatabaseRouteNotice(selected);
+    }
+
+    private void UpdateFlowRouteNotice(MonitorProfile profile)
+    {
+        bool isolated = profile.FlowMode == MonitorLinkMode.Isolated;
+        FlowRoutingNotice.Visibility = isolated
+            ? Visibility.Collapsed
+            : Visibility.Visible;
+        CurveKindCombo.Visibility = isolated
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        CurveProfilePanel.Visibility = isolated
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        CurveCanvasBorder.Visibility = isolated
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        if (CalibratorResetButton is not null)
+        {
+            CalibratorResetButton.Visibility = isolated
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+        }
+
+        if (isolated)
+            return;
+        bool disabled = profile.FlowMode == MonitorLinkMode.Disabled;
+        MonitorDescriptor? source = _monitors.FirstOrDefault(monitor =>
+            string.Equals(
+                monitor.Id,
+                profile.FlowSourceMonitorId,
+                StringComparison.OrdinalIgnoreCase));
+        FlowRoutingNoticeTitle.Text = disabled
+            ? "ПОТОК ДАННЫХ ОТКЛЮЧЁН"
+            : profile.FlowMode == MonitorLinkMode.Extend
+                ? "ПОТОК РАСШИРЯЕТ ДРУГОЙ ЭКРАН"
+                : "ПОТОК РЕТРАНСЛИРУЕТСЯ";
+        FlowRoutingNoticeText.Text = disabled
+            ? "На выбранном устройстве код не выводится."
+            : $"Параметры потока задаются на устройстве «{source?.Label ?? profile.FlowSourceMonitorId}».";
+        OpenFlowSourceButton.Visibility = disabled
+            ? Visibility.Collapsed
+            : Visibility.Visible;
+    }
+
+    private void UpdateDatabaseRouteNotice(MonitorProfile profile)
+    {
+        if (DatabaseRoutingNotice is null)
+            return;
+        bool isolated = profile.DatabaseMode == MonitorLinkMode.Isolated;
+        DatabaseRoutingNotice.Visibility = isolated
+            ? Visibility.Collapsed
+            : Visibility.Visible;
+        DatabaseHeaderPanel.Visibility = isolated
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        if (!isolated)
+            DatabaseContentPanel.Visibility = Visibility.Collapsed;
+        else
+            UpdateCollapsibleSections();
+
+        if (isolated)
+            return;
+        bool disabled = profile.DatabaseMode == MonitorLinkMode.Disabled;
+        MonitorDescriptor? source = _monitors.FirstOrDefault(monitor =>
+            string.Equals(
+                monitor.Id,
+                profile.DatabaseSourceMonitorId,
+                StringComparison.OrdinalIgnoreCase));
+        DatabaseRoutingNoticeTitle.Text = disabled
+            ? "БАЗА ДАННЫХ ОТКЛЮЧЕНА"
+            : profile.DatabaseMode == MonitorLinkMode.Extend
+                ? "ОБРАЗЫ РАСШИРЯЮТ ДРУГОЙ ЭКРАН"
+                : "БАЗА ДАННЫХ РЕТРАНСЛИРУЕТСЯ";
+        DatabaseRoutingNoticeText.Text = disabled
+            ? "Поток остаётся активным, но изображения на этом устройстве не проявляются."
+            : $"Плейлист, порядок и параметры образов задаются на устройстве «{source?.Label ?? profile.DatabaseSourceMonitorId}».";
+        OpenDatabaseSourceButton.Visibility = disabled
+            ? Visibility.Collapsed
+            : Visibility.Visible;
+    }
+
+    private void SynchronizeLegacySettings(AppSettings settings)
+    {
+        MonitorSettingsSynchronizer.SynchronizePrimary(
+            settings,
+            _monitors);
     }
 
     private void RefreshPresetCatalog(string requestedPresetId)
@@ -663,7 +1032,7 @@ public partial class SettingsWindow : Window
     {
         OperatorPreset? preset = CurrentPreset();
         if (preset is null
-            || AppSettingsComparer.PresetEquivalent(settings, preset.Settings))
+            || PresetEquivalentForCurrentTopology(settings, preset))
         {
             return true;
         }
@@ -689,11 +1058,30 @@ public partial class SettingsWindow : Window
         OperatorPreset preset,
         AppSettings current)
     {
-        AppSettings result = preset.Settings.Copy();
+        IReadOnlyList<MonitorDescriptor> monitors = _monitors.Count > 0
+            ? _monitors
+            : MonitorCatalog.Capture();
+        AppSettings result = MonitorPresetAdapter.Adapt(
+            preset.Settings,
+            current,
+            monitors);
         result.ImagePlaylists = current.ImagePlaylists
             .Select(playlist => playlist.Copy())
             .ToList();
         result.ActiveImagePlaylistId = current.ActiveImagePlaylistId;
+        foreach (MonitorProfile profile in result.MonitorProfiles)
+        {
+            MonitorProfile? currentProfile = MonitorTopology.Find(
+                current.MonitorProfiles,
+                profile.MonitorId);
+            if (currentProfile is null)
+                continue;
+            profile.Settings.ImagePlaylists = currentProfile.Settings.ImagePlaylists
+                .Select(playlist => playlist.Copy())
+                .ToList();
+            profile.Settings.ActiveImagePlaylistId =
+                currentProfile.Settings.ActiveImagePlaylistId;
+        }
         result.WelcomeShown = current.WelcomeShown;
         result.ActivePresetId = preset.Id;
         result.Normalize();
@@ -719,15 +1107,31 @@ public partial class SettingsWindow : Window
         DeletePresetButton.IsEnabled = preset is not null;
         bool hasPresetChanges = preset is not null
             && !HasInvalidNumericInput()
-            && !AppSettingsComparer.PresetEquivalent(
+            && !PresetEquivalentForCurrentTopology(
                 ReadSettingsFromControls(),
-                preset.Settings);
+                preset);
         SavePresetButton.Visibility = hasPresetChanges
             ? Visibility.Visible
             : Visibility.Collapsed;
         ResetPresetButton.Visibility = hasPresetChanges
             ? Visibility.Visible
             : Visibility.Collapsed;
+    }
+
+    private bool PresetEquivalentForCurrentTopology(
+        AppSettings settings,
+        OperatorPreset preset)
+    {
+        IReadOnlyList<MonitorDescriptor> monitors = _monitors.Count > 0
+            ? _monitors
+            : MonitorCatalog.Capture();
+        AppSettings baseline = MonitorPresetAdapter.Adapt(
+            preset.Settings,
+            settings,
+            monitors);
+        return AppSettingsComparer.PresetEquivalent(
+            settings,
+            baseline);
     }
 
     private void NewPlaylistButton_Click(object sender, RoutedEventArgs e)
@@ -757,12 +1161,16 @@ public partial class SettingsWindow : Window
             .Select(item => item.Copy())
             .ToList();
         RefreshPlaylistUi();
-        _source.ImagePlaylists = savedPlaylists
+        AppSettings sourceDisplay = SelectedMonitorSettings(_source);
+        sourceDisplay.ImagePlaylists = savedPlaylists
             .Select(item => item.Copy())
             .ToList();
-        _source.ActiveImagePlaylistId = _activePlaylistId;
+        sourceDisplay.ActiveImagePlaylistId = _activePlaylistId;
+        SynchronizeLegacySettings(_source);
         AppSettings liveDraft = ReadSettingsFromControls();
+        _draftSettings = liveDraft.Copy();
         PlaylistsSaved?.Invoke(liveDraft);
+        UpdateDraftStatus();
         QueuePreview();
         StatusText.Text = _hasPendingChanges
             ? "ПЛЕЙЛИСТ СОХРАНЁН // ОСТАЛИСЬ НЕПРИМЕНЁННЫЕ ПАРАМЕТРЫ"
@@ -976,7 +1384,7 @@ public partial class SettingsWindow : Window
             return;
         ImageModeCheck.IsChecked = true;
         AppSettings preview = ReadSettingsFromControls();
-        ImageRequested?.Invoke(preview, entry.Path);
+        ImageRequested?.Invoke(preview, entry.Path, _selectedMonitorId);
         StatusText.Text = $"ОБРАЗ ПЕРЕХВАЧЕН // {entry.DisplayName} // ДАЛЕЕ ПО ПЛЕЙЛИСТУ";
         e.Handled = true;
     }
@@ -2034,9 +2442,11 @@ public partial class SettingsWindow : Window
         AppSettings preview = ReadSettingsFromControls();
         if (_fontPreviewTimer.IsEnabled)
         {
-            preview.FontSize = _livePreviewFontSize;
-            preview.GlyphStretch = _livePreviewGlyphStretch;
-            preview.GlyphWeight = _livePreviewGlyphWeight;
+            AppSettings display = SelectedMonitorSettings(preview);
+            display.FontSize = _livePreviewFontSize;
+            display.GlyphStretch = _livePreviewGlyphStretch;
+            display.GlyphWeight = _livePreviewGlyphWeight;
+            SynchronizeLegacySettings(preview);
         }
         return preview;
     }
@@ -3089,7 +3499,15 @@ public partial class SettingsWindow : Window
         }
         if (DatabaseContentPanel is not null)
         {
-            DatabaseContentPanel.Visibility = ImageModeCheck.IsChecked == true
+            MonitorProfile? profile = _monitors.Count == 0
+                ? null
+                : MonitorTopology.Find(
+                    _draftSettings.MonitorProfiles,
+                    _selectedMonitorId);
+            bool ownsDatabase = profile is null
+                || profile.DatabaseMode == MonitorLinkMode.Isolated;
+            DatabaseContentPanel.Visibility =
+                ownsDatabase && ImageModeCheck.IsChecked == true
                 ? Visibility.Visible
                 : Visibility.Collapsed;
         }

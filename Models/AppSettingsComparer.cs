@@ -108,7 +108,10 @@ internal static class AppSettingsComparer
         && Near(
             left.AttackTransitionSeconds,
             right.AttackTransitionSeconds)
-        && left.ActivePresetId == right.ActivePresetId;
+        && left.ActivePresetId == right.ActivePresetId
+        && MonitorProfilesEquivalent(
+            left.MonitorProfiles,
+            right.MonitorProfiles);
 
     public static bool PresetEquivalent(
         AppSettings settings,
@@ -122,6 +125,8 @@ internal static class AppSettingsComparer
         comparablePreset.ActiveImagePlaylistId = "";
         comparableSettings.ActivePresetId = "";
         comparablePreset.ActivePresetId = "";
+        ClearMonitorPlaylists(comparableSettings);
+        ClearMonitorPlaylists(comparablePreset);
         return Equivalent(comparableSettings, comparablePreset);
     }
 
@@ -176,6 +181,62 @@ internal static class AppSettingsComparer
             }
         }
         return true;
+    }
+
+    private static bool MonitorProfilesEquivalent(
+        IReadOnlyList<MonitorProfile> left,
+        IReadOnlyList<MonitorProfile> right)
+    {
+        if (left.Count != right.Count)
+            return false;
+        for (int index = 0; index < left.Count; index++)
+        {
+            MonitorProfile leftProfile = left[index];
+            MonitorProfile rightProfile = right[index];
+            if (!string.Equals(
+                    leftProfile.MonitorId,
+                    rightProfile.MonitorId,
+                    StringComparison.OrdinalIgnoreCase)
+                || leftProfile.FlowMode != rightProfile.FlowMode
+                || leftProfile.DatabaseMode != rightProfile.DatabaseMode
+                || !string.Equals(
+                    leftProfile.FlowSourceMonitorId,
+                    rightProfile.FlowSourceMonitorId,
+                    StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(
+                    leftProfile.DatabaseSourceMonitorId,
+                    rightProfile.DatabaseSourceMonitorId,
+                    StringComparison.OrdinalIgnoreCase)
+                || !EquivalentWithoutMonitorProfiles(
+                    leftProfile.Settings,
+                    rightProfile.Settings))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static bool EquivalentWithoutMonitorProfiles(
+        AppSettings left,
+        AppSettings right)
+    {
+        AppSettings comparableLeft =
+            left.Copy(includeMonitorProfiles: false);
+        AppSettings comparableRight =
+            right.Copy(includeMonitorProfiles: false);
+        comparableLeft.MonitorProfiles = [];
+        comparableRight.MonitorProfiles = [];
+        return Equivalent(comparableLeft, comparableRight);
+    }
+
+    private static void ClearMonitorPlaylists(AppSettings settings)
+    {
+        foreach (MonitorProfile profile in settings.MonitorProfiles)
+        {
+            profile.Settings.ImagePlaylists = [];
+            profile.Settings.ActiveImagePlaylistId = "";
+        }
     }
 
     private static bool Near(double left, double right) =>

@@ -18,6 +18,10 @@ public sealed class WallpaperManager : IDisposable
     private readonly DispatcherTimer _sessionResumeTimer;
     private readonly DispatcherTimer _attackTimer;
     private readonly SemaphoreSlim _imageLoadGate = new(1, 1);
+    private readonly Dictionary<string, DatabaseImageChannel>
+        _secondaryDatabaseChannels =
+            new(StringComparer.OrdinalIgnoreCase);
+    private string _primaryDatabaseRoot = "";
     private AppSettings _settings;
     private DateTime _imageStartedAt;
     private ImageSourceFrame? _currentImageSource;
@@ -87,6 +91,7 @@ public sealed class WallpaperManager : IDisposable
     {
         _output.Start(_settings, _currentImage);
         UpdateImageTargetSize();
+        RefreshSecondaryDatabaseChannels(forceReload: true);
         SetRuntimeStatus(
             $"ВЫВОД АКТИВЕН // DIRECT3D 11 // ЭКРАНОВ: {_output.WindowCount}",
             isError: false);
@@ -114,6 +119,7 @@ public sealed class WallpaperManager : IDisposable
         _settings = settings.Copy();
         UpdateImageTimerInterval();
         _output.UpdateSettings(_settings);
+        RefreshSecondaryDatabaseChannels(forceReload: false);
         _fullscreenMonitor.SetEnabled(_settings.PauseDuringFullscreenApps);
         if (!_settings.AttackSystemEnabled && IsAttackActive)
             StopAttack();
@@ -195,11 +201,42 @@ public sealed class WallpaperManager : IDisposable
         QueueImageLoad(ImageLoadKind.Next);
     }
 
-    public void ShowImage(AppSettings settings, string path)
+    public void ShowImage(
+        AppSettings settings,
+        string path,
+        string monitorId)
     {
-        settings.ImageMode = true;
         ApplySettings(settings);
-        QueueImageLoad(ImageLoadKind.Specific, path);
+        IReadOnlyList<MonitorDescriptor> monitors = MonitorCatalog.Capture();
+        AppSettings topology = _settings.Copy();
+        MonitorTopology.EnsureProfiles(topology, monitors);
+        MonitorRoute? route = MonitorTopology.Resolve(
+                topology.MonitorProfiles,
+                monitors,
+                MonitorRouteDomain.Database)
+            .FirstOrDefault(candidate => string.Equals(
+                candidate.MonitorId,
+                monitorId,
+                StringComparison.OrdinalIgnoreCase));
+        if (route is null || route.Mode == MonitorLinkMode.Disabled)
+            return;
+        if (string.Equals(
+            route.RootMonitorId,
+            _primaryDatabaseRoot,
+            StringComparison.OrdinalIgnoreCase))
+        {
+            QueueImageLoad(ImageLoadKind.Specific, path);
+            return;
+        }
+        if (_secondaryDatabaseChannels.TryGetValue(
+                route.RootMonitorId,
+                out DatabaseImageChannel? channel))
+        {
+            QueueSecondaryImageLoad(
+                channel,
+                ImageLoadKind.Specific,
+                path);
+        }
     }
 
     public void RefreshWindows()
@@ -223,6 +260,7 @@ public sealed class WallpaperManager : IDisposable
         {
             _output.Restart(_settings, _currentImage, _fullscreenPaused);
             UpdateImageTargetSize();
+            RefreshSecondaryDatabaseChannels(forceReload: true);
             SetRuntimeStatus(
                 $"ВЫВОД ПЕРЕПОДКЛЮЧЁН // DIRECT3D 11 // ЭКРАНОВ: {_output.WindowCount}",
                 isError: false);
@@ -275,6 +313,12 @@ public sealed class WallpaperManager : IDisposable
     {
         _images.TargetWidth = _output.TargetWidth;
         _images.TargetHeight = _output.TargetHeight;
+        foreach (DatabaseImageChannel channel in
+                 _secondaryDatabaseChannels.Values)
+        {
+            channel.Sequence.TargetWidth = _output.TargetWidth;
+            channel.Sequence.TargetHeight = _output.TargetHeight;
+        }
     }
 
     private void ReloadImages()
@@ -438,7 +482,7 @@ public sealed class WallpaperManager : IDisposable
         _currentImage = image;
         if (resetCycle)
             _imageStartedAt = DateTime.UtcNow;
-        _output.SetImage(_currentImage);
+        PublishDatabaseImages();
         if (IsAttackActive
             && _attackDesktopImageActive
             && _attackPlaylistSwitchRequested)
@@ -495,27 +539,295 @@ public sealed class WallpaperManager : IDisposable
             && File.Exists(entry.Path));
     }
 
+    private void RefreshSecondaryDatabaseChannels(bool forceReload)
+    {
+        IReadOnlyList<MonitorDescriptor> monitors = MonitorCatalog.Capture();
+        AppSettings topology = _settings.Copy();
+        MonitorTopology.EnsureProfiles(topology, monitors);
+        IReadOnlyList<MonitorRoute> routes = MonitorTopology.Resolve(
+            topology.MonitorProfiles,
+            monitors,
+            MonitorRouteDomain.Database);
+        Dictionary<string, MonitorRoute> routeByMonitor = routes.ToDictionary(
+            route => route.MonitorId,
+            StringComparer.OrdinalIgnoreCase);
+        MonitorDescriptor? primary = monitors.FirstOrDefault(monitor =>
+            monitor.Primary);
+        _primaryDatabaseRoot = primary is not null
+            && routeByMonitor.TryGetValue(primary.Id, out MonitorRoute? primaryRoute)
+            && primaryRoute.Mode != MonitorLinkMode.Disabled
+                ? primaryRoute.RootMonitorId
+                : "";
+
+        HashSet<string> desiredRoots = routes
+            .Where(route =>
+                route.Mode != MonitorLinkMode.Disabled
+                && !string.Equals(
+                    route.RootMonitorId,
+                    _primaryDatabaseRoot,
+                    StringComparison.OrdinalIgnoreCase))
+            .Select(route => route.RootMonitorId)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (string removed in _secondaryDatabaseChannels.Keys
+                     .Where(root => !desiredRoots.Contains(root))
+                     .ToArray())
+        {
+            _secondaryDatabaseChannels[removed].Cancel();
+            _secondaryDatabaseChannels.Remove(removed);
+        }
+
+        foreach (string root in desiredRoots)
+        {
+            MonitorProfile? profile = MonitorTopology.Find(
+                topology.MonitorProfiles,
+                root);
+            if (profile is null)
+                continue;
+            AppSettings nextSettings =
+                profile.Settings.Copy(includeMonitorProfiles: false);
+            nextSettings.Normalize(includeMonitorProfiles: false);
+            if (!_secondaryDatabaseChannels.TryGetValue(
+                    root,
+                    out DatabaseImageChannel? channel))
+            {
+                channel = new DatabaseImageChannel(root, nextSettings)
+                {
+                    Sequence =
+                    {
+                        TargetWidth = _output.TargetWidth,
+                        TargetHeight = _output.TargetHeight
+                    }
+                };
+                _secondaryDatabaseChannels[root] = channel;
+                if (nextSettings.ImageMode)
+                    QueueSecondaryImageLoad(channel, ImageLoadKind.Reload);
+                continue;
+            }
+
+            AppSettings previousSettings = channel.Settings;
+            bool reload = forceReload
+                || nextSettings.ImageMode != previousSettings.ImageMode
+                || !string.Equals(
+                    nextSettings.ImagePlaylistSignature(),
+                    previousSettings.ImagePlaylistSignature(),
+                    StringComparison.Ordinal);
+            bool reprocess =
+                !AppSettingsComparer.ImagePreparationEquivalent(
+                    nextSettings,
+                    previousSettings);
+            channel.Settings = nextSettings;
+            if (!nextSettings.ImageMode)
+            {
+                channel.Cancel();
+                channel.Source = null;
+                channel.Prepared = null;
+                continue;
+            }
+            if (reload)
+                QueueSecondaryImageLoad(channel, ImageLoadKind.Reload);
+            else if (reprocess && channel.Source is not null)
+                QueueSecondaryImageLoad(channel, ImageLoadKind.Reprocess);
+        }
+        PublishDatabaseImages();
+        UpdateImageTimerInterval();
+    }
+
+    private void QueueSecondaryImageLoad(
+        DatabaseImageChannel channel,
+        ImageLoadKind kind,
+        string? requestedPath = null)
+    {
+        int generation = channel.NextGeneration();
+        CancellationTokenSource cancellation = channel.ReplaceCancellation();
+        AppSettings settings = channel.Settings.Copy(
+            includeMonitorProfiles: false);
+        ImageSourceFrame? currentSource = channel.Source;
+        Interlocked.Increment(ref _pendingImageLoads);
+        _ = LoadSecondaryImageAsync(
+            channel,
+            kind,
+            currentSource,
+            settings,
+            requestedPath,
+            generation,
+            cancellation);
+    }
+
+    private async Task LoadSecondaryImageAsync(
+        DatabaseImageChannel channel,
+        ImageLoadKind kind,
+        ImageSourceFrame? currentSource,
+        AppSettings settings,
+        string? requestedPath,
+        int generation,
+        CancellationTokenSource cancellation)
+    {
+        ImageLoadResult? result = null;
+        bool gateEntered = false;
+        try
+        {
+            await _imageLoadGate.WaitAsync(cancellation.Token);
+            gateEntered = true;
+            result = await Task.Factory.StartNew(
+                () => LoadSecondaryImageAtLowPriority(
+                    channel,
+                    kind,
+                    currentSource,
+                    settings,
+                    requestedPath,
+                    cancellation.Token),
+                cancellation.Token,
+                TaskCreationOptions.DenyChildAttach,
+                TaskScheduler.Default);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+        catch (Exception exception)
+        {
+            DiagnosticLog.Write(
+                $"Не удалось подготовить образ для устройства {channel.RootMonitorId}.",
+                exception);
+        }
+        finally
+        {
+            if (gateEntered)
+                _imageLoadGate.Release();
+            Interlocked.Decrement(ref _pendingImageLoads);
+            channel.ReleaseCancellation(cancellation);
+            cancellation.Dispose();
+        }
+
+        if (_disposed
+            || generation != channel.Generation
+            || !channel.Settings.ImageMode)
+        {
+            return;
+        }
+        if (kind == ImageLoadKind.Reprocess && result is null)
+            return;
+        if (result is not null
+            && kind is ImageLoadKind.Reload or ImageLoadKind.Next
+            && !IsEnabledImagePath(channel.Settings, result.Source.Path))
+        {
+            return;
+        }
+
+        channel.Source = result?.Source;
+        channel.Prepared = result?.Prepared;
+        if (kind != ImageLoadKind.Reprocess)
+            channel.StartedAtUtc = DateTime.UtcNow;
+        PublishDatabaseImages();
+    }
+
+    private ImageLoadResult? LoadSecondaryImageAtLowPriority(
+        DatabaseImageChannel channel,
+        ImageLoadKind kind,
+        ImageSourceFrame? currentSource,
+        AppSettings settings,
+        string? requestedPath,
+        CancellationToken cancellationToken)
+    {
+        Thread thread = Thread.CurrentThread;
+        ThreadPriority previousPriority = thread.Priority;
+        try
+        {
+            thread.Priority = ThreadPriority.Lowest;
+            cancellationToken.ThrowIfCancellationRequested();
+            ImageSourceFrame? source = kind switch
+            {
+                ImageLoadKind.Reload => channel.Sequence.Reload(
+                    settings.ActiveImagePlaylist().Entries,
+                    currentSource?.Path),
+                ImageLoadKind.Next => channel.Sequence.MoveNext(
+                    settings.ActiveImagePlaylist().Entries,
+                    currentSource?.Path),
+                ImageLoadKind.Specific when
+                    !string.IsNullOrWhiteSpace(requestedPath) =>
+                    channel.Sequence.Select(
+                        settings.ActiveImagePlaylist().Entries,
+                        requestedPath),
+                _ => currentSource
+            };
+            if (source is null)
+                return null;
+            PreparedImage prepared = _imagePreparation.Prepare(
+                source,
+                settings,
+                channel.Sequence.TargetWidth,
+                channel.Sequence.TargetHeight,
+                cancellationToken);
+            return new ImageLoadResult(source, prepared);
+        }
+        finally
+        {
+            thread.Priority = previousPriority;
+        }
+    }
+
+    private void PublishDatabaseImages()
+    {
+        Dictionary<string, PreparedImage?> images =
+            new(StringComparer.OrdinalIgnoreCase);
+        if (!string.IsNullOrWhiteSpace(_primaryDatabaseRoot))
+        {
+            images[_primaryDatabaseRoot] =
+                _settings.ImageMode ? _currentImage : null;
+        }
+        foreach (DatabaseImageChannel channel in
+                 _secondaryDatabaseChannels.Values)
+        {
+            images[channel.RootMonitorId] = channel.Settings.ImageMode
+                ? channel.Prepared
+                : null;
+        }
+        _output.SetDatabaseImages(images);
+    }
+
     private void OnImageTimer(object? sender, EventArgs e)
     {
         if (IsPaused
             || _attackStartPending
-            || !_settings.ImageMode
-            || _currentImage is null
             || Volatile.Read(ref _pendingImageLoads) > 0)
             return;
 
-        double duration = _settings.ImageDurationSeconds;
-        double elapsed = (DateTime.UtcNow - _imageStartedAt).TotalSeconds;
-        if (elapsed >= duration)
+        DateTime now = DateTime.UtcNow;
+        double elapsed = (now - _imageStartedAt).TotalSeconds;
+        if (_settings.ImageMode
+            && _currentImage is not null
+            && elapsed >= _settings.ImageDurationSeconds)
+        {
             NextImage();
+        }
+        foreach (DatabaseImageChannel channel in
+                 _secondaryDatabaseChannels.Values)
+        {
+            if (!channel.Settings.ImageMode
+                || channel.Prepared is null
+                || channel.IsLoading
+                || (now - channel.StartedAtUtc).TotalSeconds
+                    < channel.Settings.ImageDurationSeconds)
+            {
+                continue;
+            }
+            QueueSecondaryImageLoad(channel, ImageLoadKind.Next);
+        }
     }
 
     private void UpdateImageTimerInterval()
     {
         // Poll four times within the shortest requested cycle while retaining
         // the former low wake-up rate for ordinary multi-second cycles.
+        double shortestCycle = _secondaryDatabaseChannels.Values
+            .Where(channel => channel.Settings.ImageMode)
+            .Select(channel => channel.Settings.ImageDurationSeconds)
+            .Append(_settings.ImageMode
+                ? _settings.ImageDurationSeconds
+                : AppSettings.MaximumImageDurationSeconds)
+            .Min();
         double milliseconds = Math.Clamp(
-            _settings.ImageDurationSeconds * 250.0,
+            shortestCycle * 250.0,
             25.0,
             120.0);
         bool restart = _imageTimer.IsEnabled;
@@ -784,8 +1096,8 @@ public sealed class WallpaperManager : IDisposable
                 return;
             }
 
-            SharedMatrixScene? scene = _output.SharedFrame;
-            if (scene is null)
+            AttackFrameSnapshot? frame = _output.CaptureAttackFrame();
+            if (frame is null)
             {
                 throw new InvalidOperationException(
                     "Общий кадр потока недоступен.");
@@ -797,7 +1109,7 @@ public sealed class WallpaperManager : IDisposable
                     startData.Desktop.Top,
                     startData.Desktop.Width,
                     startData.Desktop.Height),
-                scene,
+                frame,
                 startData.Desktop,
                 _settings.AttackTransitionSeconds,
                 autoReleaseDesktopImage:
@@ -872,8 +1184,7 @@ public sealed class WallpaperManager : IDisposable
         if (_disposed || !_output.IsRunning)
             return;
         _output.UpdateSettings(_settings);
-        _output.SetImage(
-            _settings.ImageMode ? _currentImage : null);
+        PublishDatabaseImages();
     }
 
     private void FinishAttack()
@@ -921,8 +1232,7 @@ public sealed class WallpaperManager : IDisposable
         if (!_disposed && _output.IsRunning)
         {
             _output.UpdateSettings(_settings);
-            _output.SetImage(
-                _settings.ImageMode ? _currentImage : null);
+            PublishDatabaseImages();
         }
     }
 
@@ -966,6 +1276,12 @@ public sealed class WallpaperManager : IDisposable
         _disposed = true;
         Interlocked.Increment(ref _imageLoadGeneration);
         Interlocked.Exchange(ref _imageLoadCancellation, null)?.Cancel();
+        foreach (DatabaseImageChannel channel in
+                 _secondaryDatabaseChannels.Values)
+        {
+            channel.Cancel();
+        }
+        _secondaryDatabaseChannels.Clear();
         SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
         SystemEvents.SessionSwitch -= OnSessionSwitch;
         SystemEvents.PowerModeChanged -= OnPowerModeChanged;
@@ -991,6 +1307,57 @@ public sealed class WallpaperManager : IDisposable
     private sealed record ImageLoadResult(
         ImageSourceFrame Source,
         PreparedImage Prepared);
+
+    private sealed class DatabaseImageChannel
+    {
+        private CancellationTokenSource? _cancellation;
+
+        public string RootMonitorId { get; }
+        public ImageSequenceService Sequence { get; set; } = new();
+        public AppSettings Settings { get; set; }
+        public ImageSourceFrame? Source { get; set; }
+        public PreparedImage? Prepared { get; set; }
+        public DateTime StartedAtUtc { get; set; } = DateTime.UtcNow;
+        public int Generation { get; private set; }
+        public bool IsLoading => _cancellation is not null;
+
+        public DatabaseImageChannel(
+            string rootMonitorId,
+            AppSettings settings)
+        {
+            RootMonitorId = rootMonitorId;
+            Settings = settings;
+        }
+
+        public int NextGeneration() =>
+            ++Generation;
+
+        public CancellationTokenSource ReplaceCancellation()
+        {
+            CancellationTokenSource next = new();
+            CancellationTokenSource? previous =
+                Interlocked.Exchange(ref _cancellation, next);
+            previous?.Cancel();
+            previous?.Dispose();
+            return next;
+        }
+
+        public void ReleaseCancellation(
+            CancellationTokenSource cancellation) =>
+            Interlocked.CompareExchange(
+                ref _cancellation,
+                null,
+                cancellation);
+
+        public void Cancel()
+        {
+            Generation++;
+            CancellationTokenSource? current =
+                Interlocked.Exchange(ref _cancellation, null);
+            current?.Cancel();
+            current?.Dispose();
+        }
+    }
 
     private sealed record AttackStartData(
         CapturedDesktopFrame Desktop);

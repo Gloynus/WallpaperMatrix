@@ -19,7 +19,7 @@ internal sealed class AttackOverlayWindow : IDisposable
     private readonly DrawingRectangle _bounds;
     private readonly SharedMatrixScene _scene;
     private CapturedDesktopFrame? _desktop;
-    private readonly IReadOnlyList<DrawingRectangle> _viewports;
+    private MatrixScenePresentation[] _presentations;
     private readonly double _transitionSeconds;
     private readonly bool _autoReleaseDesktopImage;
     private readonly long _existingStreamCutoff;
@@ -40,25 +40,18 @@ internal sealed class AttackOverlayWindow : IDisposable
 
     public AttackOverlayWindow(
         DrawingRectangle bounds,
-        SharedMatrixScene scene,
+        AttackFrameSnapshot frame,
         CapturedDesktopFrame desktop,
         double transitionSeconds,
         bool autoReleaseDesktopImage)
     {
         _bounds = bounds;
-        _scene = scene;
+        _scene = frame.PrimaryScene;
         _desktop = desktop;
-        _viewports = System.Windows.Forms.Screen.AllScreens
-            .Select(screen => new DrawingRectangle(
-                screen.Bounds.Left - bounds.Left,
-                screen.Bounds.Top - bounds.Top,
-                screen.Bounds.Width,
-                screen.Bounds.Height))
-            .ToArray();
+        _presentations = frame.Presentations.ToArray();
         _transitionSeconds = Math.Clamp(transitionSeconds, 1.0, 30.0);
         _autoReleaseDesktopImage = autoReleaseDesktopImage;
-        lock (_scene.SyncRoot)
-            _existingStreamCutoff = _scene.LatestStreamId;
+        _existingStreamCutoff = frame.LatestStreamId;
         _thread = new Thread(RenderThreadMain)
         {
             IsBackground = true,
@@ -153,7 +146,7 @@ internal sealed class AttackOverlayWindow : IDisposable
             presenter.Present(
                 _bounds.Width,
                 _bounds.Height,
-                _viewports);
+                _presentations);
 
             NativeWindow.ShowAsTopmost(_window, _bounds);
             _inputArmedAt = Stopwatch.GetTimestamp()
@@ -169,7 +162,7 @@ internal sealed class AttackOverlayWindow : IDisposable
                 $"АТАКА СИСТЕМЫ начата: "
                 + $"renderer=0x{_window.ToInt64():X}; "
                 + $"surface={_bounds.Width}x{_bounds.Height}; "
-                + $"viewports={_viewports.Count}; "
+                + $"viewports={_presentations.Length}; "
                 + $"streamCutoff={_existingStreamCutoff}; "
                 + $"transition={_transitionSeconds:0.##}s.");
 
@@ -215,6 +208,21 @@ internal sealed class AttackOverlayWindow : IDisposable
                 {
                     screenshotStreamCutoff =
                         _scene.LatestStreamId;
+                    _presentations = _presentations
+                        .Select(presentation =>
+                        {
+                            long cutoff;
+                            lock (presentation.Scene.SyncRoot)
+                            {
+                                cutoff =
+                                    presentation.Scene.LatestStreamId;
+                            }
+                            return presentation with
+                            {
+                                ScreenshotStreamCutoff = cutoff
+                            };
+                        })
+                        .ToArray();
                     DiagnosticLog.Write(
                         "АТАКА СИСТЕМЫ: отпечаток интерфейса больше не "
                         + "назначается новым струям и будет стёрт потоком.");
@@ -275,7 +283,7 @@ internal sealed class AttackOverlayWindow : IDisposable
                 presenter.Present(
                     _bounds.Width,
                     _bounds.Height,
-                    _viewports);
+                    _presentations);
 
                 int frameRate = Math.Clamp(
                     _scene.PresentationFramesPerSecond,
