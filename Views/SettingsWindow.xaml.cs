@@ -623,6 +623,13 @@ public partial class SettingsWindow : Window
                 SourceMonitorId = source.Id,
                 Label = $"РЕТРАНСЛИРОВАТЬ — {source.Label}"
             });
+        }
+        foreach (MonitorDescriptor source in _monitors.Where(monitor =>
+                     !string.Equals(
+                         monitor.Id,
+                         selectedMonitorId,
+                         StringComparison.OrdinalIgnoreCase)))
+        {
             result.Add(new MonitorRouteChoice
             {
                 Mode = MonitorLinkMode.Extend,
@@ -701,12 +708,7 @@ public partial class SettingsWindow : Window
             _selectedMonitorId,
             choice.Mode,
             choice.SourceMonitorId);
-        _draftSettings = current;
-        bool previousLoading = _loading;
-        _loading = true;
-        RefreshMonitorTopologyUi();
-        _loading = previousLoading;
-        UpdateDraftStatus();
+        LoadSettingsCore(current, preserveAppliedSettings: true);
         QueuePreview();
     }
 
@@ -734,8 +736,13 @@ public partial class SettingsWindow : Window
                 item.Monitor.Id,
                 source,
                 StringComparison.OrdinalIgnoreCase));
-        if (choice is not null)
-            MonitorDeviceCombo.SelectedItem = choice;
+        if (choice is null)
+            return;
+
+        _draftSettings = ReadSettingsFromControls();
+        _selectedMonitorId = choice.Monitor.Id;
+        LoadSettingsCore(_draftSettings, preserveAppliedSettings: true);
+        QueuePreview();
     }
 
     private void UpdateMonitorRouteNotices()
@@ -756,12 +763,6 @@ public partial class SettingsWindow : Window
         CurveKindCombo.Visibility = isolated
             ? Visibility.Visible
             : Visibility.Collapsed;
-        CurveProfilePanel.Visibility = isolated
-            ? Visibility.Visible
-            : Visibility.Collapsed;
-        CurveCanvasBorder.Visibility = isolated
-            ? Visibility.Visible
-            : Visibility.Collapsed;
         if (CalibratorResetButton is not null)
         {
             CalibratorResetButton.Visibility = isolated
@@ -770,7 +771,14 @@ public partial class SettingsWindow : Window
         }
 
         if (isolated)
+        {
+            RefreshCurveEditor();
             return;
+        }
+        CurveProfilePanel.Visibility = Visibility.Collapsed;
+        CurveCanvasBorder.Visibility = Visibility.Collapsed;
+        TerminalSettingsPanel.Visibility = Visibility.Collapsed;
+        CurveEditingHint.Visibility = Visibility.Collapsed;
         bool disabled = profile.FlowMode == MonitorLinkMode.Disabled;
         MonitorDescriptor? source = _monitors.FirstOrDefault(monitor =>
             string.Equals(

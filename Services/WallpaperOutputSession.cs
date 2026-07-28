@@ -35,6 +35,28 @@ internal sealed class WallpaperOutputSession : IDisposable
     public int TargetWidth { get; private set; } = 2560;
     public int TargetHeight { get; private set; } = 1440;
 
+    public (int Width, int Height) DatabaseTargetSize(
+        string rootMonitorId)
+    {
+        if (_plan is null || string.IsNullOrWhiteSpace(rootMonitorId))
+            return (TargetWidth, TargetHeight);
+
+        MatrixImageProjection? projection = _plan.Scenes
+            .Where(scene => string.Equals(
+                scene.DatabaseRootMonitorId,
+                rootMonitorId,
+                StringComparison.OrdinalIgnoreCase))
+            .Select(scene => scene.ImageProjection)
+            .OrderByDescending(item =>
+                (long)item.CanvasWidth * item.CanvasHeight)
+            .FirstOrDefault();
+        return projection is null
+            ? (TargetWidth, TargetHeight)
+            : (
+                Math.Max(1, projection.CanvasWidth),
+                Math.Max(1, projection.CanvasHeight));
+    }
+
     public WallpaperOutputSession(Action<string, Exception, bool> failureHandler)
     {
         _failureHandler = failureHandler;
@@ -77,12 +99,14 @@ internal sealed class WallpaperOutputSession : IDisposable
         MonitorOutputPlan nextPlan =
             MonitorOutputPlan.Create(_settings, _monitors);
         if (_plan is null
-            || !TopologyEquivalent(_plan, nextPlan))
+            || _plan.VirtualBounds != nextPlan.VirtualBounds)
         {
             Restart(_settings, _image, _suspended);
             return;
         }
         _plan = nextPlan;
+        TargetWidth = Math.Max(1, nextPlan.VirtualBounds.Width);
+        TargetHeight = Math.Max(1, nextPlan.VirtualBounds.Height);
         foreach (NativeWallpaperWindow window in _windows)
             window.UpdateSettings(nextPlan);
     }
@@ -246,55 +270,6 @@ internal sealed class WallpaperOutputSession : IDisposable
         _screenCount = 0;
         _plan = null;
         CloseWindowList(closingWindows, restoreSystemWallpaper);
-    }
-
-    private static bool TopologyEquivalent(
-        MonitorOutputPlan left,
-        MonitorOutputPlan right)
-    {
-        if (left.VirtualBounds != right.VirtualBounds
-            || left.Scenes.Count != right.Scenes.Count
-            || left.ActiveMonitorCount != right.ActiveMonitorCount)
-        {
-            return false;
-        }
-        for (int sceneIndex = 0;
-             sceneIndex < left.Scenes.Count;
-             sceneIndex++)
-        {
-            MonitorScenePlan leftScene = left.Scenes[sceneIndex];
-            MonitorScenePlan rightScene = right.Scenes[sceneIndex];
-            if (!string.Equals(
-                    leftScene.Id,
-                    rightScene.Id,
-                    StringComparison.OrdinalIgnoreCase)
-                || leftScene.CanvasBounds != rightScene.CanvasBounds
-                || leftScene.Targets.Count != rightScene.Targets.Count)
-            {
-                return false;
-            }
-            for (int targetIndex = 0;
-                 targetIndex < leftScene.Targets.Count;
-                 targetIndex++)
-            {
-                MonitorSceneTarget leftTarget =
-                    leftScene.Targets[targetIndex];
-                MonitorSceneTarget rightTarget =
-                    rightScene.Targets[targetIndex];
-                if (!string.Equals(
-                        leftTarget.MonitorId,
-                        rightTarget.MonitorId,
-                        StringComparison.OrdinalIgnoreCase)
-                    || leftTarget.TargetBounds
-                        != rightTarget.TargetBounds
-                    || leftTarget.SourceBounds
-                        != rightTarget.SourceBounds)
-                {
-                    return false;
-                }
-            }
-        }
-        return true;
     }
 
     private static void CloseWindowList(

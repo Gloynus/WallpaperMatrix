@@ -90,8 +90,8 @@ public sealed class WallpaperManager : IDisposable
     public void Start()
     {
         _output.Start(_settings, _currentImage);
-        UpdateImageTargetSize();
         RefreshSecondaryDatabaseChannels(forceReload: true);
+        UpdateImageTargetSize();
         SetRuntimeStatus(
             $"ВЫВОД АКТИВЕН // DIRECT3D 11 // ЭКРАНОВ: {_output.WindowCount}",
             isError: false);
@@ -120,13 +120,15 @@ public sealed class WallpaperManager : IDisposable
         UpdateImageTimerInterval();
         _output.UpdateSettings(_settings);
         RefreshSecondaryDatabaseChannels(forceReload: false);
+        bool imageTargetChanged = UpdateImageTargetSize();
         _fullscreenMonitor.SetEnabled(_settings.PauseDuringFullscreenApps);
         if (!_settings.AttackSystemEnabled && IsAttackActive)
             StopAttack();
 
         if (reloadImages)
             ReloadImages();
-        else if (reprocessImage && _settings.ImageMode)
+        else if ((reprocessImage || imageTargetChanged)
+                 && _settings.ImageMode)
         {
             QueueImageLoad(
                 _currentImageSource is null ? ImageLoadKind.Reload : ImageLoadKind.Reprocess);
@@ -259,8 +261,8 @@ public sealed class WallpaperManager : IDisposable
         try
         {
             _output.Restart(_settings, _currentImage, _fullscreenPaused);
-            UpdateImageTargetSize();
             RefreshSecondaryDatabaseChannels(forceReload: true);
+            UpdateImageTargetSize();
             SetRuntimeStatus(
                 $"ВЫВОД ПЕРЕПОДКЛЮЧЁН // DIRECT3D 11 // ЭКРАНОВ: {_output.WindowCount}",
                 isError: false);
@@ -309,16 +311,23 @@ public sealed class WallpaperManager : IDisposable
         SetRuntimeStatus("ВЫВОД ОСТАНОВЛЕН // РАБОЧИЙ СТОЛ ВОССТАНОВЛЕН", isError: false);
     }
 
-    private void UpdateImageTargetSize()
+    private bool UpdateImageTargetSize()
     {
-        _images.TargetWidth = _output.TargetWidth;
-        _images.TargetHeight = _output.TargetHeight;
+        (int primaryWidth, int primaryHeight) =
+            _output.DatabaseTargetSize(_primaryDatabaseRoot);
+        bool changed = _images.TargetWidth != primaryWidth
+            || _images.TargetHeight != primaryHeight;
+        _images.TargetWidth = primaryWidth;
+        _images.TargetHeight = primaryHeight;
         foreach (DatabaseImageChannel channel in
                  _secondaryDatabaseChannels.Values)
         {
-            channel.Sequence.TargetWidth = _output.TargetWidth;
-            channel.Sequence.TargetHeight = _output.TargetHeight;
+            (int width, int height) =
+                _output.DatabaseTargetSize(channel.RootMonitorId);
+            channel.Sequence.TargetWidth = width;
+            channel.Sequence.TargetHeight = height;
         }
+        return changed;
     }
 
     private void ReloadImages()
@@ -590,12 +599,14 @@ public sealed class WallpaperManager : IDisposable
                     root,
                     out DatabaseImageChannel? channel))
             {
+                (int width, int height) =
+                    _output.DatabaseTargetSize(root);
                 channel = new DatabaseImageChannel(root, nextSettings)
                 {
                     Sequence =
                     {
-                        TargetWidth = _output.TargetWidth,
-                        TargetHeight = _output.TargetHeight
+                        TargetWidth = width,
+                        TargetHeight = height
                     }
                 };
                 _secondaryDatabaseChannels[root] = channel;
@@ -605,6 +616,13 @@ public sealed class WallpaperManager : IDisposable
             }
 
             AppSettings previousSettings = channel.Settings;
+            (int nextWidth, int nextHeight) =
+                _output.DatabaseTargetSize(root);
+            bool targetChanged =
+                channel.Sequence.TargetWidth != nextWidth
+                || channel.Sequence.TargetHeight != nextHeight;
+            channel.Sequence.TargetWidth = nextWidth;
+            channel.Sequence.TargetHeight = nextHeight;
             bool reload = forceReload
                 || nextSettings.ImageMode != previousSettings.ImageMode
                 || !string.Equals(
@@ -614,7 +632,8 @@ public sealed class WallpaperManager : IDisposable
             bool reprocess =
                 !AppSettingsComparer.ImagePreparationEquivalent(
                     nextSettings,
-                    previousSettings);
+                    previousSettings)
+                || targetChanged;
             channel.Settings = nextSettings;
             if (!nextSettings.ImageMode)
             {

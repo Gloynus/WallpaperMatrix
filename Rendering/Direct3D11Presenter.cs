@@ -490,6 +490,18 @@ internal sealed class Direct3D11Presenter : IDisposable
         return resources;
     }
 
+    public void ReleaseScene(SharedMatrixScene scene)
+    {
+        if (!_sceneResources.Remove(
+                scene,
+                out SceneGpuResources? resources))
+        {
+            return;
+        }
+
+        resources.Dispose();
+    }
+
     private void UploadAtlasIfNeeded(
         SharedMatrixScene scene,
         SceneGpuResources resources)
@@ -1215,6 +1227,28 @@ internal sealed class Direct3D11Presenter : IDisposable
                 float3 desktop = AttackDesktop.Sample(
                     AtlasSampler,
                     screenPosition).rgb;
+                float desktopEnergy = max(
+                    dot(desktop, desktop),
+                    0.0001);
+                float signalEnergy = max(
+                    dot(SignalColor, SignalColor),
+                    0.0001);
+                float signalSimilarity = dot(
+                    desktop / sqrt(desktopEnergy),
+                    SignalColor / sqrt(signalEnergy));
+                float desktopChroma =
+                    max(desktop.r, max(desktop.g, desktop.b))
+                    - min(desktop.r, min(desktop.g, desktop.b));
+                float wallpaperSignal = smoothstep(
+                    0.985,
+                    0.999,
+                    signalSimilarity)
+                    * smoothstep(0.035, 0.16, desktopChroma);
+                // The real wallpaper remains alive below the transparent
+                // attack surface. Do not reinterpret its already-rendered
+                // signal as a captured interface image: this preserves sharp
+                // glyphs while ordinary desktop colours are still absorbed.
+                screenshotMask *= 1.0 - wallpaperSignal;
                 float luminance = dot(
                     desktop,
                     float3(0.2126, 0.7152, 0.0722));

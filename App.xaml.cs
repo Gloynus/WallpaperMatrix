@@ -100,8 +100,14 @@ public partial class App : System.Windows.Application
                 argument,
                 "--validate-stop",
                 StringComparison.OrdinalIgnoreCase));
+        bool validateRouteSwitch = e.Args.Any(argument =>
+            string.Equals(
+                argument,
+                "--validate-route-switch",
+                StringComparison.OrdinalIgnoreCase));
         startInBackground |= validateAttackOverlay;
         startInBackground |= validateStop;
+        startInBackground |= validateRouteSwitch;
         forceAttack |= validateAttackOverlay;
 
         _singleInstanceMutex = new Mutex(true, "Local\\WallpaperMatrix.SingleInstance", out bool isFirstInstance);
@@ -217,6 +223,73 @@ public partial class App : System.Windows.Application
                         + $"{clock.Elapsed.TotalMilliseconds:0} мс.");
                     _stopValidationTimer!.Interval =
                         TimeSpan.FromSeconds(2);
+                    return;
+                }
+
+                _stopValidationTimer?.Stop();
+                ExitApplication();
+            };
+            _stopValidationTimer.Start();
+        }
+        if (validateRouteSwitch)
+        {
+            AppSettings original = _settings.Copy();
+            int phase = 0;
+            _stopValidationTimer = new DispatcherTimer(
+                DispatcherPriority.Background)
+            {
+                Interval = TimeSpan.FromSeconds(2)
+            };
+            _stopValidationTimer.Tick += (_, _) =>
+            {
+                if (phase++ == 0)
+                {
+                    IReadOnlyList<MonitorDescriptor> monitors =
+                        MonitorCatalog.Capture();
+                    if (monitors.Count < 2)
+                    {
+                        DiagnosticLog.Write(
+                            "Самопроверка бесшовной маршрутизации пропущена: "
+                            + "доступен только один экран.");
+                        ExitApplication();
+                        return;
+                    }
+
+                    AppSettings isolated = original.Copy();
+                    MonitorTopology.EnsureProfiles(isolated, monitors);
+                    MonitorDescriptor target = monitors.First(monitor =>
+                        !monitor.Primary);
+                    MonitorTopology.SetRoute(
+                        isolated.MonitorProfiles,
+                        monitors,
+                        MonitorRouteDomain.Flow,
+                        target.Id,
+                        MonitorLinkMode.Isolated,
+                        "");
+                    MonitorTopology.SetRoute(
+                        isolated.MonitorProfiles,
+                        monitors,
+                        MonitorRouteDomain.Database,
+                        target.Id,
+                        MonitorLinkMode.Isolated,
+                        "");
+                    _wallpaperManager?.ApplySettings(isolated);
+                    DiagnosticLog.Write(
+                        "Самопроверка бесшовной маршрутизации: "
+                        + $"устройство «{target.Label}» изолировано без "
+                        + "пересоздания поверхности рабочего стола.");
+                    return;
+                }
+
+                if (phase == 2)
+                {
+                    _wallpaperManager?.ApplySettings(original);
+                    DiagnosticLog.Write(
+                        "Самопроверка бесшовной маршрутизации: "
+                        + "исходная схема восстановлена без пересоздания "
+                        + "поверхности рабочего стола.");
+                    _stopValidationTimer!.Interval =
+                        TimeSpan.FromSeconds(1);
                     return;
                 }
 

@@ -136,6 +136,9 @@ internal sealed record MonitorOutputPlan(
                     0,
                     canvasBounds.Width,
                     canvasBounds.Height);
+            DrawingRectangle presentationSource = CropToAspect(
+                flowViewport,
+                monitor.Bounds);
 
             bool databaseExtended = database.Mode != MonitorLinkMode.Disabled
                 && (database.Mode == MonitorLinkMode.Extend
@@ -146,6 +149,12 @@ internal sealed record MonitorOutputPlan(
                             databaseRoutes[candidate.Id].RootMonitorId,
                             database.RootMonitorId,
                             StringComparison.OrdinalIgnoreCase)));
+            bool relayCopiesFlowRootProjection =
+                database.Mode == MonitorLinkMode.Relay
+                && string.Equals(
+                    flow.RootMonitorId,
+                    database.RootMonitorId,
+                    StringComparison.OrdinalIgnoreCase);
             DrawingRectangle databaseCanvas = databaseExtended
                 ? monitors
                     .Where(candidate =>
@@ -166,23 +175,19 @@ internal sealed record MonitorOutputPlan(
                     .Aggregate(DrawingRectangle.Union)
                 : database.Mode == MonitorLinkMode.Disabled
                     ? monitor.Bounds
-                    : monitorById[database.RootMonitorId].Bounds;
+                    : relayCopiesFlowRootProjection
+                        ? monitorById[database.RootMonitorId].Bounds
+                        : monitor.Bounds;
             bool sharedSpatialProjection =
                 flowExtended == databaseExtended
-                && (!flowExtended || canvasBounds == databaseCanvas);
+                && canvasBounds == databaseCanvas;
             DrawingRectangle imageDestination = sharedSpatialProjection
                 ? new DrawingRectangle(
                     0,
                     0,
                     canvasBounds.Width,
                     canvasBounds.Height)
-                : flowExtended
-                    ? flowViewport
-                    : new DrawingRectangle(
-                        0,
-                        0,
-                        canvasBounds.Width,
-                        canvasBounds.Height);
+                : presentationSource;
             DrawingRectangle databaseViewport = sharedSpatialProjection
                 || !databaseExtended
                 ? new DrawingRectangle(
@@ -230,7 +235,6 @@ internal sealed record MonitorOutputPlan(
                 canvasBounds.Top,
                 canvasBounds.Width,
                 canvasBounds.Height);
-            DrawingRectangle source = flowViewport;
             targets.Add(new TargetDraft(
                 sceneId,
                 flow.RootMonitorId,
@@ -246,7 +250,7 @@ internal sealed record MonitorOutputPlan(
                         monitor.Bounds.Top - virtualBounds.Top,
                         monitor.Bounds.Width,
                         monitor.Bounds.Height),
-                    source)));
+                    presentationSource)));
         }
 
         List<MonitorScenePlan> scenes = targets
@@ -290,6 +294,47 @@ internal sealed record MonitorOutputPlan(
                 hash = hash * 31 + character;
             return hash;
         }
+    }
+
+    private static DrawingRectangle CropToAspect(
+        DrawingRectangle source,
+        DrawingRectangle target)
+    {
+        if (source.Width <= 0
+            || source.Height <= 0
+            || target.Width <= 0
+            || target.Height <= 0)
+        {
+            return source;
+        }
+
+        double sourceAspect = source.Width / (double)source.Height;
+        double targetAspect = target.Width / (double)target.Height;
+        if (Math.Abs(sourceAspect - targetAspect) < 0.0001)
+            return source;
+
+        if (sourceAspect > targetAspect)
+        {
+            int width = Math.Clamp(
+                (int)Math.Round(source.Height * targetAspect),
+                1,
+                source.Width);
+            return new DrawingRectangle(
+                source.Left + (source.Width - width) / 2,
+                source.Top,
+                width,
+                source.Height);
+        }
+
+        int height = Math.Clamp(
+            (int)Math.Round(source.Width / targetAspect),
+            1,
+            source.Height);
+        return new DrawingRectangle(
+            source.Left,
+            source.Top + (source.Height - height) / 2,
+            source.Width,
+            height);
     }
 
     private static string ClockProjectionKey(AppSettings settings) =>

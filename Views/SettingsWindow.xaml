@@ -1032,11 +1032,12 @@
                                     </StackPanel>
                                     <Button Grid.Column="1"
                                             x:Name="OpenFlowSourceButton"
-                                            Content="ПЕРЕЙТИ К ИСТОЧНИКУ"
-                                            Padding="11,4"
                                             VerticalAlignment="Center"
                                             Style="{StaticResource ActionButton}"
-                                            Click="OpenFlowSourceButton_Click"/>
+                                            Click="OpenFlowSourceButton_Click">
+                                        <TextBlock Text="ПЕРЕЙТИ К ИСТОЧНИКУ"
+                                                   Margin="11,4"/>
+                                    </Button>
                                 </Grid>
                             </Border>
                             <ListBox x:Name="CurveKindCombo"
@@ -1947,11 +1948,12 @@
                                     </StackPanel>
                                     <Button Grid.Column="1"
                                             x:Name="OpenDatabaseSourceButton"
-                                            Content="ПЕРЕЙТИ К ИСТОЧНИКУ"
-                                            Padding="11,4"
                                             VerticalAlignment="Center"
                                             Style="{StaticResource ActionButton}"
-                                            Click="OpenDatabaseSourceButton_Click"/>
+                                            Click="OpenDatabaseSourceButton_Click">
+                                        <TextBlock Text="ПЕРЕЙТИ К ИСТОЧНИКУ"
+                                                   Margin="11,4"/>
+                                    </Button>
                                 </Grid>
                             </Border>
                             <StackPanel x:Name="DatabaseContentPanel">
@@ -2532,8 +2534,8 @@
                                 <Grid>
                                     <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                                     <ComboBox x:Name="ImageFitCombo">
-                                        <ComboBoxItem Content="Вписать целиком" Tag="Uniform"/>
-                                        <ComboBoxItem Content="Заполнить экран" Tag="Fill"/>
+                                        <ComboBoxItem Content="Вписать" Tag="Uniform"/>
+                                        <ComboBoxItem Content="Заполнить" Tag="Fill"/>
                                     </ComboBox>
                                     <Button Grid.Column="1" Style="{StaticResource ResetParameterButton}" Tag="ImageFit"/>
                                 </Grid>

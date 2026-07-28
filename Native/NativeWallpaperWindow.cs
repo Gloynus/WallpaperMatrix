@@ -14,17 +14,21 @@ namespace WallpaperMatrix.Native;
 internal sealed class NativeWallpaperWindow : IDisposable
 {
     private readonly DrawingRectangle _bounds;
-    private readonly MonitorOutputPlan _initialPlan;
     private readonly Thread _thread;
     private readonly CancellationTokenSource _cancellation = new();
     private readonly ManualResetEventSlim _started = new(false);
     private readonly ManualResetEventSlim _renderingEnabled = new(true);
     private readonly object _commandLock = new();
+    private readonly object _runtimeLock = new();
     private readonly AppSettings _initialSettings;
     private readonly Action<string, Exception, bool>? _failureHandler;
     private MonitorOutputPlan? _pendingPlan;
     private PreparedImage? _pendingImage;
     private IReadOnlyDictionary<string, PreparedImage?>? _pendingDatabaseImages;
+    private IReadOnlyDictionary<string, PreparedImage?> _activeDatabaseImages =
+        new Dictionary<string, PreparedImage?>();
+    private PreparedImage? _activeImage;
+    private MonitorOutputPlan _currentPlan;
     private bool _hasPendingImage;
     private bool _resetPendingImageOverlay;
     private IntPtr _window;
@@ -35,27 +39,44 @@ internal sealed class NativeWallpaperWindow : IDisposable
     private bool _disposed;
     private bool _synchronizationDisposed;
 
-    public SharedMatrixScene SharedFrame => _sceneRuntimes
-        .FirstOrDefault()?.Scene
-        ?? throw new InvalidOperationException("Общий кадр ещё не создан.");
+    public SharedMatrixScene SharedFrame
+    {
+        get
+        {
+            lock (_runtimeLock)
+            {
+                return _sceneRuntimes.FirstOrDefault()?.Scene
+                    ?? throw new InvalidOperationException(
+                        "Общий кадр ещё не создан.");
+            }
+        }
+    }
 
     public AttackFrameSnapshot CaptureAttackFrame()
     {
-        IReadOnlyList<MatrixScenePresentation> presentations =
-            BuildPresentations(
-                _initialPlan,
-                captureAttackCutoff: true);
-        long latestStreamId = _sceneRuntimes.Count == 0
-            ? 0
-            : _sceneRuntimes.Max(runtime =>
-            {
-                lock (runtime.Scene.SyncRoot)
-                    return runtime.Scene.LatestStreamId;
-            });
-        return new AttackFrameSnapshot(
-            SharedFrame,
-            presentations,
-            latestStreamId);
+        lock (_runtimeLock)
+        {
+            SceneRuntime[] runtimes = _sceneRuntimes.ToArray();
+            IReadOnlyList<MatrixScenePresentation> presentations =
+                BuildPresentations(
+                    _currentPlan,
+                    captureAttackCutoff: true,
+                    runtimes);
+            long latestStreamId = runtimes.Length == 0
+                ? 0
+                : runtimes.Max(runtime =>
+                {
+                    lock (runtime.Scene.SyncRoot)
+                        return runtime.Scene.LatestStreamId;
+                });
+            SharedMatrixScene primary = runtimes.FirstOrDefault()?.Scene
+                ?? throw new InvalidOperationException(
+                    "Общий кадр ещё не создан.");
+            return new AttackFrameSnapshot(
+                primary,
+                presentations,
+                latestStreamId);
+        }
     }
 
     public NativeWallpaperWindow(
@@ -64,7 +85,7 @@ internal sealed class NativeWallpaperWindow : IDisposable
         Action<string, Exception, bool>? failureHandler = null)
     {
         _bounds = plan.VirtualBounds;
-        _initialPlan = plan;
+        _currentPlan = plan;
         _initialSettings = settings.Copy();
         _failureHandler = failureHandler;
         _thread = new Thread(RenderThreadMain)
@@ -153,70 +174,36 @@ internal sealed class NativeWallpaperWindow : IDisposable
                     "Explorer не предоставил безопасную поверхность под значками "
                     + "рабочего стола.");
             }
-            foreach (MonitorScenePlan scenePlan in _initialPlan.Scenes)
-            {
-                SharedMatrixScene scene = new(
-                    Math.Max(1, scenePlan.CanvasBounds.Width),
-                    Math.Max(1, scenePlan.CanvasBounds.Height));
-                MatrixSceneRenderer renderer = new(
-                    _window,
-                    scene,
-                    scenePlan.Settings,
-                    scenePlan.RandomSeed);
-                _sceneRuntimes.Add(new SceneRuntime(
-                    scenePlan.Id,
-                    scenePlan.DatabaseRootMonitorId,
-                    scenePlan.ImageProjection,
-                    scene,
-                    renderer,
-                    scenePlan.Settings.Copy(
-                        includeMonitorProfiles: false)));
-            }
+            foreach (MonitorScenePlan scenePlan in _currentPlan.Scenes)
+                _sceneRuntimes.Add(CreateSceneRuntime(scenePlan));
             if (_sceneRuntimes.Count == 0)
-            {
-                SharedMatrixScene emptyScene = new(1, 1);
-                _sceneRuntimes.Add(new SceneRuntime(
-                    "DISABLED",
-                    "",
-                    new MatrixImageProjection(
-                        1,
-                        1,
-                        new DrawingRectangle(0, 0, 1, 1),
-                        new DrawingRectangle(0, 0, 1, 1)),
-                    emptyScene,
-                    new MatrixSceneRenderer(
-                        _window,
-                        emptyScene,
-                        _initialSettings,
-                        0),
-                    _initialSettings.Copy(
-                        includeMonitorProfiles: false)));
-            }
+                _sceneRuntimes.Add(CreateDisabledRuntime());
             _direct3DPresenter = Direct3D11Presenter.Create(
                 _window,
                 _bounds.Width,
                 _bounds.Height,
                 SharedFrame,
-                transparentSurface:
-                    _initialPlan.ActiveMonitorCount
-                    < System.Windows.Forms.Screen.AllScreens.Length);
+                // A permanently alpha-capable surface lets an individual
+                // monitor be enabled or disabled without rebuilding the
+                // native window and flashing the static wallpaper.
+                transparentSurface: true);
             NativeWindow.ShowWindow(_window, NativeWindow.ShowNoActivate);
             NativeWindow.UpdateWindow(_window);
             long presentedVersion = long.MinValue;
             bool nonEmptyFrameConfirmed = false;
             PresentLatestFrame(
-                _initialPlan,
+                _currentPlan,
                 ref presentedVersion);
             DiagnosticLog.Write(
                 $"Первый кадр передан: renderer=0x{_window.ToInt64():X}; "
-                + $"compositor=True; scenes={_initialPlan.Scenes.Count}; "
-                + $"viewports={_initialPlan.ActiveMonitorCount}; "
+                + $"compositor=True; scenes={_currentPlan.Scenes.Count}; "
+                + $"viewports={_currentPlan.ActiveMonitorCount}; "
                 + $"frameVersion={presentedVersion}; "
                 + $"instances={TotalInstanceCount()}; "
                 + $"surface={_bounds.Width}x{_bounds.Height}.");
             _started.Set();
             Stopwatch sharedClock = Stopwatch.StartNew();
-            MonitorOutputPlan activePlan = _initialPlan;
+            MonitorOutputPlan activePlan = _currentPlan;
 
             while (!_cancellation.IsCancellationRequested)
             {
@@ -257,7 +244,9 @@ internal sealed class NativeWallpaperWindow : IDisposable
                 int waitMilliseconds;
                 if (_sceneRuntimes.Count > 0)
                 {
-                    activePlan = ApplyPendingCommands(activePlan);
+                    activePlan = ApplyPendingCommands(
+                        activePlan,
+                        ref presentedVersion);
                     TimeSpan now = sharedClock.Elapsed;
                     foreach (SceneRuntime runtime in _sceneRuntimes)
                         runtime.Renderer.RenderIfDue(
@@ -335,9 +324,12 @@ internal sealed class NativeWallpaperWindow : IDisposable
 
     private IReadOnlyList<MatrixScenePresentation> BuildPresentations(
         MonitorOutputPlan plan,
-        bool captureAttackCutoff = false)
+        bool captureAttackCutoff = false,
+        IReadOnlyList<SceneRuntime>? runtimeSnapshot = null)
     {
-        Dictionary<string, SceneRuntime> runtimes = _sceneRuntimes
+        IReadOnlyList<SceneRuntime> sourceRuntimes =
+            runtimeSnapshot ?? _sceneRuntimes;
+        Dictionary<string, SceneRuntime> runtimes = sourceRuntimes
             .ToDictionary(
                 runtime => runtime.Id,
                 StringComparer.OrdinalIgnoreCase);
@@ -369,7 +361,8 @@ internal sealed class NativeWallpaperWindow : IDisposable
     }
 
     private MonitorOutputPlan ApplyPendingCommands(
-        MonitorOutputPlan activePlan)
+        MonitorOutputPlan activePlan,
+        ref long presentedVersion)
     {
         MonitorOutputPlan? pendingPlan;
         PreparedImage? image;
@@ -389,40 +382,30 @@ internal sealed class NativeWallpaperWindow : IDisposable
             _resetPendingImageOverlay = false;
         }
 
+        if (hasImage)
+            _activeImage = image;
+        if (databaseImages is not null)
+        {
+            _activeDatabaseImages =
+                new Dictionary<string, PreparedImage?>(
+                    databaseImages,
+                    StringComparer.OrdinalIgnoreCase);
+        }
         if (pendingPlan is not null)
         {
-            Dictionary<string, MonitorScenePlan> scenes =
-                pendingPlan.Scenes.ToDictionary(
-                    scene => scene.Id,
-                    StringComparer.OrdinalIgnoreCase);
-            foreach (SceneRuntime runtime in _sceneRuntimes)
+            try
             {
-                if (!scenes.TryGetValue(
-                    runtime.Id,
-                    out MonitorScenePlan? scenePlan))
-                {
-                    continue;
-                }
-                try
-                {
-                    runtime.Renderer.UpdateSettings(
-                        scenePlan.Settings);
-                    runtime.LastGoodSettings =
-                        scenePlan.Settings.Copy(
-                            includeMonitorProfiles: false);
-                }
-                catch (Exception exception)
-                {
-                    ReportFailure(
-                        $"Настройка рендера отклонена; восстановлен размер "
-                        + $"{runtime.LastGoodSettings.FontSize:0.##} px.",
-                        exception,
-                        fatal: false);
-                    runtime.Renderer.UpdateSettings(
-                        runtime.LastGoodSettings);
-                }
+                ReconfigureRuntimes(pendingPlan);
+                activePlan = pendingPlan;
+                presentedVersion = long.MinValue;
             }
-            activePlan = pendingPlan;
+            catch (Exception exception)
+            {
+                ReportFailure(
+                    "Новая маршрутизация отклонена; прежний поток продолжает работу.",
+                    exception,
+                    fatal: false);
+            }
         }
         if (resetImageOverlay)
         {
@@ -442,7 +425,7 @@ internal sealed class NativeWallpaperWindow : IDisposable
         {
             foreach (SceneRuntime runtime in _sceneRuntimes)
             {
-                databaseImages.TryGetValue(
+                _activeDatabaseImages.TryGetValue(
                     runtime.DatabaseRootMonitorId,
                     out PreparedImage? databaseImage);
                 runtime.Renderer.SetImage(
@@ -451,6 +434,157 @@ internal sealed class NativeWallpaperWindow : IDisposable
             }
         }
         return activePlan;
+    }
+
+    private void ReconfigureRuntimes(MonitorOutputPlan plan)
+    {
+        Dictionary<string, SceneRuntime> existing = _sceneRuntimes
+            .ToDictionary(
+                runtime => runtime.Id,
+                StringComparer.OrdinalIgnoreCase);
+        List<SceneRuntime> next = [];
+        List<SceneRuntime> created = [];
+        List<(SceneRuntime Runtime, MonitorScenePlan Plan)> reused = [];
+
+        try
+        {
+            foreach (MonitorScenePlan scenePlan in plan.Scenes)
+            {
+                if (!existing.Remove(
+                        scenePlan.Id,
+                        out SceneRuntime? runtime))
+                {
+                    runtime = CreateSceneRuntime(scenePlan);
+                    created.Add(runtime);
+                }
+                else
+                {
+                    reused.Add((runtime, scenePlan));
+                }
+                next.Add(runtime);
+            }
+
+            if (next.Count == 0)
+            {
+                if (!existing.Remove(
+                        "DISABLED",
+                        out SceneRuntime? disabled))
+                {
+                    disabled = CreateDisabledRuntime();
+                    created.Add(disabled);
+                }
+                next.Add(disabled);
+            }
+        }
+        catch
+        {
+            foreach (SceneRuntime runtime in created)
+                runtime.Dispose();
+            throw;
+        }
+
+        foreach ((SceneRuntime runtime, MonitorScenePlan scenePlan) in reused)
+            UpdateSceneRuntime(runtime, scenePlan);
+
+        lock (_runtimeLock)
+        {
+            _sceneRuntimes.Clear();
+            _sceneRuntimes.AddRange(next);
+            _currentPlan = plan;
+        }
+
+        foreach (SceneRuntime obsolete in existing.Values)
+        {
+            _direct3DPresenter?.ReleaseScene(obsolete.Scene);
+            obsolete.Dispose();
+        }
+
+        DiagnosticLog.Write(
+            $"Маршрутизация перестроена без пересоздания D3D11: "
+            + $"renderer=0x{_window.ToInt64():X}; "
+            + $"scenes={plan.Scenes.Count}; "
+            + $"viewports={plan.ActiveMonitorCount}.");
+    }
+
+    private SceneRuntime CreateSceneRuntime(MonitorScenePlan scenePlan)
+    {
+        SharedMatrixScene scene = new(
+            Math.Max(1, scenePlan.CanvasBounds.Width),
+            Math.Max(1, scenePlan.CanvasBounds.Height));
+        MatrixSceneRenderer renderer = new(
+            _window,
+            scene,
+            scenePlan.Settings,
+            scenePlan.RandomSeed);
+        SceneRuntime runtime = new(
+            scenePlan.Id,
+            scenePlan.DatabaseRootMonitorId,
+            scenePlan.ImageProjection,
+            scene,
+            renderer,
+            scenePlan.Settings.Copy(
+                includeMonitorProfiles: false));
+        renderer.SetImage(
+            ImageForDatabaseRoot(scenePlan.DatabaseRootMonitorId),
+            scenePlan.ImageProjection);
+        return runtime;
+    }
+
+    private SceneRuntime CreateDisabledRuntime()
+    {
+        SharedMatrixScene emptyScene = new(1, 1);
+        return new SceneRuntime(
+            "DISABLED",
+            "",
+            new MatrixImageProjection(
+                1,
+                1,
+                new DrawingRectangle(0, 0, 1, 1),
+                new DrawingRectangle(0, 0, 1, 1)),
+            emptyScene,
+            new MatrixSceneRenderer(
+                _window,
+                emptyScene,
+                _initialSettings,
+                0),
+            _initialSettings.Copy(
+                includeMonitorProfiles: false));
+    }
+
+    private void UpdateSceneRuntime(
+        SceneRuntime runtime,
+        MonitorScenePlan scenePlan)
+    {
+        try
+        {
+            runtime.Renderer.UpdateSettings(scenePlan.Settings);
+            runtime.LastGoodSettings =
+                scenePlan.Settings.Copy(
+                    includeMonitorProfiles: false);
+        }
+        catch (Exception exception)
+        {
+            ReportFailure(
+                $"Настройка рендера отклонена; восстановлен размер "
+                + $"{runtime.LastGoodSettings.FontSize:0.##} px.",
+                exception,
+                fatal: false);
+            runtime.Renderer.UpdateSettings(runtime.LastGoodSettings);
+        }
+
+        runtime.Renderer.SetImage(
+            ImageForDatabaseRoot(scenePlan.DatabaseRootMonitorId),
+            scenePlan.ImageProjection);
+    }
+
+    private PreparedImage? ImageForDatabaseRoot(string rootMonitorId)
+    {
+        if (_activeDatabaseImages.Count == 0)
+            return _activeImage;
+        _activeDatabaseImages.TryGetValue(
+            rootMonitorId,
+            out PreparedImage? image);
+        return image;
     }
 
     private long CombinedSceneVersion()

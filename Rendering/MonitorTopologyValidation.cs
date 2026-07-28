@@ -100,7 +100,55 @@ internal static class MonitorTopologyValidation
             && primaryRoute.RootMonitorId == right.Id,
             "Обратная ссылка не была сведена к новому корню.");
 
+        ValidateIndependentImageProjection(primary, right);
         ValidatePortablePresets(primary, right, upper);
+    }
+
+    private static void ValidateIndependentImageProjection(
+        MonitorDescriptor primary,
+        MonitorDescriptor target)
+    {
+        MonitorDescriptor portrait = target with
+        {
+            Bounds = new DrawingRectangle(1920, 0, 1080, 1920)
+        };
+        MonitorDescriptor[] monitors = [primary, portrait];
+        AppSettings settings = new();
+        MonitorTopology.EnsureProfiles(settings, monitors);
+        MonitorTopology.SetRoute(
+            settings.MonitorProfiles,
+            monitors,
+            MonitorRouteDomain.Database,
+            portrait.Id,
+            MonitorLinkMode.Isolated,
+            "");
+        MonitorProfile targetProfile = MonitorTopology.Find(
+            settings.MonitorProfiles,
+            portrait.Id)!;
+        targetProfile.Settings.ImageFit = "Uniform";
+
+        MonitorOutputPlan plan =
+            MonitorOutputPlan.Create(settings, monitors);
+        MonitorScenePlan scene = plan.Scenes.Single(item =>
+            item.Targets.Any(viewport =>
+                viewport.MonitorId == portrait.Id));
+        MonitorSceneTarget viewport = scene.Targets.Single(item =>
+            item.MonitorId == portrait.Id);
+        MatrixImageProjection projection = scene.ImageProjection;
+        Require(
+            projection.CanvasWidth == portrait.Bounds.Width
+            && projection.CanvasHeight == portrait.Bounds.Height,
+            "Изолированная база использует пропорции другого экрана.");
+        Require(
+            Math.Abs(
+                viewport.SourceBounds.Width
+                    / (double)viewport.SourceBounds.Height
+                - portrait.Bounds.Width
+                    / (double)portrait.Bounds.Height) < 0.002,
+            "Область потока не приведена к пропорциям целевого экрана.");
+        Require(
+            projection.DestinationBounds == viewport.SourceBounds,
+            "Образ не проецируется точно в видимую область целевого экрана.");
     }
 
     private static void ValidatePortablePresets(
