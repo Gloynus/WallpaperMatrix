@@ -1121,8 +1121,13 @@ public partial class SettingsWindow : Window
             preset.Settings,
             settings,
             monitors);
+        bool playlistBindingsMatch =
+            OperatorPlaylistBinding.Matches(
+                baseline,
+                settings);
         OperatorPlaylistBinding.Apply(baseline, settings);
-        return AppSettingsComparer.PresetEquivalent(
+        return playlistBindingsMatch
+            && AppSettingsComparer.PresetEquivalent(
             settings,
             baseline);
     }

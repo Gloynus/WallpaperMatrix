@@ -32,6 +32,32 @@ internal static class OperatorPlaylistBinding
         }
     }
 
+    public static bool Matches(
+        AppSettings presetSettings,
+        AppSettings currentSettings)
+    {
+        if (!MatchesOne(presetSettings, currentSettings))
+            return false;
+
+        foreach (MonitorProfile profile in presetSettings.MonitorProfiles)
+        {
+            if (profile.DatabaseMode != MonitorLinkMode.Isolated)
+                continue;
+
+            MonitorProfile? currentProfile = MonitorTopology.Find(
+                currentSettings.MonitorProfiles,
+                profile.MonitorId);
+            if (currentProfile is null
+                || !MatchesOne(
+                    profile.Settings,
+                    currentProfile.Settings))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
     private static void StampOne(AppSettings settings)
     {
         if (settings.ImagePlaylists.Count == 0)
@@ -71,5 +97,31 @@ internal static class OperatorPlaylistBinding
         presetSettings.ActiveImagePlaylistId = selected.Id;
         presetSettings.OperatorPlaylistId = selected.Id;
         presetSettings.OperatorPlaylistName = selected.Name.Trim();
+    }
+
+    private static bool MatchesOne(
+        AppSettings presetSettings,
+        AppSettings currentSettings)
+    {
+        if (currentSettings.ImagePlaylists.Count == 0)
+            return string.IsNullOrWhiteSpace(
+                presetSettings.OperatorPlaylistId)
+                && string.IsNullOrWhiteSpace(
+                    presetSettings.OperatorPlaylistName);
+
+        ImagePlaylist selected =
+            currentSettings.ActiveImagePlaylist();
+        return (!string.IsNullOrWhiteSpace(
+                    presetSettings.OperatorPlaylistId)
+                && string.Equals(
+                    presetSettings.OperatorPlaylistId,
+                    selected.Id,
+                    StringComparison.OrdinalIgnoreCase))
+            || (!string.IsNullOrWhiteSpace(
+                    presetSettings.OperatorPlaylistName)
+                && string.Equals(
+                    presetSettings.OperatorPlaylistName,
+                    selected.Name.Trim(),
+                    StringComparison.CurrentCultureIgnoreCase));
     }
 }
