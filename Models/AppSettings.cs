@@ -11,7 +11,7 @@ public sealed class AppSettings
     public const double MinimumAttackTransitionSeconds = 1.0;
     public const double MaximumAttackTransitionSeconds = 600.0;
 
-    public int SettingsVersion { get; set; } = 32;
+    public int SettingsVersion { get; set; } = 33;
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public double Speed { get; set; }
     public double SpeedMin { get; set; } = 0.20;
@@ -98,6 +98,10 @@ public sealed class AppSettings
     public bool AttackSystemEnabled { get; set; }
     public double AttackIdleMinutes { get; set; } = 10.0;
     public double AttackTransitionSeconds { get; set; } = 30.0;
+    public string VirtualOutputSourceMonitorId { get; set; } = "";
+    public int VirtualOutputWidth { get; set; } = 1920;
+    public int VirtualOutputHeight { get; set; } = 1080;
+    public string VirtualOutputFit { get; set; } = "Fill";
     public bool WelcomeShown { get; set; }
     public string ActivePresetId { get; set; } = "";
     public List<MonitorProfile> MonitorProfiles { get; set; } = [];
@@ -175,6 +179,10 @@ public sealed class AppSettings
         AttackSystemEnabled = AttackSystemEnabled,
         AttackIdleMinutes = AttackIdleMinutes,
         AttackTransitionSeconds = AttackTransitionSeconds,
+        VirtualOutputSourceMonitorId = VirtualOutputSourceMonitorId,
+        VirtualOutputWidth = VirtualOutputWidth,
+        VirtualOutputHeight = VirtualOutputHeight,
+        VirtualOutputFit = VirtualOutputFit,
         WelcomeShown = WelcomeShown,
         ActivePresetId = ActivePresetId,
         MonitorProfiles = includeMonitorProfiles
@@ -456,6 +464,8 @@ public sealed class AppSettings
             SettingsVersion = 31;
         if (SettingsVersion < 32)
             SettingsVersion = 32;
+        if (SettingsVersion < 33)
+            SettingsVersion = 33;
         SpeedMin = Math.Clamp(
             SpeedMin,
             MinimumSpeed,
@@ -581,6 +591,19 @@ public sealed class AppSettings
             AttackTransitionSeconds,
             MinimumAttackTransitionSeconds,
             MaximumAttackTransitionSeconds);
+        VirtualOutputSourceMonitorId =
+            VirtualOutputSourceMonitorId?.Trim() ?? "";
+        VirtualOutputWidth = Math.Clamp(
+            VirtualOutputWidth,
+            320,
+            7680);
+        VirtualOutputHeight = Math.Clamp(
+            VirtualOutputHeight,
+            180,
+            4320);
+        VirtualOutputFit = VirtualOutputFit is "Fill" or "Uniform"
+            ? VirtualOutputFit
+            : "Fill";
         ActivePresetId = ActivePresetId?.Trim() ?? "";
         OperatorPlaylistId = OperatorPlaylistId?.Trim() ?? "";
         OperatorPlaylistName = OperatorPlaylistName?.Trim() ?? "";

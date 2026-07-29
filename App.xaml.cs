@@ -22,6 +22,7 @@ public partial class App : System.Windows.Application
     private SettingsWindow? _settingsWindow;
     private DispatcherTimer? _attackValidationTimer;
     private DispatcherTimer? _stopValidationTimer;
+    private DispatcherTimer? _featureValidationTimer;
     private bool _isExiting;
     private bool _handlingDispatcherFailure;
 
@@ -104,9 +105,21 @@ public partial class App : System.Windows.Application
                 argument,
                 "--validate-route-switch",
                 StringComparison.OrdinalIgnoreCase));
+        bool validateVirtualOutput = e.Args.Any(argument =>
+            string.Equals(
+                argument,
+                "--validate-virtual-output",
+                StringComparison.OrdinalIgnoreCase));
+        bool validateRecovery = e.Args.Any(argument =>
+            string.Equals(
+                argument,
+                "--validate-recovery",
+                StringComparison.OrdinalIgnoreCase));
         startInBackground |= validateAttackOverlay;
         startInBackground |= validateStop;
         startInBackground |= validateRouteSwitch;
+        startInBackground |= validateVirtualOutput;
+        startInBackground |= validateRecovery;
         forceAttack |= validateAttackOverlay;
 
         _singleInstanceMutex = new Mutex(true, "Local\\WallpaperMatrix.SingleInstance", out bool isFirstInstance);
@@ -139,6 +152,8 @@ public partial class App : System.Windows.Application
         _wallpaperManager = new WallpaperManager(_settings);
         _wallpaperManager.PauseStateChanged += OnWallpaperPauseStateChanged;
         _wallpaperManager.RuntimeStatusChanged += OnWallpaperRuntimeStatusChanged;
+        _wallpaperManager.VirtualOutputStateChanged +=
+            OnVirtualOutputStateChanged;
         try
         {
             _wallpaperManager.Start();
@@ -147,6 +162,8 @@ public partial class App : System.Windows.Application
         {
             _wallpaperManager.PauseStateChanged -= OnWallpaperPauseStateChanged;
             _wallpaperManager.RuntimeStatusChanged -= OnWallpaperRuntimeStatusChanged;
+            _wallpaperManager.VirtualOutputStateChanged -=
+                OnVirtualOutputStateChanged;
             DiagnosticLog.Write("Запуск живых обоев завершился ошибкой.", ex);
             _wallpaperManager.Dispose();
             _wallpaperManager = null;
@@ -234,6 +251,72 @@ public partial class App : System.Windows.Application
                 ExitApplication();
             };
             _stopValidationTimer.Start();
+        }
+        if (validateVirtualOutput)
+        {
+            int phase = 0;
+            _featureValidationTimer = new DispatcherTimer(
+                DispatcherPriority.Background)
+            {
+                Interval = TimeSpan.FromSeconds(3)
+            };
+            _featureValidationTimer.Tick += (_, _) =>
+            {
+                if (phase++ == 0)
+                {
+                    AppSettings validation = _settings.Copy();
+                    validation.VirtualOutputSourceMonitorId = "";
+                    validation.VirtualOutputWidth = 960;
+                    validation.VirtualOutputHeight = 540;
+                    validation.VirtualOutputFit = "Fill";
+                    _wallpaperManager?.SetVirtualOutput(
+                        true,
+                        validation);
+                    return;
+                }
+                if (phase == 2)
+                {
+                    DiagnosticLog.Write(
+                        _wallpaperManager?.IsVirtualOutputOpen == true
+                            ? "Самопроверка виртуального выхода завершена успешно."
+                            : "Самопроверка виртуального выхода не подтвердила открытое окно.");
+                    _wallpaperManager?.SetVirtualOutput(
+                        false,
+                        _settings);
+                    _featureValidationTimer!.Interval =
+                        TimeSpan.FromSeconds(1);
+                    return;
+                }
+                _featureValidationTimer?.Stop();
+                ExitApplication();
+            };
+            _featureValidationTimer.Start();
+        }
+        else if (validateRecovery)
+        {
+            int phase = 0;
+            _featureValidationTimer = new DispatcherTimer(
+                DispatcherPriority.Background)
+            {
+                Interval = TimeSpan.FromSeconds(3)
+            };
+            _featureValidationTimer.Tick += (_, _) =>
+            {
+                if (phase++ == 0)
+                {
+                    _wallpaperManager?.SimulateOutputLossForValidation();
+                    _featureValidationTimer!.Interval =
+                        TimeSpan.FromSeconds(8);
+                    return;
+                }
+                DiagnosticLog.Write(
+                    _wallpaperManager?.IsOutputActive == true
+                        ? "Самопроверка аварийного контура завершена успешно."
+                        : "Самопроверка аварийного контура не восстановила вывод.");
+                _featureValidationTimer?.Stop();
+                ExitApplication();
+            };
+            _featureValidationTimer.Start();
         }
         if (validateRouteSwitch)
         {
@@ -352,10 +435,14 @@ public partial class App : System.Windows.Application
             _settingsWindow.ImageRequested += PreviewImage;
             _settingsWindow.PauseRequested += SetWallpaperPaused;
             _settingsWindow.AttackRequested += StartAttack;
+            _settingsWindow.VirtualOutputRequested +=
+                SetVirtualOutput;
         }
 
         _settingsWindow.LoadSettings(_settings);
         _settingsWindow.SetPauseState(_wallpaperManager?.IsManuallyPaused ?? false);
+        _settingsWindow.SetVirtualOutputState(
+            _wallpaperManager?.IsVirtualOutputOpen ?? false);
         if (_wallpaperManager is not null)
         {
             _settingsWindow.SetRuntimeStatus(
@@ -430,6 +517,11 @@ public partial class App : System.Windows.Application
     private void StartAttack() =>
         _wallpaperManager?.StartAttack();
 
+    private void SetVirtualOutput(
+        AppSettings settings,
+        bool open) =>
+        _wallpaperManager?.SetVirtualOutput(open, settings);
+
     private void TogglePaused()
     {
         if (_wallpaperManager is null)
@@ -478,6 +570,11 @@ public partial class App : System.Windows.Application
             _tray?.ShowError(_wallpaperManager.RuntimeStatus);
     }
 
+    private void OnVirtualOutputStateChanged(bool open)
+    {
+        _settingsWindow?.SetVirtualOutputState(open);
+    }
+
     private static void TryApplyAutostart(
         bool enabled,
         bool showError,
@@ -511,12 +608,15 @@ public partial class App : System.Windows.Application
         _isExiting = true;
         _attackValidationTimer?.Stop();
         _stopValidationTimer?.Stop();
+        _featureValidationTimer?.Stop();
         _settingsWindow?.ForceClose();
         _tray?.Dispose();
         if (_wallpaperManager is not null)
         {
             _wallpaperManager.PauseStateChanged -= OnWallpaperPauseStateChanged;
             _wallpaperManager.RuntimeStatusChanged -= OnWallpaperRuntimeStatusChanged;
+            _wallpaperManager.VirtualOutputStateChanged -=
+                OnVirtualOutputStateChanged;
         }
         _wallpaperManager?.Dispose();
         _singleInstanceMutex?.ReleaseMutex();
@@ -599,6 +699,7 @@ public partial class App : System.Windows.Application
     protected override void OnExit(ExitEventArgs e)
     {
         _stopValidationTimer?.Stop();
+        _featureValidationTimer?.Stop();
         _tray?.Dispose();
         _wallpaperManager?.Dispose();
         base.OnExit(e);

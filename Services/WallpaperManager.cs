@@ -18,6 +18,7 @@ public sealed class WallpaperManager : IDisposable
     private readonly DispatcherTimer _sessionResumeTimer;
     private readonly DispatcherTimer _attackTimer;
     private readonly DispatcherTimer _fullscreenTransitionTimer;
+    private readonly DispatcherTimer _outputHealthTimer;
     private readonly SemaphoreSlim _imageLoadGate = new(1, 1);
     private readonly Dictionary<string, DatabaseImageChannel>
         _secondaryDatabaseChannels =
@@ -42,6 +43,9 @@ public sealed class WallpaperManager : IDisposable
     private DateTime _fullscreenTransitionStartedUtc;
     private bool _sessionUnavailable;
     private int _sessionResumeAttempts;
+    private int _outputRecoveryAttempts;
+    private DateTime _outputRecoveryAfterUtc;
+    private bool _outputRecoveryActive;
     private bool _disposed;
     private string _displayTopologySignature = "";
     private string _runtimeStatus = "ИНИЦИАЛИЗАЦИЯ ВЫВОДА";
@@ -53,16 +57,23 @@ public sealed class WallpaperManager : IDisposable
     public bool IsPausedByFullscreenApp => _fullscreenPaused;
     public bool IsAttackActive =>
         _attackOverlay is not null || _attackStartPending;
+    public bool IsVirtualOutputOpen =>
+        _output.IsVirtualOutputOpen;
+    public bool IsOutputActive =>
+        _output.IsRunning;
     public string RuntimeStatus => _runtimeStatus;
     public bool HasRuntimeError => _hasRuntimeError;
     public string DiagnosticLogPath => DiagnosticLog.LogPath;
     public event Action? PauseStateChanged;
     public event Action? RuntimeStatusChanged;
+    public event Action<bool>? VirtualOutputStateChanged;
 
     public WallpaperManager(AppSettings settings)
     {
         _settings = settings.Copy();
         _output = new WallpaperOutputSession(ReportWindowFailure);
+        _output.VirtualOutputStateChanged +=
+            OnVirtualOutputStateChanged;
         _imageTimer = new DispatcherTimer(DispatcherPriority.Background)
         {
             Interval = TimeSpan.FromMilliseconds(120)
@@ -92,6 +103,12 @@ public sealed class WallpaperManager : IDisposable
             Interval = TimeSpan.FromMilliseconds(16)
         };
         _fullscreenTransitionTimer.Tick += OnFullscreenTransitionTimer;
+        _outputHealthTimer = new DispatcherTimer(
+            DispatcherPriority.Background)
+        {
+            Interval = TimeSpan.FromSeconds(2)
+        };
+        _outputHealthTimer.Tick += OnOutputHealthTimer;
         _fullscreenMonitor.ActivityChanged += OnFullscreenActivityChanged;
     }
 
@@ -106,6 +123,7 @@ public sealed class WallpaperManager : IDisposable
         ReloadImages();
         _imageTimer.Start();
         _attackTimer.Start();
+        _outputHealthTimer.Start();
         _fullscreenMonitor.SetEnabled(_settings.PauseDuringFullscreenApps);
         _displayTopologySignature = CaptureDisplayTopology();
         SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
@@ -154,6 +172,41 @@ public sealed class WallpaperManager : IDisposable
     public void StartAttack()
     {
         BeginAttack(manual: true);
+    }
+
+    public void SetVirtualOutput(
+        bool open,
+        AppSettings settings)
+    {
+        if (_disposed)
+            return;
+        try
+        {
+            _output.SetVirtualOutput(open, settings);
+            SetRuntimeStatus(
+                open
+                    ? "ВИРТУАЛЬНЫЙ ВЫХОД АКТИВЕН // ЗАХВАТ OBS ГОТОВ"
+                    : $"ВЫВОД АКТИВЕН // DIRECT3D 11 // ЭКРАНОВ: "
+                        + $"{_output.WindowCount}",
+                isError: false);
+        }
+        catch (Exception exception)
+        {
+            ReportWindowFailure(
+                "Не удалось изменить состояние виртуального выхода.",
+                exception,
+                fatal: false);
+        }
+    }
+
+    public void SimulateOutputLossForValidation()
+    {
+        if (_disposed || _manualPaused || _sessionUnavailable)
+            return;
+        DiagnosticLog.Write(
+            "Самопроверка аварийного контура: рабочая поверхность "
+            + "преднамеренно отсоединена.");
+        _output.StopAndRestoreDesktop();
     }
 
     public void StopAttack()
@@ -332,6 +385,7 @@ public sealed class WallpaperManager : IDisposable
         try
         {
             _output.Restart(_settings, _currentImage, _fullscreenPaused);
+            ResetOutputRecovery();
             RefreshSecondaryDatabaseChannels(forceReload: true);
             UpdateImageTargetSize();
             SetRuntimeStatus(
@@ -357,6 +411,7 @@ public sealed class WallpaperManager : IDisposable
             try
             {
                 _output.Start(_settings, _currentImage);
+                ResetOutputRecovery();
                 UpdateImageTargetSize();
                 SetRuntimeStatus(
                     $"ВЫВОД ВОЗОБНОВЛЁН // DIRECT3D 11 // ЭКРАНОВ: {_output.WindowCount}",
@@ -1020,6 +1075,7 @@ public sealed class WallpaperManager : IDisposable
             _output.Start(_settings, _currentImage);
             if (_fullscreenPaused)
                 _output.Suspend();
+            ResetOutputRecovery();
             UpdateImageTargetSize();
             _displayTopologySignature = CaptureDisplayTopology();
             _sessionUnavailable = false;
@@ -1276,6 +1332,100 @@ public sealed class WallpaperManager : IDisposable
         }
     }
 
+    private void OnOutputHealthTimer(object? sender, EventArgs e)
+    {
+        if (_disposed
+            || _outputRecoveryActive
+            || _manualPaused
+            || _fullscreenPaused
+            || _sessionUnavailable
+            || IsAttackActive
+            || DateTime.UtcNow < _outputRecoveryAfterUtc)
+        {
+            return;
+        }
+
+        WallpaperOutputHealth health = _output.CheckHealth(
+            TimeSpan.FromSeconds(8));
+        if (health.IsHealthy)
+        {
+            ResetOutputRecovery();
+            return;
+        }
+
+        RecoverOutput(health.Reason);
+    }
+
+    private void RecoverOutput(string reason)
+    {
+        _outputRecoveryActive = true;
+        _outputRecoveryAttempts++;
+        int attempt = _outputRecoveryAttempts;
+        DiagnosticLog.Write(
+            $"Аварийный контур обнаружил потерю вывода: {reason}. "
+            + $"Попытка восстановления {attempt}.");
+        SetRuntimeStatus(
+            $"АВАРИЙНЫЙ КОНТУР // ВОССТАНОВЛЕНИЕ ВЫВОДА // ПОПЫТКА {attempt}",
+            isError: false);
+
+        try
+        {
+            AbortAttackImmediately();
+            _output.Restart(
+                _settings,
+                _currentImage,
+                suspended: false);
+            RefreshSecondaryDatabaseChannels(forceReload: false);
+            PublishDatabaseImages();
+            UpdateImageTargetSize();
+            _displayTopologySignature = CaptureDisplayTopology();
+            ResetOutputRecovery();
+            SetRuntimeStatus(
+                $"ВЫВОД ВОССТАНОВЛЕН АВАРИЙНЫМ КОНТУРОМ "
+                + $"// DIRECT3D 11 // ЭКРАНОВ: {_output.WindowCount}",
+                isError: false);
+        }
+        catch (Exception exception)
+        {
+            _output.StopAndRestoreDesktop();
+            double delaySeconds = attempt switch
+            {
+                1 => 1,
+                2 => 2,
+                3 => 5,
+                4 => 10,
+                _ => 30
+            };
+            _outputRecoveryAfterUtc =
+                DateTime.UtcNow.AddSeconds(delaySeconds);
+            DiagnosticLog.Write(
+                $"Аварийное восстановление не удалось; следующая попытка "
+                + $"через {delaySeconds:0} с.",
+                exception);
+            SetRuntimeStatus(
+                $"АВАРИЙНЫЙ КОНТУР ОЖИДАЕТ // ПОВТОР ЧЕРЕЗ "
+                + $"{delaySeconds:0} С // "
+                + exception.GetBaseException().Message,
+                isError: true);
+        }
+        finally
+        {
+            _outputRecoveryActive = false;
+        }
+    }
+
+    private void ResetOutputRecovery()
+    {
+        _outputRecoveryAttempts = 0;
+        _outputRecoveryAfterUtc = DateTime.MinValue;
+    }
+
+    private void OnVirtualOutputStateChanged(bool open)
+    {
+        DispatchSystemEvent(() =>
+            VirtualOutputStateChanged?.Invoke(open));
+    }
+
     private void SetRuntimeStatus(string status, bool isError)
     {
         _runtimeStatus = status;
@@ -1301,12 +1451,15 @@ public sealed class WallpaperManager : IDisposable
         SystemEvents.SessionSwitch -= OnSessionSwitch;
         SystemEvents.PowerModeChanged -= OnPowerModeChanged;
         _fullscreenMonitor.ActivityChanged -= OnFullscreenActivityChanged;
+        _output.VirtualOutputStateChanged -=
+            OnVirtualOutputStateChanged;
         _fullscreenMonitor.Dispose();
         _imageTimer.Stop();
         _attackTimer.Stop();
         _displayChangeTimer.Stop();
         _sessionResumeTimer.Stop();
         _fullscreenTransitionTimer.Stop();
+        _outputHealthTimer.Stop();
         AbortAttackImmediately();
         _imagePreparation.Clear();
         _output.Dispose();

@@ -38,6 +38,8 @@ internal sealed class NativeWallpaperWindow : IDisposable
     private readonly List<SceneRuntime> _sceneRuntimes = [];
     private Direct3D11Presenter? _direct3DPresenter;
     private Exception? _startupError;
+    private long _lastPresentUtcTicks;
+    private int _renderFaulted;
     private int _paused;
     private bool _disposed;
     private bool _synchronizationDisposed;
@@ -79,6 +81,43 @@ internal sealed class NativeWallpaperWindow : IDisposable
                 primary,
                 presentations,
                 latestStreamId);
+        }
+    }
+
+    public MatrixScenePresentation? CaptureVirtualOutputFrame(
+        string monitorId)
+    {
+        lock (_runtimeLock)
+        {
+            MonitorScenePlan? scenePlan = _currentPlan.Scenes
+                .FirstOrDefault(candidate =>
+                    candidate.Targets.Any(target => string.Equals(
+                        target.MonitorId,
+                        monitorId,
+                        StringComparison.OrdinalIgnoreCase)));
+            if (scenePlan is null)
+                return null;
+            MonitorSceneTarget? target = scenePlan.Targets
+                .FirstOrDefault(candidate => string.Equals(
+                    candidate.MonitorId,
+                    monitorId,
+                    StringComparison.OrdinalIgnoreCase));
+            SceneRuntime? runtime = _sceneRuntimes
+                .FirstOrDefault(candidate => string.Equals(
+                    candidate.Id,
+                    scenePlan.Id,
+                    StringComparison.OrdinalIgnoreCase));
+            if (target is null || runtime is null)
+                return null;
+
+            return new MatrixScenePresentation(
+                runtime.Scene,
+                new DrawingRectangle(
+                    0,
+                    0,
+                    Math.Max(1, target.TargetBounds.Width),
+                    Math.Max(1, target.TargetBounds.Height)),
+                target.SourceBounds);
         }
     }
 
@@ -340,6 +379,7 @@ internal sealed class NativeWallpaperWindow : IDisposable
         }
         catch (Exception ex)
         {
+            Volatile.Write(ref _renderFaulted, 1);
             bool hadStarted = _started.IsSet;
             _startupError = ex;
             _started.Set();
@@ -380,6 +420,9 @@ internal sealed class NativeWallpaperWindow : IDisposable
                 presentations) == true)
         {
             presentedVersion = version;
+            Volatile.Write(
+                ref _lastPresentUtcTicks,
+                DateTime.UtcNow.Ticks);
         }
     }
 
@@ -770,6 +813,57 @@ internal sealed class NativeWallpaperWindow : IDisposable
 
     public bool IsAttachmentVisible() =>
         DesktopHost.IsAttachmentVisible(_window);
+
+    public bool TryGetHealth(
+        TimeSpan maximumFrameAge,
+        out string reason)
+    {
+        if (_disposed)
+        {
+            reason = "окно вывода уже закрывается";
+            return false;
+        }
+        if (Volatile.Read(ref _renderFaulted) != 0)
+        {
+            reason = "поток Direct3D завершился ошибкой";
+            return false;
+        }
+        if (!_thread.IsAlive)
+        {
+            reason = "поток Direct3D не работает";
+            return false;
+        }
+        IntPtr window = _window;
+        if (window == IntPtr.Zero)
+        {
+            reason = "дескриптор окна вывода потерян";
+            return false;
+        }
+        if (!DesktopHost.IsAttachmentVisible(window))
+        {
+            reason = "окно больше не связано с фоновым слоем Explorer";
+            return false;
+        }
+
+        long lastPresentTicks =
+            Volatile.Read(ref _lastPresentUtcTicks);
+        if (lastPresentTicks <= 0)
+        {
+            reason = "Direct3D ещё не подтвердил ни одного кадра";
+            return false;
+        }
+        TimeSpan frameAge =
+            DateTime.UtcNow - new DateTime(lastPresentTicks, DateTimeKind.Utc);
+        if (frameAge > maximumFrameAge)
+        {
+            reason =
+                $"кадры не обновлялись {frameAge.TotalSeconds:0.0} с";
+            return false;
+        }
+
+        reason = "";
+        return true;
+    }
 
     public void Dispose()
     {

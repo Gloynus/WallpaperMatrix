@@ -27,15 +27,24 @@ public partial class SettingsWindow : Window
     {
         public string Label { get; init; } = "ОПЕРАТОР";
         public OperatorPreset? Preset { get; init; }
-        public string Details => Preset is null
-            ? "Параметры не связаны с глобальным пресетом"
-            : $"Изменён: {Preset.ModifiedLabel}";
+        public BuiltInPreset? BuiltInPreset { get; init; }
+        public string Id => Preset?.Id ?? BuiltInPreset?.Id ?? "";
+        public string Details => BuiltInPreset?.Description
+            ?? (Preset is null
+                ? "Параметры не связаны с глобальным пресетом"
+                : $"Пользовательский пресет // изменён: {Preset.ModifiedLabel}");
     }
 
     private sealed class MonitorRouteChoice
     {
         public required MonitorLinkMode Mode { get; init; }
         public string SourceMonitorId { get; init; } = "";
+        public required string Label { get; init; }
+    }
+
+    private sealed class VirtualOutputSourceChoice
+    {
+        public string Id { get; init; } = "";
         public required string Label { get; init; }
     }
 
@@ -87,6 +96,7 @@ public partial class SettingsWindow : Window
     private bool _loading = true;
     private bool _hasPendingChanges;
     private bool _wallpaperPaused;
+    private bool _virtualOutputOpen;
     private long _lastWheelTick;
     private bool _mainScrollGesture;
     private string _runtimeStatus = "СОСТОЯНИЕ ВЫВОДА НЕ ПОЛУЧЕНО";
@@ -103,6 +113,7 @@ public partial class SettingsWindow : Window
     public event Action<AppSettings, string, string>? ImageRequested;
     public event Action<bool>? PauseRequested;
     public event Action? AttackRequested;
+    public event Action<AppSettings, bool>? VirtualOutputRequested;
 
     public SettingsWindow()
     {
@@ -183,6 +194,15 @@ public partial class SettingsWindow : Window
             container.AttackTransitionSeconds;
         _loading = true;
         RefreshMonitorTopologyUi();
+        RefreshVirtualOutputSourceChoices(
+            container.VirtualOutputSourceMonitorId);
+        VirtualOutputWidthSlider.Value =
+            container.VirtualOutputWidth;
+        VirtualOutputHeightSlider.Value =
+            container.VirtualOutputHeight;
+        SelectByTag(
+            VirtualOutputFitCombo,
+            container.VirtualOutputFit);
         SpeedMinSlider.Value = Math.Clamp(
             displaySettings.SpeedMin,
             SpeedMinSlider.Minimum,
@@ -312,6 +332,19 @@ public partial class SettingsWindow : Window
         PauseWallpaperButton.ToolTip = paused
             ? "Возобновить вывод кода"
             : "Остановить вывод и показать обычные обои Windows";
+    }
+
+    public void SetVirtualOutputState(bool open)
+    {
+        _virtualOutputOpen = open;
+        if (VirtualOutputButton is null)
+            return;
+        VirtualOutputButton.Content = open
+            ? "ЗАКРЫТЬ ОКНО"
+            : "ОТКРЫТЬ ОКНО";
+        VirtualOutputButton.ToolTip = open
+            ? "Закрыть окно виртуального выхода"
+            : "Открыть окно, которое OBS видит как Wallpaper Matrix — ВИРТУАЛЬНЫЙ ВЫХОД";
     }
 
     public void SetRuntimeStatus(string status, bool isError, string diagnosticLogPath)
@@ -494,6 +527,15 @@ public partial class SettingsWindow : Window
         updated.AttackIdleMinutes = _attackIdleMinutesValue;
         updated.AttackTransitionSeconds =
             _attackTransitionSecondsValue;
+        updated.VirtualOutputSourceMonitorId =
+            VirtualOutputSourceCombo.SelectedValue as string
+            ?? "";
+        updated.VirtualOutputWidth =
+            (int)Math.Round(VirtualOutputWidthSlider.Value);
+        updated.VirtualOutputHeight =
+            (int)Math.Round(VirtualOutputHeightSlider.Value);
+        updated.VirtualOutputFit =
+            SelectedTag(VirtualOutputFitCombo, "Fill");
         updated.ActivePresetId = _selectedPresetId;
         display.FontFamily = SelectedTag(FontCombo, "MS Gothic");
         display.ImageFit = SelectedTag(ImageFitCombo, "Uniform");
@@ -562,6 +604,33 @@ public partial class SettingsWindow : Window
             selected.DatabaseSourceMonitorId);
         RefreshMonitorVisuals();
         UpdateMonitorRouteNotices();
+    }
+
+    private void RefreshVirtualOutputSourceChoices(
+        string requestedMonitorId)
+    {
+        List<VirtualOutputSourceChoice> choices =
+        [
+            new VirtualOutputSourceChoice
+            {
+                Id = "",
+                Label = "Автоматически // основной активный экран"
+            }
+        ];
+        choices.AddRange(_monitors.Select(monitor =>
+            new VirtualOutputSourceChoice
+            {
+                Id = monitor.Id,
+                Label = monitor.Label
+            }));
+        VirtualOutputSourceCombo.ItemsSource = choices;
+        VirtualOutputSourceCombo.SelectedValue =
+            choices.Any(choice => string.Equals(
+                choice.Id,
+                requestedMonitorId,
+                StringComparison.OrdinalIgnoreCase))
+                ? requestedMonitorId
+                : "";
     }
 
     private void RefreshMonitorVisuals()
@@ -1203,6 +1272,14 @@ public partial class SettingsWindow : Window
             PresetCombo.Items.Clear();
             PresetChoice operatorChoice = new();
             PresetCombo.Items.Add(operatorChoice);
+            foreach (BuiltInPreset builtIn in BuiltInPresetCatalog.Items)
+            {
+                PresetCombo.Items.Add(new PresetChoice
+                {
+                    Label = builtIn.Name,
+                    BuiltInPreset = builtIn
+                });
+            }
             foreach (OperatorPreset preset in _presets)
             {
                 PresetCombo.Items.Add(new PresetChoice
@@ -1215,13 +1292,13 @@ public partial class SettingsWindow : Window
             PresetChoice selected = PresetCombo.Items
                 .OfType<PresetChoice>()
                 .FirstOrDefault(choice => string.Equals(
-                    choice.Preset?.Id,
+                    choice.Id,
                     requestedPresetId,
                     StringComparison.OrdinalIgnoreCase))
                 ?? operatorChoice;
             PresetCombo.SelectedItem = selected;
-            PresetCombo.IsEnabled = _presets.Count > 0;
-            _selectedPresetId = selected.Preset?.Id ?? "";
+            PresetCombo.IsEnabled = PresetCombo.Items.Count > 1;
+            _selectedPresetId = selected.Id;
             DeletePresetButton.IsEnabled = selected.Preset is not null;
         }
         finally
@@ -1243,7 +1320,7 @@ public partial class SettingsWindow : Window
             return;
         }
 
-        string requestedId = choice.Preset?.Id ?? "";
+        string requestedId = choice.Id;
         if (string.Equals(
             requestedId,
             _selectedPresetId,
@@ -1255,7 +1332,16 @@ public partial class SettingsWindow : Window
         AppSettings currentDraft = ReadSettingsFromControls();
         _selectedPresetId = requestedId;
         DeletePresetButton.IsEnabled = choice.Preset is not null;
-        if (choice.Preset is not null)
+        if (choice.BuiltInPreset is not null)
+        {
+            LoadDraft(ApplyBuiltInPreset(
+                choice.BuiltInPreset,
+                currentDraft));
+            StatusText.Text =
+                $"ЭТАЛОН «{choice.BuiltInPreset.Name.ToUpperInvariant()}» "
+                + "ЗАГРУЖЕН В ПРЕДПРОСМОТР";
+        }
+        else if (choice.Preset is not null)
         {
             LoadDraft(ApplyPreset(choice.Preset, currentDraft));
             StatusText.Text =
@@ -1377,6 +1463,16 @@ public partial class SettingsWindow : Window
 
     private void ResetPresetButton_Click(object sender, RoutedEventArgs e)
     {
+        BuiltInPreset? builtIn = CurrentBuiltInPreset();
+        if (builtIn is not null)
+        {
+            AppSettings builtInDraft = ReadSettingsFromControls();
+            LoadDraft(ApplyBuiltInPreset(builtIn, builtInDraft));
+            StatusText.Text =
+                $"ВОССТАНОВЛЕН ЭТАЛОН «{builtIn.Name.ToUpperInvariant()}»";
+            return;
+        }
+
         OperatorPreset? preset = CurrentPreset();
         if (preset is null)
             return;
@@ -1388,6 +1484,9 @@ public partial class SettingsWindow : Window
 
     private bool TrySaveActivePreset(AppSettings settings)
     {
+        if (CurrentBuiltInPreset() is not null)
+            return true;
+
         OperatorPreset? preset = CurrentPreset();
         if (preset is null
             || PresetEquivalentForCurrentTopology(settings, preset))
@@ -1430,11 +1529,31 @@ public partial class SettingsWindow : Window
         return result;
     }
 
+    private AppSettings ApplyBuiltInPreset(
+        BuiltInPreset preset,
+        AppSettings current)
+    {
+        IReadOnlyList<MonitorDescriptor> monitors = _monitors.Count > 0
+            ? _monitors
+            : MonitorCatalog.Capture();
+        AppSettings result = BuiltInPresetCatalog.Apply(
+            preset,
+            current,
+            monitors);
+        result.WelcomeShown = current.WelcomeShown;
+        result.ActivePresetId = preset.Id;
+        result.Normalize();
+        return result;
+    }
+
     private OperatorPreset? CurrentPreset() =>
         _presets.FirstOrDefault(preset => string.Equals(
             preset.Id,
             _selectedPresetId,
             StringComparison.OrdinalIgnoreCase));
+
+    private BuiltInPreset? CurrentBuiltInPreset() =>
+        BuiltInPresetCatalog.Find(_selectedPresetId);
 
     private void UpdatePresetActionButtons()
     {
@@ -1446,18 +1565,30 @@ public partial class SettingsWindow : Window
         }
 
         OperatorPreset? preset = CurrentPreset();
+        BuiltInPreset? builtIn = CurrentBuiltInPreset();
         DeletePresetButton.IsEnabled = preset is not null;
-        bool hasPresetChanges = preset is not null
+        bool hasUserPresetChanges = preset is not null
             && !HasInvalidNumericInput()
             && !PresetEquivalentForCurrentTopology(
                 ReadSettingsFromControls(),
                 preset);
-        SavePresetButton.Visibility = hasPresetChanges
+        bool hasBuiltInChanges = builtIn is not null
+            && !HasInvalidNumericInput()
+            && !BuiltInPresetEquivalent(
+                ReadSettingsFromControls(),
+                builtIn);
+        SavePresetButton.Visibility = hasUserPresetChanges
             ? Visibility.Visible
             : Visibility.Collapsed;
-        ResetPresetButton.Visibility = hasPresetChanges
+        ResetPresetButton.Visibility =
+            hasUserPresetChanges || hasBuiltInChanges
             ? Visibility.Visible
             : Visibility.Collapsed;
+        SavePresetButton.ToolTip =
+            "Сохранить изменения в выбранный пользовательский пресет";
+        ResetPresetButton.ToolTip = builtIn is not null
+            ? "Вернуть параметры встроенного эталона"
+            : "Вернуть параметры выбранного пресета";
     }
 
     private bool PresetEquivalentForCurrentTopology(
@@ -1478,6 +1609,22 @@ public partial class SettingsWindow : Window
         OperatorPlaylistBinding.Apply(baseline, settings);
         return playlistBindingsMatch
             && AppSettingsComparer.PresetEquivalent(
+            settings,
+            baseline);
+    }
+
+    private bool BuiltInPresetEquivalent(
+        AppSettings settings,
+        BuiltInPreset preset)
+    {
+        IReadOnlyList<MonitorDescriptor> monitors = _monitors.Count > 0
+            ? _monitors
+            : MonitorCatalog.Capture();
+        AppSettings baseline = BuiltInPresetCatalog.Apply(
+            preset,
+            settings,
+            monitors);
+        return AppSettingsComparer.PresetEquivalent(
             settings,
             baseline);
     }
@@ -1983,6 +2130,27 @@ public partial class SettingsWindow : Window
             : "ПОТОК ВОЗОБНОВЛЁН";
     }
 
+    private void VirtualOutputButton_Click(
+        object sender,
+        RoutedEventArgs e)
+    {
+        if (HasInvalidNumericInput())
+        {
+            StatusText.Text =
+                "ВИРТУАЛЬНЫЙ ВЫХОД НЕ ИЗМЕНЁН // ПРОВЕРЬТЕ ЧИСЛОВЫЕ ПОЛЯ";
+            return;
+        }
+        CommitNumericInput(VirtualOutputWidthInput);
+        CommitNumericInput(VirtualOutputHeightInput);
+        bool open = !_virtualOutputOpen;
+        VirtualOutputRequested?.Invoke(
+            ReadSettingsFromControls(),
+            open);
+        StatusText.Text = open
+            ? "ВИРТУАЛЬНЫЙ ВЫХОД ЗАПУСКАЕТСЯ"
+            : "ВИРТУАЛЬНЫЙ ВЫХОД ЗАКРЫВАЕТСЯ";
+    }
+
     private void TestAttackButton_Click(
         object sender,
         RoutedEventArgs e)
@@ -2096,6 +2264,23 @@ public partial class SettingsWindow : Window
                     standard.AttackTransitionSeconds;
                 AttackTransitionSecondsSlider.Value =
                     standard.AttackTransitionSeconds;
+                break;
+            case "VirtualOutputSource":
+                RefreshVirtualOutputSourceChoices(
+                    standard.VirtualOutputSourceMonitorId);
+                break;
+            case "VirtualOutputWidth":
+                VirtualOutputWidthSlider.Value =
+                    standard.VirtualOutputWidth;
+                break;
+            case "VirtualOutputHeight":
+                VirtualOutputHeightSlider.Value =
+                    standard.VirtualOutputHeight;
+                break;
+            case "VirtualOutputFit":
+                SelectByTag(
+                    VirtualOutputFitCombo,
+                    standard.VirtualOutputFit);
                 break;
             case "CurrentContour":
                 ResetCurrentContour(standard);
@@ -2877,6 +3062,10 @@ public partial class SettingsWindow : Window
         yield return ImageShadowBalanceInput;
         yield return ImagePaletteAdaptationInput;
         yield return ImageToneCalmnessInput;
+        yield return AttackIdleMinutesInput;
+        yield return AttackTransitionSecondsInput;
+        yield return VirtualOutputWidthInput;
+        yield return VirtualOutputHeightInput;
     }
 
     private void NumericInput_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
@@ -2989,6 +3178,8 @@ public partial class SettingsWindow : Window
         CommitNumericInput(ImageToneCalmnessInput);
         CommitNumericInput(AttackIdleMinutesInput);
         CommitNumericInput(AttackTransitionSecondsInput);
+        CommitNumericInput(VirtualOutputWidthInput);
+        CommitNumericInput(VirtualOutputHeightInput);
     }
 
     private void CommitNumericInput(TextBox input)
@@ -3116,6 +3307,18 @@ public partial class SettingsWindow : Window
             "0.#",
             AppSettings.MinimumAttackTransitionSeconds,
             AppSettings.MaximumAttackTransitionSeconds),
+        "VirtualOutputWidth" => new NumericInputSpec(
+            VirtualOutputWidthSlider,
+            1,
+            "0",
+            320,
+            7680),
+        "VirtualOutputHeight" => new NumericInputSpec(
+            VirtualOutputHeightSlider,
+            1,
+            "0",
+            180,
+            4320),
         _ => null
     };
 
@@ -3372,6 +3575,16 @@ public partial class SettingsWindow : Window
             AttackTransitionSecondsInput,
             _attackTransitionSecondsValue,
             "0.#",
+            force);
+        UpdateNumericInput(
+            VirtualOutputWidthInput,
+            VirtualOutputWidthSlider.Value,
+            "0",
+            force);
+        UpdateNumericInput(
+            VirtualOutputHeightInput,
+            VirtualOutputHeightSlider.Value,
+            "0",
             force);
         UpdateNumericInput(CalibrationDensityInput, DensitySlider.Value * 100, "0.#", force);
         UpdateNumericInput(CalibrationTrailMinInput, TrailMinSlider.Value * 100, "0.#", force);
