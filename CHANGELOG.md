@@ -1,0 +1,58 @@
+# История Wallpaper Matrix
+
+Полные заметки каждого выпуска хранятся в каталоге
+[`docs/releases`](docs/releases). Новые версии расположены первыми.
+
+## 3.x
+
+- [3.7.0](docs/releases/3.7.0.md)
+- [3.6.5](docs/releases/3.6.5.md)
+- [3.6.4](docs/releases/3.6.4.md)
+- [3.6.3](docs/releases/3.6.3.md)
+- [3.6.2](docs/releases/3.6.2.md)
+- [3.6.1](docs/releases/3.6.1.md)
+- [3.6.0](docs/releases/3.6.0.md)
+- [3.5.0](docs/releases/3.5.0.md)
+- [3.4.1](docs/releases/3.4.1.md)
+- [3.4.0](docs/releases/3.4.0.md)
+- [3.3.6](docs/releases/3.3.6.md)
+- [3.3.5](docs/releases/3.3.5.md)
+- [3.3.4](docs/releases/3.3.4.md)
+- [3.3.3](docs/releases/3.3.3.md)
+- [3.3.2](docs/releases/3.3.2.md)
+- [3.3.1](docs/releases/3.3.1.md)
+- [3.3.0](docs/releases/3.3.0.md)
+- [3.2.2](docs/releases/3.2.2.md)
+- [3.2.1](docs/releases/3.2.1.md)
+- [3.2.0](docs/releases/3.2.0.md)
+- [3.1.1](docs/releases/3.1.1.md)
+- [3.1.0](docs/releases/3.1.0.md)
+- [3.0.2](docs/releases/3.0.2.md)
+- [3.0.1](docs/releases/3.0.1.md)
+- [3.0.0](docs/releases/3.0.0.md)
+
+## 2.x
+
+- [2.3.4](docs/releases/2.3.4.md)
+- [2.3.3](docs/releases/2.3.3.md)
+- [2.3.2](docs/releases/2.3.2.md)
+- [2.3.1](docs/releases/2.3.1.md)
+- [2.3.0](docs/releases/2.3.0.md)
+- [2.2.5](docs/releases/2.2.5.md)
+- [2.2.4](docs/releases/2.2.4.md)
+- [2.2.3](docs/releases/2.2.3.md)
+- [2.2.2](docs/releases/2.2.2.md)
+- [2.2.1](docs/releases/2.2.1.md)
+- [2.2](docs/releases/2.2.md)
+- [2.1](docs/releases/2.1.md)
+- [2.0.1](docs/releases/2.0.1.md)
+- [2.0](docs/releases/2.0.md)
+
+## 1.x
+
+- [1.5](docs/releases/1.5.md)
+- [1.4](docs/releases/1.4.md)
+- [1.3](docs/releases/1.3.md)
+- [1.2](docs/releases/1.2.md)
+- [1.1](docs/releases/1.1.md)
+- [1.0](docs/releases/1.0.md)

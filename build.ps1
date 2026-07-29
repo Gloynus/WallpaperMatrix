@@ -14,7 +14,8 @@ elseif (-not [IO.Path]::IsPathRooted($OutputPath)) {
 }
 $projectDefinition = [xml](Get-Content -LiteralPath $projectPath -Raw)
 $version = [string]$projectDefinition.Project.PropertyGroup.Version
-$releaseNotesPath = Join-Path $PSScriptRoot "RELEASE_NOTES-$version.md"
+$releaseNotesDirectory = Join-Path $PSScriptRoot "docs\releases"
+$releaseNotesPath = Join-Path $releaseNotesDirectory "$version.md"
 if (-not (Test-Path -LiteralPath $releaseNotesPath)) {
     throw "Release notes not found: $releaseNotesPath"
 }

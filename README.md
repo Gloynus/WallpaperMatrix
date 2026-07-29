@@ -176,4 +176,6 @@ Wallpaper Matrix не содержит телеметрии, аналитики,
 [GNU General Public License v3.0](LICENSE). Политика выпуска и цифровой
 подписи: [CODE_SIGNING_POLICY.md](CODE_SIGNING_POLICY.md).
 
+История изменений: [CHANGELOG.md](CHANGELOG.md).
+
 Автор: **Gloynus Aleos** — `Gloynus@gmail.com`.

@@ -109,4 +109,4 @@ jobs:
             --verify-tag `
             --latest `
             --title "Wallpaper Matrix ${{ steps.metadata.outputs.version }}" `
-            --notes-file "RELEASE_NOTES-${{ steps.metadata.outputs.version }}.md"
+            --notes-file "docs/releases/${{ steps.metadata.outputs.version }}.md"
