@@ -102,13 +102,16 @@ internal static class AppSettingsComparer
         && Near(
             left.AttackTransitionSeconds,
             right.AttackTransitionSeconds)
+        && left.VirtualMonitorEnabled == right.VirtualMonitorEnabled
         && string.Equals(
             left.VirtualOutputSourceMonitorId,
             right.VirtualOutputSourceMonitorId,
             StringComparison.OrdinalIgnoreCase)
         && left.VirtualOutputWidth == right.VirtualOutputWidth
         && left.VirtualOutputHeight == right.VirtualOutputHeight
-        && left.VirtualOutputFit == right.VirtualOutputFit
+        && left.VirtualMonitorOffsetX == right.VirtualMonitorOffsetX
+        && left.VirtualMonitorOffsetY == right.VirtualMonitorOffsetY
+        && left.VirtualMonitorDock == right.VirtualMonitorDock
         && left.ActivePresetId == right.ActivePresetId
         && MonitorProfilesEquivalent(
             left.MonitorProfiles,

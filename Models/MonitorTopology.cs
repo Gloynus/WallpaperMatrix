@@ -12,11 +12,13 @@ public sealed record MonitorDescriptor(
     string FriendlyName,
     int DisplayNumber,
     System.Drawing.Rectangle Bounds,
-    bool Primary)
+    bool Primary,
+    bool IsVirtual = false)
 {
-    public string Label =>
-        $"{FriendlyName} [{DisplayNumber}] // {Bounds.Width}×{Bounds.Height}"
-        + (Primary ? " // ОСНОВНОЙ" : "");
+    public string Label => IsVirtual
+        ? $"{FriendlyName} // {Bounds.Width}×{Bounds.Height}"
+        : $"{FriendlyName} [{DisplayNumber}] // {Bounds.Width}×{Bounds.Height}"
+            + (Primary ? " // ОСНОВНОЙ" : "");
 }
 
 public sealed record MonitorRoute(
@@ -65,6 +67,12 @@ public static class MonitorTopology
             {
                 AppSettings visual = settings.Copy(includeMonitorProfiles: false);
                 visual.MonitorProfiles = [];
+                bool virtualActive =
+                    monitor.IsVirtual && settings.VirtualMonitorEnabled;
+                bool isPrimary = string.Equals(
+                    monitor.Id,
+                    primaryId,
+                    StringComparison.OrdinalIgnoreCase);
                 profile = new MonitorProfile
                 {
                     MonitorId = monitor.Id,
@@ -75,30 +83,26 @@ public static class MonitorTopology
                     LastKnownHeight = monitor.Bounds.Height,
                     WasPrimary = monitor.Primary,
                     WasConnected = true,
-                    FlowMode = string.Equals(
-                        monitor.Id,
-                        primaryId,
-                        StringComparison.OrdinalIgnoreCase)
-                        ? MonitorLinkMode.Isolated
-                        : MonitorLinkMode.Relay,
-                    FlowSourceMonitorId = string.Equals(
-                        monitor.Id,
-                        primaryId,
-                        StringComparison.OrdinalIgnoreCase)
-                        ? ""
-                        : primaryId,
-                    DatabaseMode = string.Equals(
-                        monitor.Id,
-                        primaryId,
-                        StringComparison.OrdinalIgnoreCase)
-                        ? MonitorLinkMode.Isolated
-                        : MonitorLinkMode.Relay,
-                    DatabaseSourceMonitorId = string.Equals(
-                        monitor.Id,
-                        primaryId,
-                        StringComparison.OrdinalIgnoreCase)
-                        ? ""
-                        : primaryId,
+                    FlowMode = monitor.IsVirtual
+                        ? (virtualActive
+                            ? MonitorLinkMode.Relay
+                            : MonitorLinkMode.Disabled)
+                        : (isPrimary
+                            ? MonitorLinkMode.Isolated
+                            : MonitorLinkMode.Relay),
+                    FlowSourceMonitorId = monitor.IsVirtual
+                        ? (virtualActive ? primaryId : "")
+                        : (isPrimary ? "" : primaryId),
+                    DatabaseMode = monitor.IsVirtual
+                        ? (virtualActive
+                            ? MonitorLinkMode.Relay
+                            : MonitorLinkMode.Disabled)
+                        : (isPrimary
+                            ? MonitorLinkMode.Isolated
+                            : MonitorLinkMode.Relay),
+                    DatabaseSourceMonitorId = monitor.IsVirtual
+                        ? (virtualActive ? primaryId : "")
+                        : (isPrimary ? "" : primaryId),
                     Settings = visual
                 };
             }
@@ -128,6 +132,15 @@ public static class MonitorTopology
 
         Normalize(settings.MonitorProfiles, monitors, MonitorRouteDomain.Flow);
         Normalize(settings.MonitorProfiles, monitors, MonitorRouteDomain.Database);
+        string virtualId = monitors
+            .FirstOrDefault(monitor => monitor.IsVirtual)?.Id
+            ?? "";
+        MonitorProfile? virtualProfile = string.IsNullOrWhiteSpace(virtualId)
+            ? null
+            : Find(settings.MonitorProfiles, virtualId);
+        settings.VirtualMonitorEnabled =
+            virtualProfile is not null
+            && virtualProfile.FlowMode != MonitorLinkMode.Disabled;
     }
 
     public static void SetRoute(

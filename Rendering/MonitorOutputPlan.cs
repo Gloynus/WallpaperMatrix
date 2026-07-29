@@ -6,7 +6,8 @@ namespace WallpaperMatrix.Rendering;
 internal sealed record MonitorSceneTarget(
     string MonitorId,
     DrawingRectangle TargetBounds,
-    DrawingRectangle SourceBounds);
+    DrawingRectangle SourceBounds,
+    bool IsVirtual);
 
 internal sealed record MatrixImageProjection(
     int CanvasWidth,
@@ -60,7 +61,12 @@ internal sealed record MonitorOutputPlan(
             .ToDictionary(
                 monitor => monitor.Id,
                 StringComparer.OrdinalIgnoreCase);
-        DrawingRectangle virtualBounds = monitors
+        MonitorDescriptor[] physicalMonitors = monitors
+            .Where(monitor => !monitor.IsVirtual)
+            .ToArray();
+        DrawingRectangle virtualBounds = (physicalMonitors.Length > 0
+                ? physicalMonitors
+                : monitors)
             .Select(monitor => monitor.Bounds)
             .Aggregate(DrawingRectangle.Union);
         List<TargetDraft> targets = [];
@@ -253,12 +259,19 @@ internal sealed record MonitorOutputPlan(
                 StableSeed(flow.RootMonitorId),
                 new MonitorSceneTarget(
                     monitor.Id,
-                    new DrawingRectangle(
-                        monitor.Bounds.Left - virtualBounds.Left,
-                        monitor.Bounds.Top - virtualBounds.Top,
-                        monitor.Bounds.Width,
-                        monitor.Bounds.Height),
-                    presentationSource)));
+                    monitor.IsVirtual
+                        ? new DrawingRectangle(
+                            0,
+                            0,
+                            monitor.Bounds.Width,
+                            monitor.Bounds.Height)
+                        : new DrawingRectangle(
+                            monitor.Bounds.Left - virtualBounds.Left,
+                            monitor.Bounds.Top - virtualBounds.Top,
+                            monitor.Bounds.Width,
+                            monitor.Bounds.Height),
+                    presentationSource,
+                    monitor.IsVirtual)));
         }
 
         List<MonitorScenePlan> scenes = targets
@@ -281,7 +294,7 @@ internal sealed record MonitorOutputPlan(
         return new MonitorOutputPlan(
             virtualBounds,
             scenes,
-            targets.Count);
+            targets.Count(target => !target.Target.IsVirtual));
     }
 
     private static string DatabaseProjectionKey(

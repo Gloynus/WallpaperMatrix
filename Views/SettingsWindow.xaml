@@ -740,17 +740,116 @@
                                            Foreground="#00E667"/>
                                 <Button Style="{StaticResource HelpButton}"
                                         VerticalAlignment="Center"
-                                        ToolTip="Настраивает способ вывода потока и образов на каждом подключённом экране."/>
+                                        ToolTip="Колесо масштабирует карту в точку курсора. Правая кнопка или колесо перемещает холст. Виртуальный экран включается режимом Потока и перемещается за захват."/>
                             </StackPanel>
                             <Border Background="#020806"
                                     BorderBrush="#164B2C"
                                     BorderThickness="1"
                                     CornerRadius="5"
-                                    Padding="8">
-                                <Canvas x:Name="MonitorTopologyCanvas"
-                                        Height="267"
-                                        ClipToBounds="True"
-                                        SizeChanged="MonitorTopologyCanvas_SizeChanged"/>
+                                    Padding="0">
+                                <Grid>
+                                    <ScrollViewer x:Name="MonitorTopologyScrollViewer"
+                                                  Height="330"
+                                                  Background="#020806"
+                                                  HorizontalScrollBarVisibility="Auto"
+                                                  VerticalScrollBarVisibility="Auto"
+                                                  CanContentScroll="False"
+                                                  PreviewMouseWheel="MonitorTopologyScrollViewer_PreviewMouseWheel"
+                                                  PreviewMouseDown="MonitorTopologyScrollViewer_PreviewMouseDown"
+                                                  PreviewMouseMove="MonitorTopologyScrollViewer_PreviewMouseMove"
+                                                  PreviewMouseUp="MonitorTopologyScrollViewer_PreviewMouseUp"
+                                                  MouseLeave="MonitorTopologyScrollViewer_MouseLeave"
+                                                  SizeChanged="MonitorTopologyScrollViewer_SizeChanged">
+                                        <ScrollViewer.Resources>
+                                            <Style x:Key="MatrixTopologyThumb"
+                                                   TargetType="{x:Type Thumb}">
+                                                <Setter Property="Template">
+                                                    <Setter.Value>
+                                                        <ControlTemplate TargetType="{x:Type Thumb}">
+                                                            <Border Background="#16713D"
+                                                                    BorderBrush="#22B75C"
+                                                                    BorderThickness="1"
+                                                                    CornerRadius="3"/>
+                                                        </ControlTemplate>
+                                                    </Setter.Value>
+                                                </Setter>
+                                            </Style>
+                                            <Style TargetType="{x:Type ScrollBar}">
+                                                <Setter Property="Background" Value="#020806"/>
+                                                <Setter Property="Foreground" Value="#16713D"/>
+                                                <Setter Property="Width" Value="9"/>
+                                                <Setter Property="Height" Value="Auto"/>
+                                                <Setter Property="Template">
+                                                    <Setter.Value>
+                                                        <ControlTemplate TargetType="{x:Type ScrollBar}">
+                                                            <Grid Background="{TemplateBinding Background}">
+                                                                <Track x:Name="PART_Track"
+                                                                       IsDirectionReversed="True">
+                                                                    <Track.DecreaseRepeatButton>
+                                                                        <RepeatButton x:Name="DecreaseButton"
+                                                                                      Command="{x:Static ScrollBar.PageUpCommand}"
+                                                                                      Background="Transparent"
+                                                                                      BorderThickness="0"
+                                                                                      Opacity="0"/>
+                                                                    </Track.DecreaseRepeatButton>
+                                                                    <Track.Thumb>
+                                                                        <Thumb Style="{StaticResource MatrixTopologyThumb}"
+                                                                               Margin="1"/>
+                                                                    </Track.Thumb>
+                                                                    <Track.IncreaseRepeatButton>
+                                                                        <RepeatButton x:Name="IncreaseButton"
+                                                                                      Command="{x:Static ScrollBar.PageDownCommand}"
+                                                                                      Background="Transparent"
+                                                                                      BorderThickness="0"
+                                                                                      Opacity="0"/>
+                                                                    </Track.IncreaseRepeatButton>
+                                                                </Track>
+                                                            </Grid>
+                                                            <ControlTemplate.Triggers>
+                                                                <Trigger Property="Orientation" Value="Horizontal">
+                                                                    <Setter Property="Width" Value="Auto"/>
+                                                                    <Setter Property="Height" Value="9"/>
+                                                                    <Setter TargetName="PART_Track"
+                                                                            Property="Orientation"
+                                                                            Value="Horizontal"/>
+                                                                    <Setter TargetName="PART_Track"
+                                                                            Property="IsDirectionReversed"
+                                                                            Value="False"/>
+                                                                    <Setter TargetName="DecreaseButton"
+                                                                            Property="Command"
+                                                                            Value="{x:Static ScrollBar.PageLeftCommand}"/>
+                                                                    <Setter TargetName="IncreaseButton"
+                                                                            Property="Command"
+                                                                            Value="{x:Static ScrollBar.PageRightCommand}"/>
+                                                                </Trigger>
+                                                            </ControlTemplate.Triggers>
+                                                        </ControlTemplate>
+                                                    </Setter.Value>
+                                                </Setter>
+                                            </Style>
+                                        </ScrollViewer.Resources>
+                                        <Canvas x:Name="MonitorTopologyCanvas"
+                                                Width="640"
+                                                Height="310"
+                                                Background="Transparent">
+                                            <Canvas.LayoutTransform>
+                                                <ScaleTransform x:Name="MonitorTopologyScaleTransform"
+                                                                ScaleX="1"
+                                                                ScaleY="1"/>
+                                            </Canvas.LayoutTransform>
+                                        </Canvas>
+                                    </ScrollViewer>
+                                    <Button Content="&#xE9A6;"
+                                            FontFamily="Segoe MDL2 Assets"
+                                            Style="{StaticResource QuickIconButton}"
+                                            Width="32"
+                                            Height="30"
+                                            Margin="0,0,13,13"
+                                            HorizontalAlignment="Right"
+                                            VerticalAlignment="Bottom"
+                                            Click="FitMonitorTopologyButton_Click"
+                                            ToolTip="Вписать все устройства в область"/>
+                                </Grid>
                             </Border>
                             <Grid Margin="0,10,0,0">
                                 <Grid.ColumnDefinitions>
@@ -785,116 +884,16 @@
                                     </ComboBox>
                                 </StackPanel>
                             </Grid>
-                        </StackPanel>
-                    </Border>
-                    <Border Style="{StaticResource SectionBorder}">
-                        <StackPanel>
-                            <StackPanel Orientation="Horizontal"
-                                        Margin="0,0,0,9">
-                                <TextBlock Text="ВИРТУАЛЬНЫЙ ВЫХОД"
-                                           FontFamily="Consolas"
-                                           FontWeight="Bold"
-                                           Foreground="#00E667"/>
-                                <Button Style="{StaticResource HelpButton}"
-                                        VerticalAlignment="Center"
-                                        ToolTip="Открывает обычное отдельное окно с выбранным потоком для захвата через OBS. Новый системный монитор или драйвер не создаётся."/>
-                            </StackPanel>
-                            <TextBlock Text="Окно использует уже работающую сцену выбранного экрана и не запускает второй генератор потока."
-                                       Foreground="{StaticResource MutedBrush}"
-                                       FontSize="11"
-                                       TextWrapping="Wrap"
-                                       Margin="0,0,0,10"/>
-                            <Grid>
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="1.2*"/>
-                                    <ColumnDefinition Width="16"/>
-                                    <ColumnDefinition/>
-                                </Grid.ColumnDefinitions>
-                                <StackPanel>
-                                    <TextBlock Text="Источник потока"
-                                               Margin="0,0,0,5"/>
-                                    <Grid>
-                                        <Grid.ColumnDefinitions>
-                                            <ColumnDefinition/>
-                                            <ColumnDefinition Width="Auto"/>
-                                        </Grid.ColumnDefinitions>
-                                        <ComboBox x:Name="VirtualOutputSourceCombo"
-                                                  DisplayMemberPath="Label"
-                                                  SelectedValuePath="Id"/>
-                                        <Button Grid.Column="1"
-                                                Style="{StaticResource ResetParameterButton}"
-                                                Tag="VirtualOutputSource"/>
-                                    </Grid>
-                                </StackPanel>
-                                <StackPanel Grid.Column="2">
-                                    <TextBlock Text="Масштабирование"
-                                               Margin="0,0,0,5"/>
-                                    <Grid>
-                                        <Grid.ColumnDefinitions>
-                                            <ColumnDefinition/>
-                                            <ColumnDefinition Width="Auto"/>
-                                        </Grid.ColumnDefinitions>
-                                        <ComboBox x:Name="VirtualOutputFitCombo">
-                                            <ComboBoxItem Content="Заполнить"
-                                                          Tag="Fill"/>
-                                            <ComboBoxItem Content="Вписать"
-                                                          Tag="Uniform"/>
-                                        </ComboBox>
-                                        <Button Grid.Column="1"
-                                                Style="{StaticResource ResetParameterButton}"
-                                                Tag="VirtualOutputFit"/>
-                                    </Grid>
-                                </StackPanel>
-                            </Grid>
-                            <Grid Margin="0,10,0,0">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition/>
-                                    <ColumnDefinition Width="14"/>
-                                    <ColumnDefinition/>
-                                    <ColumnDefinition Width="18"/>
-                                    <ColumnDefinition Width="Auto"/>
-                                </Grid.ColumnDefinitions>
-                                <StackPanel>
-                                    <TextBlock Text="Ширина, px"
-                                               Margin="0,0,0,5"/>
-                                    <TextBox x:Name="VirtualOutputWidthInput"
-                                             Tag="VirtualOutputWidth"
-                                             HorizontalAlignment="Stretch"
-                                             Width="Auto"
-                                             Style="{StaticResource NumericInput}"/>
-                                </StackPanel>
-                                <StackPanel Grid.Column="2">
-                                    <TextBlock Text="Высота, px"
-                                               Margin="0,0,0,5"/>
-                                    <TextBox x:Name="VirtualOutputHeightInput"
-                                             Tag="VirtualOutputHeight"
-                                             HorizontalAlignment="Stretch"
-                                             Width="Auto"
-                                             Style="{StaticResource NumericInput}"/>
-                                </StackPanel>
-                                <Button Grid.Column="4"
-                                        x:Name="VirtualOutputButton"
-                                        Content="ОТКРЫТЬ ОКНО"
-                                        MinWidth="150"
-                                        Height="46"
-                                        Margin="0,18,0,0"
-                                        Padding="14,7"
-                                        Style="{StaticResource ActionButton}"
-                                        Click="VirtualOutputButton_Click"
-                                        ToolTip="Открыть окно, которое OBS видит как Wallpaper Matrix — ВИРТУАЛЬНЫЙ ВЫХОД"/>
-                            </Grid>
                             <Slider x:Name="VirtualOutputWidthSlider"
                                     Visibility="Collapsed"
                                     Minimum="320" Maximum="7680"
                                     TickFrequency="1"
-                                    IsSnapToTickEnabled="True"
-                                    ValueChanged="AnySlider_ValueChanged"/>
+                                    IsSnapToTickEnabled="True"/>
                             <Slider x:Name="VirtualOutputHeightSlider"
                                     Visibility="Collapsed"
                                     Minimum="180" Maximum="4320"
                                     TickFrequency="1"
-                                    IsSnapToTickEnabled="True"
-                                    ValueChanged="AnySlider_ValueChanged"/>
+                                    IsSnapToTickEnabled="True"/>
                         </StackPanel>
                     </Border>
                     <Border Style="{StaticResource SectionBorder}" Visibility="Collapsed">

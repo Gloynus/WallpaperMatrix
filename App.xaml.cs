@@ -115,6 +115,10 @@ public partial class App : System.Windows.Application
                 argument,
                 "--validate-recovery",
                 StringComparison.OrdinalIgnoreCase));
+        DiagnosticLog.Write(
+            $"Параметры запуска: [{string.Join(", ", e.Args)}]; "
+            + $"showSettings={forceSettings}; "
+            + $"background={startInBackground}.");
         startInBackground |= validateAttackOverlay;
         startInBackground |= validateStop;
         startInBackground |= validateRouteSwitch;
@@ -139,7 +143,7 @@ public partial class App : System.Windows.Application
         if (validateRouteSwitch)
             _settings.PauseDuringFullscreenApps = false;
         IReadOnlyList<MonitorDescriptor> startupMonitors =
-            MonitorCatalog.Capture();
+            OutputDeviceCatalog.Capture(_settings);
         MonitorTopology.EnsureProfiles(
             _settings,
             startupMonitors);
@@ -265,24 +269,74 @@ public partial class App : System.Windows.Application
                 if (phase++ == 0)
                 {
                     AppSettings validation = _settings.Copy();
-                    validation.VirtualOutputSourceMonitorId = "";
+                    validation.VirtualMonitorEnabled = true;
+                    validation.VirtualOutputSourceMonitorId =
+                        OutputDeviceCatalog.VirtualMonitorId;
                     validation.VirtualOutputWidth = 960;
                     validation.VirtualOutputHeight = 540;
-                    validation.VirtualOutputFit = "Fill";
+                    IReadOnlyList<MonitorDescriptor> validationDevices =
+                        OutputDeviceCatalog.Capture(validation);
+                    MonitorTopology.EnsureProfiles(
+                        validation,
+                        validationDevices);
+                    MonitorDescriptor physical =
+                        validationDevices.First(monitor =>
+                            monitor.Primary);
+                    MonitorTopology.SetRoute(
+                        validation.MonitorProfiles,
+                        validationDevices,
+                        MonitorRouteDomain.Flow,
+                        OutputDeviceCatalog.VirtualMonitorId,
+                        MonitorLinkMode.Relay,
+                        physical.Id);
+                    validation.VirtualMonitorEnabled = true;
+                    _wallpaperManager?.ApplySettings(validation);
                     _wallpaperManager?.SetVirtualOutput(
                         true,
                         validation);
+                    AppSettings physicalWindow =
+                        validation.Copy();
+                    physicalWindow.VirtualOutputSourceMonitorId =
+                        physical.Id;
+                    _wallpaperManager?.SetVirtualOutput(
+                        true,
+                        physicalWindow);
                     return;
                 }
                 if (phase == 2)
                 {
+                    IReadOnlyList<string> openWindows =
+                        _wallpaperManager?.VirtualOutputMonitorIds
+                        ?? [];
                     DiagnosticLog.Write(
-                        _wallpaperManager?.IsVirtualOutputOpen == true
-                            ? "Самопроверка виртуального выхода завершена успешно."
-                            : "Самопроверка виртуального выхода не подтвердила открытое окно.");
+                        openWindows.Count >= 2
+                        && openWindows.Contains(
+                            OutputDeviceCatalog.VirtualMonitorId,
+                            StringComparer.OrdinalIgnoreCase)
+                            ? "Самопроверка виртуального устройства и независимых окон завершена успешно."
+                            : "Самопроверка виртуального устройства не подтвердила два независимых окна.");
+                    AppSettings closeSettings =
+                        _settings.Copy();
+                    closeSettings.VirtualMonitorEnabled = true;
+                    closeSettings.VirtualOutputSourceMonitorId =
+                        OutputDeviceCatalog.VirtualMonitorId;
                     _wallpaperManager?.SetVirtualOutput(
                         false,
-                        _settings);
+                        closeSettings);
+                    MonitorDescriptor? physical =
+                        OutputDeviceCatalog.Capture(closeSettings)
+                            .FirstOrDefault(monitor =>
+                                monitor.Primary);
+                    if (physical is not null)
+                    {
+                        AppSettings physicalWindow =
+                            closeSettings.Copy();
+                        physicalWindow.VirtualOutputSourceMonitorId =
+                            physical.Id;
+                        _wallpaperManager?.SetVirtualOutput(
+                            false,
+                            physicalWindow);
+                    }
                     _featureValidationTimer!.Interval =
                         TimeSpan.FromSeconds(1);
                     return;
@@ -425,6 +479,7 @@ public partial class App : System.Windows.Application
 
     private void ShowSettings()
     {
+        DiagnosticLog.Write("Открытие панели оператора запрошено.");
         if (_settingsWindow is null)
         {
             _settingsWindow = new SettingsWindow();
@@ -441,8 +496,9 @@ public partial class App : System.Windows.Application
 
         _settingsWindow.LoadSettings(_settings);
         _settingsWindow.SetPauseState(_wallpaperManager?.IsManuallyPaused ?? false);
-        _settingsWindow.SetVirtualOutputState(
-            _wallpaperManager?.IsVirtualOutputOpen ?? false);
+        _settingsWindow.SetVirtualOutputStates(
+            _wallpaperManager?.VirtualOutputMonitorIds
+                ?? []);
         if (_wallpaperManager is not null)
         {
             _settingsWindow.SetRuntimeStatus(
@@ -454,6 +510,7 @@ public partial class App : System.Windows.Application
         if (_settingsWindow.WindowState == WindowState.Minimized)
             _settingsWindow.WindowState = WindowState.Normal;
         _settingsWindow.Activate();
+        DiagnosticLog.Write("Панель оператора показана.");
     }
 
     private void ApplySettings(AppSettings updated)
@@ -519,8 +576,12 @@ public partial class App : System.Windows.Application
 
     private void SetVirtualOutput(
         AppSettings settings,
-        bool open) =>
+        bool open)
+    {
+        _settings.VirtualOutputSourceMonitorId =
+            settings.VirtualOutputSourceMonitorId;
         _wallpaperManager?.SetVirtualOutput(open, settings);
+    }
 
     private void TogglePaused()
     {
@@ -570,9 +631,13 @@ public partial class App : System.Windows.Application
             _tray?.ShowError(_wallpaperManager.RuntimeStatus);
     }
 
-    private void OnVirtualOutputStateChanged(bool open)
+    private void OnVirtualOutputStateChanged(
+        string monitorId,
+        bool open)
     {
-        _settingsWindow?.SetVirtualOutputState(open);
+        _settingsWindow?.SetVirtualOutputState(
+            monitorId,
+            open);
     }
 
     private static void TryApplyAutostart(

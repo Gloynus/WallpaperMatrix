@@ -446,7 +446,9 @@ internal sealed class NativeWallpaperWindow : IDisposable
             {
                 continue;
             }
-            presentations.AddRange(scenePlan.Targets.Select(target =>
+            presentations.AddRange(scenePlan.Targets
+                .Where(target => !target.IsVirtual)
+                .Select(target =>
             {
                 long attackCutoff = -1;
                 if (captureAttackCutoff)

@@ -59,6 +59,8 @@ public sealed class WallpaperManager : IDisposable
         _attackOverlay is not null || _attackStartPending;
     public bool IsVirtualOutputOpen =>
         _output.IsVirtualOutputOpen;
+    public IReadOnlyList<string> VirtualOutputMonitorIds =>
+        _output.VirtualOutputMonitorIds;
     public bool IsOutputActive =>
         _output.IsRunning;
     public string RuntimeStatus => _runtimeStatus;
@@ -66,7 +68,7 @@ public sealed class WallpaperManager : IDisposable
     public string DiagnosticLogPath => DiagnosticLog.LogPath;
     public event Action? PauseStateChanged;
     public event Action? RuntimeStatusChanged;
-    public event Action<bool>? VirtualOutputStateChanged;
+    public event Action<string, bool>? VirtualOutputStateChanged;
 
     public WallpaperManager(AppSettings settings)
     {
@@ -182,10 +184,14 @@ public sealed class WallpaperManager : IDisposable
             return;
         try
         {
+            _settings.VirtualOutputSourceMonitorId =
+                settings.VirtualOutputSourceMonitorId;
             _output.SetVirtualOutput(open, settings);
+            int openWindows =
+                _output.VirtualOutputMonitorIds.Count;
             SetRuntimeStatus(
-                open
-                    ? "ВИРТУАЛЬНЫЙ ВЫХОД АКТИВЕН // ЗАХВАТ OBS ГОТОВ"
+                openWindows > 0
+                    ? $"ОКНА ПОТОКА АКТИВНЫ: {openWindows} // ЗАХВАТ OBS ГОТОВ"
                     : $"ВЫВОД АКТИВЕН // DIRECT3D 11 // ЭКРАНОВ: "
                         + $"{_output.WindowCount}",
                 isError: false);
@@ -193,7 +199,7 @@ public sealed class WallpaperManager : IDisposable
         catch (Exception exception)
         {
             ReportWindowFailure(
-                "Не удалось изменить состояние виртуального выхода.",
+                "Не удалось изменить состояние отдельного окна потока.",
                 exception,
                 fatal: false);
         }
@@ -333,7 +339,8 @@ public sealed class WallpaperManager : IDisposable
         string monitorId)
     {
         ApplySettings(settings);
-        IReadOnlyList<MonitorDescriptor> monitors = MonitorCatalog.Capture();
+        IReadOnlyList<MonitorDescriptor> monitors =
+            OutputDeviceCatalog.Capture(_settings);
         AppSettings topology = _settings.Copy();
         MonitorTopology.EnsureProfiles(topology, monitors);
         MonitorRoute? route = MonitorTopology.Resolve(
@@ -652,7 +659,8 @@ public sealed class WallpaperManager : IDisposable
 
     private void RefreshSecondaryDatabaseChannels(bool forceReload)
     {
-        IReadOnlyList<MonitorDescriptor> monitors = MonitorCatalog.Capture();
+        IReadOnlyList<MonitorDescriptor> monitors =
+            OutputDeviceCatalog.Capture(_settings);
         AppSettings topology = _settings.Copy();
         MonitorTopology.EnsureProfiles(topology, monitors);
         IReadOnlyList<MonitorRoute> routes = MonitorTopology.Resolve(
@@ -1420,10 +1428,14 @@ public sealed class WallpaperManager : IDisposable
         _outputRecoveryAfterUtc = DateTime.MinValue;
     }
 
-    private void OnVirtualOutputStateChanged(bool open)
+    private void OnVirtualOutputStateChanged(
+        string monitorId,
+        bool open)
     {
         DispatchSystemEvent(() =>
-            VirtualOutputStateChanged?.Invoke(open));
+            VirtualOutputStateChanged?.Invoke(
+                monitorId,
+                open));
     }
 
     private void SetRuntimeStatus(string status, bool isError)

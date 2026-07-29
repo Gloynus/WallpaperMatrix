@@ -172,7 +172,129 @@ internal static class MonitorTopologyValidation
             "Обратная ссылка не была сведена к новому корню.");
 
         ValidateIndependentImageProjection(primary, right);
+        ValidateVirtualDeviceRouting(primary, right);
         ValidatePortablePresets(primary, right, upper);
+    }
+
+    private static void ValidateVirtualDeviceRouting(
+        MonitorDescriptor primary,
+        MonitorDescriptor right)
+    {
+        MonitorDescriptor virtualMonitor = new(
+            OutputDeviceCatalog.VirtualMonitorId,
+            "VIRTUAL",
+            "VIRTUAL",
+            0,
+            new DrawingRectangle(
+                primary.Bounds.Right,
+                primary.Bounds.Top,
+                1280,
+                720),
+            false,
+            IsVirtual: true);
+        MonitorDescriptor[] devices =
+            [primary, right, virtualMonitor];
+        AppSettings dormant = new();
+        MonitorTopology.EnsureProfiles(dormant, devices);
+        MonitorProfile dormantVirtual = MonitorTopology.Find(
+            dormant.MonitorProfiles,
+            virtualMonitor.Id)!;
+        Require(
+            dormantVirtual.FlowMode == MonitorLinkMode.Disabled
+            && dormantVirtual.DatabaseMode == MonitorLinkMode.Disabled
+            && !dormant.VirtualMonitorEnabled,
+            "Постоянная карточка виртуального устройства "
+            + "самопроизвольно активировала вывод.");
+
+        AppSettings settings = new()
+        {
+            VirtualMonitorEnabled = true,
+            VirtualOutputWidth = 1280,
+            VirtualOutputHeight = 720
+        };
+        settings.Normalize();
+        MonitorTopology.EnsureProfiles(settings, devices);
+
+        MonitorRoute initialVirtual = MonitorTopology.Resolve(
+                settings.MonitorProfiles,
+                devices,
+                MonitorRouteDomain.Flow)
+            .Single(route =>
+                route.MonitorId == virtualMonitor.Id);
+        Require(
+            initialVirtual.Mode == MonitorLinkMode.Relay
+            && initialVirtual.RootMonitorId == primary.Id,
+            "Виртуальное устройство не смогло ретранслировать "
+            + "физический поток.");
+        MonitorTopology.SetRoute(
+            settings.MonitorProfiles,
+            devices,
+            MonitorRouteDomain.Flow,
+            virtualMonitor.Id,
+            MonitorLinkMode.Isolated,
+            "");
+        MonitorOutputPlan isolatedFlow =
+            MonitorOutputPlan.Create(settings, devices);
+        Require(
+            isolatedFlow.Scenes.Count(scene => scene.IsFlowMaster) == 2,
+            "Изолированный виртуальный поток не получил "
+            + "собственную симуляцию.");
+
+        MonitorTopology.SetRoute(
+            settings.MonitorProfiles,
+            devices,
+            MonitorRouteDomain.Flow,
+            virtualMonitor.Id,
+            MonitorLinkMode.Extend,
+            primary.Id);
+        MonitorOutputPlan extended =
+            MonitorOutputPlan.Create(settings, devices);
+        MonitorSceneTarget virtualTarget = extended.Scenes
+            .SelectMany(scene => scene.Targets)
+            .Single(target => target.MonitorId == virtualMonitor.Id);
+        Require(
+            virtualTarget.IsVirtual
+            && virtualTarget.SourceBounds.Width
+                == virtualMonitor.Bounds.Width
+            && extended.ActiveMonitorCount == 2,
+            "Виртуальное расширение не вошло в общую сцену "
+            + "или было ошибочно принято за физический экран.");
+
+        MonitorTopology.SetRoute(
+            settings.MonitorProfiles,
+            devices,
+            MonitorRouteDomain.Flow,
+            right.Id,
+            MonitorLinkMode.Relay,
+            virtualMonitor.Id);
+        MonitorRoute relay = MonitorTopology.Resolve(
+                settings.MonitorProfiles,
+                devices,
+                MonitorRouteDomain.Flow)
+            .Single(route => route.MonitorId == right.Id);
+        Require(
+            relay.SourceMonitorId == virtualMonitor.Id
+            && relay.RootMonitorId == primary.Id
+            && relay.ViewMonitorId == virtualMonitor.Id,
+            "Физический экран не смог ретранслировать видимую "
+            + "область виртуального расширения.");
+
+        MonitorTopology.SetRoute(
+            settings.MonitorProfiles,
+            devices,
+            MonitorRouteDomain.Database,
+            virtualMonitor.Id,
+            MonitorLinkMode.Isolated,
+            "");
+        MonitorOutputPlan isolatedDatabase =
+            MonitorOutputPlan.Create(settings, devices);
+        Require(
+            isolatedDatabase.Scenes.Any(scene =>
+                scene.DatabaseRootMonitorId == virtualMonitor.Id
+                && scene.Targets.Any(target =>
+                    target.MonitorId == virtualMonitor.Id)),
+            "Изолированная база виртуального устройства "
+            + "не получила собственный канал образов.");
     }
 
     private static void ValidateIndependentImageProjection(

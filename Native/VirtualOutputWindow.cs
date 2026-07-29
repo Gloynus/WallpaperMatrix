@@ -9,14 +9,14 @@ namespace WallpaperMatrix.Native;
 
 /// <summary>
 /// A stable, ordinary top-level window intended for OBS Window Capture.
-/// It presents one already-running physical monitor scene and owns no Matrix
+/// It presents one already-running output-device scene and owns no Matrix
 /// simulation, image sequence or timing of its own.
 /// </summary>
 internal sealed class VirtualOutputWindow : IDisposable
 {
     private readonly int _width;
     private readonly int _height;
-    private readonly string _fit;
+    private readonly string _title;
     private readonly Func<MatrixScenePresentation?> _frameProvider;
     private readonly Action<string, Exception, bool>? _failureHandler;
     private readonly Thread _thread;
@@ -33,13 +33,15 @@ internal sealed class VirtualOutputWindow : IDisposable
     public VirtualOutputWindow(
         int width,
         int height,
-        string fit,
+        string title,
         Func<MatrixScenePresentation?> frameProvider,
         Action<string, Exception, bool>? failureHandler)
     {
         _width = Math.Clamp(width, 320, 7680);
         _height = Math.Clamp(height, 180, 4320);
-        _fit = fit is "Uniform" ? "Uniform" : "Fill";
+        _title = string.IsNullOrWhiteSpace(title)
+            ? "Wallpaper Matrix — ВЫХОД"
+            : title;
         _frameProvider = frameProvider;
         _failureHandler = failureHandler;
         _thread = new Thread(RenderThreadMain)
@@ -58,12 +60,12 @@ internal sealed class VirtualOutputWindow : IDisposable
         {
             RequestClose();
             throw new TimeoutException(
-                "Виртуальный выход не подтвердил запуск.");
+                "Отдельное окно потока не подтвердило запуск.");
         }
         if (_startupError is not null)
         {
             throw new InvalidOperationException(
-                "Не удалось открыть виртуальный выход.",
+                "Не удалось открыть отдельное окно потока.",
                 _startupError);
         }
     }
@@ -94,7 +96,10 @@ internal sealed class VirtualOutputWindow : IDisposable
         try
         {
             NativeWindow.EnsureClassRegistered();
-            _window = NativeWindow.Create(_width, _height);
+            _window = NativeWindow.Create(
+                _width,
+                _height,
+                _title);
             if (_window == IntPtr.Zero)
             {
                 throw new InvalidOperationException(
@@ -127,9 +132,9 @@ internal sealed class VirtualOutputWindow : IDisposable
             started = true;
             _started.Set();
             DiagnosticLog.Write(
-                $"Виртуальный выход открыт: "
+                $"Отдельное окно потока открыто: "
                 + $"renderer=0x{_window.ToInt64():X}; "
-                + $"surface={_width}x{_height}; fit={_fit}.");
+                + $"surface={_width}x{_height}.");
 
             SharedMatrixScene? presentedScene = initial.Scene;
             long presentedVersion = initial.Scene.Version;
@@ -186,8 +191,8 @@ internal sealed class VirtualOutputWindow : IDisposable
                 _started.Set();
             ReportFailure(
                 started
-                    ? "Виртуальный выход аварийно остановлен."
-                    : "Не удалось запустить виртуальный выход.",
+                    ? "Отдельное окно потока аварийно остановлено."
+                    : "Не удалось запустить отдельное окно потока.",
                 exception);
         }
         finally
@@ -211,7 +216,7 @@ internal sealed class VirtualOutputWindow : IDisposable
             {
                 // Native teardown must not depend on its observer.
             }
-            DiagnosticLog.Write("Виртуальный выход закрыт.");
+            DiagnosticLog.Write("Отдельное окно потока закрыто.");
         }
     }
 
@@ -234,29 +239,6 @@ internal sealed class VirtualOutputWindow : IDisposable
         MatrixScenePresentation frame)
     {
         DrawingRectangle source = frame.SourceBounds;
-        int sourceWidth = Math.Max(1, frame.TargetBounds.Width);
-        int sourceHeight = Math.Max(1, frame.TargetBounds.Height);
-        if (_fit == "Uniform")
-        {
-            double scale = Math.Min(
-                _width / (double)sourceWidth,
-                _height / (double)sourceHeight);
-            int width = Math.Max(
-                1,
-                (int)Math.Round(sourceWidth * scale));
-            int height = Math.Max(
-                1,
-                (int)Math.Round(sourceHeight * scale));
-            return frame with
-            {
-                TargetBounds = new DrawingRectangle(
-                    (_width - width) / 2,
-                    (_height - height) / 2,
-                    width,
-                    height)
-            };
-        }
-
         double sourceAspect =
             source.Width / (double)Math.Max(1, source.Height);
         double targetAspect = _width / (double)_height;
@@ -388,7 +370,8 @@ internal sealed class VirtualOutputWindow : IDisposable
 
         public static IntPtr Create(
             int clientWidth,
-            int clientHeight)
+            int clientHeight,
+            string title)
         {
             NativeRect outer = new()
             {
@@ -412,7 +395,7 @@ internal sealed class VirtualOutputWindow : IDisposable
             IntPtr window = CreateWindowEx(
                 ExtendedStyle,
                 ClassName,
-                "Wallpaper Matrix — ВИРТУАЛЬНЫЙ ВЫХОД",
+                title,
                 WindowStyle,
                 x,
                 y,

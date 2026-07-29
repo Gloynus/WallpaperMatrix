@@ -11,7 +11,7 @@ public sealed class AppSettings
     public const double MinimumAttackTransitionSeconds = 1.0;
     public const double MaximumAttackTransitionSeconds = 600.0;
 
-    public int SettingsVersion { get; set; } = 33;
+    public int SettingsVersion { get; set; } = 35;
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public double Speed { get; set; }
     public double SpeedMin { get; set; } = 0.20;
@@ -98,10 +98,15 @@ public sealed class AppSettings
     public bool AttackSystemEnabled { get; set; }
     public double AttackIdleMinutes { get; set; } = 10.0;
     public double AttackTransitionSeconds { get; set; } = 30.0;
+    public bool VirtualMonitorEnabled { get; set; }
     public string VirtualOutputSourceMonitorId { get; set; } = "";
     public int VirtualOutputWidth { get; set; } = 1920;
     public int VirtualOutputHeight { get; set; } = 1080;
-    public string VirtualOutputFit { get; set; } = "Fill";
+    public int? VirtualMonitorOffsetX { get; set; }
+    public int? VirtualMonitorOffsetY { get; set; }
+    // Retained only to migrate layouts created before the virtual device
+    // became freely positionable on the topology canvas.
+    public string VirtualMonitorDock { get; set; } = "Right";
     public bool WelcomeShown { get; set; }
     public string ActivePresetId { get; set; } = "";
     public List<MonitorProfile> MonitorProfiles { get; set; } = [];
@@ -179,10 +184,13 @@ public sealed class AppSettings
         AttackSystemEnabled = AttackSystemEnabled,
         AttackIdleMinutes = AttackIdleMinutes,
         AttackTransitionSeconds = AttackTransitionSeconds,
+        VirtualMonitorEnabled = VirtualMonitorEnabled,
         VirtualOutputSourceMonitorId = VirtualOutputSourceMonitorId,
         VirtualOutputWidth = VirtualOutputWidth,
         VirtualOutputHeight = VirtualOutputHeight,
-        VirtualOutputFit = VirtualOutputFit,
+        VirtualMonitorOffsetX = VirtualMonitorOffsetX,
+        VirtualMonitorOffsetY = VirtualMonitorOffsetY,
+        VirtualMonitorDock = VirtualMonitorDock,
         WelcomeShown = WelcomeShown,
         ActivePresetId = ActivePresetId,
         MonitorProfiles = includeMonitorProfiles
@@ -466,6 +474,24 @@ public sealed class AppSettings
             SettingsVersion = 32;
         if (SettingsVersion < 33)
             SettingsVersion = 33;
+        if (SettingsVersion < 34)
+            SettingsVersion = 34;
+        if (SettingsVersion < 35)
+        {
+            MonitorProfile? legacyVirtual = MonitorProfiles?
+                .FirstOrDefault(profile => string.Equals(
+                    profile.MonitorId,
+                    "wallpaper-matrix://virtual-monitor",
+                    StringComparison.OrdinalIgnoreCase));
+            if (!VirtualMonitorEnabled && legacyVirtual is not null)
+            {
+                legacyVirtual.FlowMode = MonitorLinkMode.Disabled;
+                legacyVirtual.FlowSourceMonitorId = "";
+                legacyVirtual.DatabaseMode = MonitorLinkMode.Disabled;
+                legacyVirtual.DatabaseSourceMonitorId = "";
+            }
+            SettingsVersion = 35;
+        }
         SpeedMin = Math.Clamp(
             SpeedMin,
             MinimumSpeed,
@@ -601,9 +627,16 @@ public sealed class AppSettings
             VirtualOutputHeight,
             180,
             4320);
-        VirtualOutputFit = VirtualOutputFit is "Fill" or "Uniform"
-            ? VirtualOutputFit
-            : "Fill";
+        VirtualMonitorOffsetX = VirtualMonitorOffsetX.HasValue
+            ? Math.Clamp(VirtualMonitorOffsetX.Value, -100_000, 100_000)
+            : null;
+        VirtualMonitorOffsetY = VirtualMonitorOffsetY.HasValue
+            ? Math.Clamp(VirtualMonitorOffsetY.Value, -100_000, 100_000)
+            : null;
+        VirtualMonitorDock = VirtualMonitorDock is
+            "Left" or "Right" or "Top" or "Bottom"
+                ? VirtualMonitorDock
+                : "Right";
         ActivePresetId = ActivePresetId?.Trim() ?? "";
         OperatorPlaylistId = OperatorPlaylistId?.Trim() ?? "";
         OperatorPlaylistName = OperatorPlaylistName?.Trim() ?? "";

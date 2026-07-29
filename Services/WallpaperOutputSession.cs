@@ -33,9 +33,10 @@ internal sealed class WallpaperOutputSession : IDisposable
     private bool _suspended;
     private bool _disposed;
     private int _screenCount;
-    private bool _virtualOutputRequested;
-    private string _virtualOutputSourceMonitorId = "";
-    private VirtualOutputWindow? _virtualOutput;
+    private readonly HashSet<string> _virtualOutputRequests =
+        new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, VirtualOutputWindow> _virtualOutputs =
+        new(StringComparer.OrdinalIgnoreCase);
 
     public bool IsRunning => _windows.Count > 0;
     public bool IsVirtualOutputOpen
@@ -43,7 +44,15 @@ internal sealed class WallpaperOutputSession : IDisposable
         get
         {
             lock (_virtualOutputLock)
-                return _virtualOutput is not null;
+                return _virtualOutputs.Count > 0;
+        }
+    }
+    public IReadOnlyList<string> VirtualOutputMonitorIds
+    {
+        get
+        {
+            lock (_virtualOutputLock)
+                return _virtualOutputs.Keys.ToArray();
         }
     }
     public SharedMatrixScene? SharedFrame =>
@@ -55,7 +64,7 @@ internal sealed class WallpaperOutputSession : IDisposable
     public int WindowCount => _screenCount;
     public int TargetWidth { get; private set; } = 2560;
     public int TargetHeight { get; private set; } = 1440;
-    public event Action<bool>? VirtualOutputStateChanged;
+    public event Action<string, bool>? VirtualOutputStateChanged;
 
     public WallpaperOutputHealth CheckHealth(
         TimeSpan maximumFrameAge)
@@ -140,28 +149,46 @@ internal sealed class WallpaperOutputSession : IDisposable
                 settings);
         _settings = settings.Copy();
         _virtualOutputSettings = settings.Copy();
-        MonitorTopology.EnsureProfiles(_settings, _monitors);
+        IReadOnlyList<MonitorDescriptor> nextMonitors =
+            OutputDeviceCatalog.Capture(_settings);
+        MonitorTopology.EnsureProfiles(_settings, nextMonitors);
         MonitorOutputPlan nextPlan =
-            MonitorOutputPlan.Create(_settings, _monitors);
+            MonitorOutputPlan.Create(_settings, nextMonitors);
         if (_plan is null
             || _plan.VirtualBounds != nextPlan.VirtualBounds)
         {
             Restart(_settings, _image, _suspended);
             return;
         }
+        _monitors = nextMonitors;
         _plan = nextPlan;
         TargetWidth = Math.Max(1, nextPlan.VirtualBounds.Width);
         TargetHeight = Math.Max(1, nextPlan.VirtualBounds.Height);
         foreach (NativeWallpaperWindow window in _windows)
             window.UpdateSettings(nextPlan);
-        if (_virtualOutputRequested
-            && (virtualConfigurationChanged
-                || !string.Equals(
-                    _virtualOutputSourceMonitorId,
-                    ResolveVirtualOutputSource(),
-                    StringComparison.OrdinalIgnoreCase)))
+        string[] unavailable;
+        lock (_virtualOutputLock)
         {
-            RecreateVirtualOutput();
+            unavailable = _virtualOutputRequests
+                .Where(request => !_monitors.Any(monitor =>
+                    string.Equals(
+                        monitor.Id,
+                        request,
+                        StringComparison.OrdinalIgnoreCase)))
+                .ToArray();
+        }
+        foreach (string monitorId in unavailable)
+            CloseVirtualOutput(monitorId, preserveRequest: false);
+        bool virtualRequested;
+        lock (_virtualOutputLock)
+        {
+            virtualRequested = _virtualOutputRequests.Contains(
+                OutputDeviceCatalog.VirtualMonitorId);
+        }
+        if (virtualConfigurationChanged && virtualRequested)
+        {
+            RecreateVirtualOutput(
+                OutputDeviceCatalog.VirtualMonitorId);
         }
     }
 
@@ -170,16 +197,39 @@ internal sealed class WallpaperOutputSession : IDisposable
         AppSettings settings)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        bool configurationChanged =
+            !VirtualOutputConfigurationEquivalent(
+                _virtualOutputSettings,
+                settings);
         _virtualOutputSettings = settings.Copy();
         _virtualOutputSettings.Normalize();
-        _virtualOutputRequested = open;
+        string monitorId = ResolveVirtualOutputSource(
+            _virtualOutputSettings.VirtualOutputSourceMonitorId);
+        if (string.IsNullOrWhiteSpace(monitorId))
+        {
+            throw new InvalidOperationException(
+                "Для отдельного окна нет активного устройства вывода.");
+        }
         if (!open)
         {
-            CloseVirtualOutput(preserveRequest: false);
+            CloseVirtualOutput(
+                monitorId,
+                preserveRequest: false);
             return;
         }
+        lock (_virtualOutputLock)
+            _virtualOutputRequests.Add(monitorId);
         if (IsRunning)
-            RecreateVirtualOutput();
+        {
+            bool alreadyOpen;
+            lock (_virtualOutputLock)
+                alreadyOpen = _virtualOutputs.ContainsKey(monitorId);
+            if (!alreadyOpen)
+                StartVirtualOutput(monitorId);
+            else if (configurationChanged
+                     && OutputDeviceCatalog.IsVirtual(monitorId))
+                RecreateVirtualOutput(monitorId);
+        }
     }
 
     public void SetImage(PreparedImage? image)
@@ -272,7 +322,7 @@ internal sealed class WallpaperOutputSession : IDisposable
 
     private void CreateWindows(bool animateStartupReveal)
     {
-        _monitors = MonitorCatalog.Capture();
+        _monitors = OutputDeviceCatalog.Capture(_settings);
         if (_monitors.Count == 0)
             throw new InvalidOperationException(
                 "Windows не сообщила ни об одном активном экране.");
@@ -342,23 +392,27 @@ internal sealed class WallpaperOutputSession : IDisposable
             TargetHeight = Math.Max(1, _plan.VirtualBounds.Height);
 
             _windows.AddRange(created);
-            _screenCount = _monitors.Count;
+            _screenCount = _monitors.Count(monitor => !monitor.IsVirtual);
             if (_databaseImages.Count > 0)
                 compositor.SetDatabaseImages(_databaseImages);
-            if (_virtualOutputRequested)
+            string[] requestedOutputs;
+            lock (_virtualOutputLock)
+                requestedOutputs = _virtualOutputRequests.ToArray();
+            foreach (string monitorId in requestedOutputs)
             {
                 try
                 {
-                    StartVirtualOutput();
+                    StartVirtualOutput(monitorId);
                 }
                 catch (Exception exception)
                 {
                     // A capture window is auxiliary. If it cannot be restored
                     // after a desktop/output rebuild, keep the wallpaper alive
                     // and only drop the capture request.
-                    _virtualOutputRequested = false;
+                    lock (_virtualOutputLock)
+                        _virtualOutputRequests.Remove(monitorId);
                     DiagnosticLog.Write(
-                        "Виртуальный выход не восстановлен после "
+                        $"Отдельное окно «{monitorId}» не восстановлено после "
                         + "переподключения; основной вывод продолжает работу.",
                         exception);
                 }
@@ -376,7 +430,7 @@ internal sealed class WallpaperOutputSession : IDisposable
 
     private void CloseWindows(bool restoreSystemWallpaper)
     {
-        CloseVirtualOutput(preserveRequest: true);
+        CloseAllVirtualOutputs(preserveRequests: true);
         if (_windows.Count == 0)
             return;
 
@@ -459,95 +513,150 @@ internal sealed class WallpaperOutputSession : IDisposable
         if (_disposed)
             return;
         _disposed = true;
-        _virtualOutputRequested = false;
-        CloseVirtualOutput(preserveRequest: false);
+        CloseAllVirtualOutputs(preserveRequests: false);
         CloseWindows(restoreSystemWallpaper: true);
     }
 
-    private void RecreateVirtualOutput()
+    private void RecreateVirtualOutput(string monitorId)
     {
-        CloseVirtualOutput(preserveRequest: true);
-        if (_virtualOutputRequested && IsRunning)
-            StartVirtualOutput();
+        CloseVirtualOutput(monitorId, preserveRequest: true);
+        bool requested;
+        lock (_virtualOutputLock)
+            requested = _virtualOutputRequests.Contains(monitorId);
+        if (requested && IsRunning)
+            StartVirtualOutput(monitorId);
     }
 
-    private void StartVirtualOutput()
+    private void StartVirtualOutput(string sourceMonitorId)
     {
-        if (!_virtualOutputRequested || !IsRunning)
+        if (!IsRunning)
             return;
-        string sourceMonitorId = ResolveVirtualOutputSource();
-        if (string.IsNullOrWhiteSpace(sourceMonitorId))
+        bool requested;
+        lock (_virtualOutputLock)
+            requested = _virtualOutputRequests.Contains(sourceMonitorId);
+        if (!requested)
+            return;
+        MonitorDescriptor? source = _monitors.FirstOrDefault(monitor =>
+            string.Equals(
+                monitor.Id,
+                sourceMonitorId,
+                StringComparison.OrdinalIgnoreCase));
+        if (source is null)
         {
             throw new InvalidOperationException(
-                "Для виртуального выхода нет активного источника потока.");
+                "Для отдельного окна нет активного источника потока.");
         }
 
+        int outputWidth = source.IsVirtual
+            ? _virtualOutputSettings.VirtualOutputWidth
+            : source.Bounds.Width;
+        int outputHeight = source.IsVirtual
+            ? _virtualOutputSettings.VirtualOutputHeight
+            : source.Bounds.Height;
         VirtualOutputWindow window = new(
-            _virtualOutputSettings.VirtualOutputWidth,
-            _virtualOutputSettings.VirtualOutputHeight,
-            _virtualOutputSettings.VirtualOutputFit,
+            outputWidth,
+            outputHeight,
+            $"Wallpaper Matrix — {source.FriendlyName.ToUpperInvariant()}",
             () => CaptureVirtualOutputFrame(sourceMonitorId),
             _failureHandler);
         window.Closed += userInitiated =>
-            OnVirtualOutputClosed(window, userInitiated);
+            OnVirtualOutputClosed(
+                sourceMonitorId,
+                window,
+                userInitiated);
         lock (_virtualOutputLock)
-            _virtualOutput = window;
-        _virtualOutputSourceMonitorId = sourceMonitorId;
+        {
+            if (_virtualOutputs.ContainsKey(sourceMonitorId))
+            {
+                window.Dispose();
+                return;
+            }
+            _virtualOutputs[sourceMonitorId] = window;
+        }
         try
         {
             window.Start();
-            VirtualOutputStateChanged?.Invoke(true);
+            VirtualOutputStateChanged?.Invoke(
+                sourceMonitorId,
+                true);
         }
         catch
         {
             lock (_virtualOutputLock)
             {
-                if (ReferenceEquals(_virtualOutput, window))
-                    _virtualOutput = null;
+                if (_virtualOutputs.TryGetValue(
+                        sourceMonitorId,
+                        out VirtualOutputWindow? current)
+                    && ReferenceEquals(current, window))
+                {
+                    _virtualOutputs.Remove(sourceMonitorId);
+                }
+                _virtualOutputRequests.Remove(sourceMonitorId);
             }
-            _virtualOutputRequested = false;
             window.Dispose();
-            VirtualOutputStateChanged?.Invoke(false);
+            VirtualOutputStateChanged?.Invoke(
+                sourceMonitorId,
+                false);
             throw;
         }
     }
 
-    private void CloseVirtualOutput(bool preserveRequest)
+    private void CloseVirtualOutput(
+        string monitorId,
+        bool preserveRequest)
     {
-        if (!preserveRequest)
-            _virtualOutputRequested = false;
         VirtualOutputWindow? window;
         lock (_virtualOutputLock)
         {
-            window = _virtualOutput;
-            _virtualOutput = null;
+            if (!preserveRequest)
+                _virtualOutputRequests.Remove(monitorId);
+            _virtualOutputs.Remove(monitorId, out window);
         }
-        _virtualOutputSourceMonitorId = "";
         if (window is null)
             return;
         window.RequestClose();
         window.WaitForClose(TimeSpan.FromSeconds(3));
         window.Dispose();
-        VirtualOutputStateChanged?.Invoke(false);
+        VirtualOutputStateChanged?.Invoke(monitorId, false);
+    }
+
+    private void CloseAllVirtualOutputs(bool preserveRequests)
+    {
+        string[] monitorIds;
+        lock (_virtualOutputLock)
+        {
+            monitorIds = _virtualOutputs.Keys.ToArray();
+            if (!preserveRequests)
+                _virtualOutputRequests.Clear();
+        }
+        foreach (string monitorId in monitorIds)
+        {
+            CloseVirtualOutput(
+                monitorId,
+                preserveRequest: preserveRequests);
+        }
     }
 
     private void OnVirtualOutputClosed(
+        string monitorId,
         VirtualOutputWindow window,
         bool userInitiated)
     {
         bool wasCurrent;
         lock (_virtualOutputLock)
         {
-            wasCurrent = ReferenceEquals(_virtualOutput, window);
+            wasCurrent = _virtualOutputs.TryGetValue(
+                monitorId,
+                out VirtualOutputWindow? current)
+                && ReferenceEquals(current, window);
             if (wasCurrent)
-                _virtualOutput = null;
+                _virtualOutputs.Remove(monitorId);
+            if (userInitiated)
+                _virtualOutputRequests.Remove(monitorId);
         }
         if (!wasCurrent)
             return;
-        _virtualOutputSourceMonitorId = "";
-        if (userInitiated)
-            _virtualOutputRequested = false;
-        VirtualOutputStateChanged?.Invoke(false);
+        VirtualOutputStateChanged?.Invoke(monitorId, false);
         _ = Task.Run(window.Dispose);
     }
 
@@ -559,14 +668,15 @@ internal sealed class WallpaperOutputSession : IDisposable
         return compositor?.CaptureVirtualOutputFrame(monitorId);
     }
 
-    private string ResolveVirtualOutputSource()
+    private string ResolveVirtualOutputSource(string requested)
     {
         if (_windows.Count == 0 || _monitors.Count == 0)
             return "";
-        string requested =
-            _virtualOutputSettings.VirtualOutputSourceMonitorId;
         if (!string.IsNullOrWhiteSpace(requested)
-            && CaptureVirtualOutputFrame(requested) is not null)
+            && _monitors.Any(monitor => string.Equals(
+                monitor.Id,
+                requested,
+                StringComparison.OrdinalIgnoreCase)))
         {
             return requested;
         }
@@ -583,11 +693,9 @@ internal sealed class WallpaperOutputSession : IDisposable
     private static bool VirtualOutputConfigurationEquivalent(
         AppSettings left,
         AppSettings right) =>
-        string.Equals(
-            left.VirtualOutputSourceMonitorId,
-            right.VirtualOutputSourceMonitorId,
-            StringComparison.OrdinalIgnoreCase)
-        && left.VirtualOutputWidth == right.VirtualOutputWidth
+        left.VirtualOutputWidth == right.VirtualOutputWidth
         && left.VirtualOutputHeight == right.VirtualOutputHeight
-        && left.VirtualOutputFit == right.VirtualOutputFit;
+        && left.VirtualMonitorEnabled == right.VirtualMonitorEnabled
+        && left.VirtualMonitorOffsetX == right.VirtualMonitorOffsetX
+        && left.VirtualMonitorOffsetY == right.VirtualMonitorOffsetY;
 }

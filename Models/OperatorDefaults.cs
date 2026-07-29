@@ -10,7 +10,7 @@ public static class OperatorDefaults
         ImagePlaylist playlist = new();
         AppSettings settings = new()
         {
-            SettingsVersion = 33,
+            SettingsVersion = 34,
             SpeedMin = 0.01,
             SpeedMax = 0.20,
             Density = 0.80,
@@ -73,6 +73,12 @@ public static class OperatorDefaults
             AttackSystemEnabled = false,
             AttackIdleMinutes = 10,
             AttackTransitionSeconds = 30,
+            VirtualMonitorEnabled = false,
+            VirtualOutputWidth = 1920,
+            VirtualOutputHeight = 1080,
+            VirtualMonitorOffsetX = null,
+            VirtualMonitorOffsetY = null,
+            VirtualMonitorDock = "Right",
             WelcomeShown = false
         };
         settings.Normalize();

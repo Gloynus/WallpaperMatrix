@@ -42,12 +42,6 @@ public partial class SettingsWindow : Window
         public required string Label { get; init; }
     }
 
-    private sealed class VirtualOutputSourceChoice
-    {
-        public string Id { get; init; } = "";
-        public required string Label { get; init; }
-    }
-
     private enum MonitorBadgeKind
     {
         FlowRelay,
@@ -64,6 +58,7 @@ public partial class SettingsWindow : Window
     private readonly DispatcherTimer _previewTimer;
     private readonly DispatcherTimer _fontPreviewTimer;
     private readonly DispatcherTimer _colorPreviewTimer;
+    private readonly DispatcherTimer _virtualResolutionTimer;
     private double _livePreviewFontSize = 24;
     private double _livePreviewGlyphStretch;
     private double _livePreviewGlyphWeight;
@@ -96,7 +91,27 @@ public partial class SettingsWindow : Window
     private bool _loading = true;
     private bool _hasPendingChanges;
     private bool _wallpaperPaused;
-    private bool _virtualOutputOpen;
+    private readonly HashSet<string> _openOutputMonitorIds =
+        new(StringComparer.OrdinalIgnoreCase);
+    private ComboBox? _virtualMonitorWidthCombo;
+    private ComboBox? _virtualMonitorHeightCombo;
+    private Border? _virtualMonitorVisual;
+    private const double TopologyDeviceScale = 0.14;
+    private const double TopologyPadding = 32.0;
+    private const double MinimumTopologyZoom = 0.02;
+    private double _topologyZoom = 1.0;
+    private double _topologyOriginX;
+    private double _topologyOriginY;
+    private bool _topologyAutoFit = true;
+    private bool _topologyFitQueued;
+    private bool _topologyPanning;
+    private System.Windows.Point _topologyPanStart;
+    private double _topologyPanHorizontalOffset;
+    private double _topologyPanVerticalOffset;
+    private bool _virtualMonitorDragging;
+    private System.Windows.Point _virtualMonitorDragStart;
+    private double _virtualMonitorDragLeft;
+    private double _virtualMonitorDragTop;
     private long _lastWheelTick;
     private bool _mainScrollGesture;
     private string _runtimeStatus = "СОСТОЯНИЕ ВЫВОДА НЕ ПОЛУЧЕНО";
@@ -139,6 +154,13 @@ public partial class SettingsWindow : Window
             Interval = TimeSpan.FromMilliseconds(33)
         };
         _colorPreviewTimer.Tick += ColorPreviewTimer_Tick;
+        _virtualResolutionTimer = new DispatcherTimer(
+            DispatcherPriority.Background)
+        {
+            Interval = TimeSpan.FromMilliseconds(320)
+        };
+        _virtualResolutionTimer.Tick +=
+            VirtualResolutionTimer_Tick;
         AddHandler(
             TextBox.TextChangedEvent,
             new TextChangedEventHandler(AnyTextBox_TextChanged));
@@ -173,7 +195,7 @@ public partial class SettingsWindow : Window
         bool preserveAppliedSettings)
     {
         AppSettings container = settings.Copy();
-        _monitors = MonitorCatalog.Capture();
+        _monitors = OutputDeviceCatalog.Capture(container);
         MonitorTopology.EnsureProfiles(container, _monitors);
         if (!preserveAppliedSettings)
             _source = container.Copy();
@@ -193,16 +215,11 @@ public partial class SettingsWindow : Window
         _attackTransitionSecondsValue =
             container.AttackTransitionSeconds;
         _loading = true;
-        RefreshMonitorTopologyUi();
-        RefreshVirtualOutputSourceChoices(
-            container.VirtualOutputSourceMonitorId);
         VirtualOutputWidthSlider.Value =
             container.VirtualOutputWidth;
         VirtualOutputHeightSlider.Value =
             container.VirtualOutputHeight;
-        SelectByTag(
-            VirtualOutputFitCombo,
-            container.VirtualOutputFit);
+        RefreshMonitorTopologyUi();
         SpeedMinSlider.Value = Math.Clamp(
             displaySettings.SpeedMin,
             SpeedMinSlider.Minimum,
@@ -308,6 +325,7 @@ public partial class SettingsWindow : Window
         _previewTimer.Stop();
         _fontPreviewTimer.Stop();
         _colorPreviewTimer.Stop();
+        _virtualResolutionTimer.Stop();
         RefreshLabels(force: true);
         _loading = false;
         SetSynchronizedStatus();
@@ -319,6 +337,7 @@ public partial class SettingsWindow : Window
         _previewTimer.Stop();
         _fontPreviewTimer.Stop();
         _colorPreviewTimer.Stop();
+        _virtualResolutionTimer.Stop();
         _allowClose = true;
         Close();
     }
@@ -334,17 +353,23 @@ public partial class SettingsWindow : Window
             : "Остановить вывод и показать обычные обои Windows";
     }
 
-    public void SetVirtualOutputState(bool open)
+    public void SetVirtualOutputState(
+        string monitorId,
+        bool open)
     {
-        _virtualOutputOpen = open;
-        if (VirtualOutputButton is null)
-            return;
-        VirtualOutputButton.Content = open
-            ? "ЗАКРЫТЬ ОКНО"
-            : "ОТКРЫТЬ ОКНО";
-        VirtualOutputButton.ToolTip = open
-            ? "Закрыть окно виртуального выхода"
-            : "Открыть окно, которое OBS видит как Wallpaper Matrix — ВИРТУАЛЬНЫЙ ВЫХОД";
+        if (open)
+            _openOutputMonitorIds.Add(monitorId);
+        else
+            _openOutputMonitorIds.Remove(monitorId);
+        RefreshMonitorVisuals();
+    }
+
+    public void SetVirtualOutputStates(
+        IEnumerable<string> monitorIds)
+    {
+        _openOutputMonitorIds.Clear();
+        _openOutputMonitorIds.UnionWith(monitorIds);
+        RefreshMonitorVisuals();
     }
 
     public void SetRuntimeStatus(string status, bool isError, string diagnosticLogPath)
@@ -428,6 +453,7 @@ public partial class SettingsWindow : Window
         _previewTimer.Stop();
         _fontPreviewTimer.Stop();
         _colorPreviewTimer.Stop();
+        _virtualResolutionTimer.Stop();
         UpdateDraftStatus();
         if (!_hasPendingChanges)
         {
@@ -527,15 +553,16 @@ public partial class SettingsWindow : Window
         updated.AttackIdleMinutes = _attackIdleMinutesValue;
         updated.AttackTransitionSeconds =
             _attackTransitionSecondsValue;
-        updated.VirtualOutputSourceMonitorId =
-            VirtualOutputSourceCombo.SelectedValue as string
-            ?? "";
         updated.VirtualOutputWidth =
             (int)Math.Round(VirtualOutputWidthSlider.Value);
         updated.VirtualOutputHeight =
             (int)Math.Round(VirtualOutputHeightSlider.Value);
-        updated.VirtualOutputFit =
-            SelectedTag(VirtualOutputFitCombo, "Fill");
+        MonitorProfile? virtualProfile = MonitorTopology.Find(
+            updated.MonitorProfiles,
+            OutputDeviceCatalog.VirtualMonitorId);
+        updated.VirtualMonitorEnabled =
+            virtualProfile is not null
+            && virtualProfile.FlowMode != MonitorLinkMode.Disabled;
         updated.ActivePresetId = _selectedPresetId;
         display.FontFamily = SelectedTag(FontCombo, "MS Gothic");
         display.ImageFit = SelectedTag(ImageFitCombo, "Uniform");
@@ -602,35 +629,11 @@ public partial class SettingsWindow : Window
             databaseChoices,
             selected.DatabaseMode,
             selected.DatabaseSourceMonitorId);
+        MonitorDatabaseModeCombo.IsEnabled =
+            !OutputDeviceCatalog.IsVirtual(selected.MonitorId)
+            || selected.FlowMode != MonitorLinkMode.Disabled;
         RefreshMonitorVisuals();
         UpdateMonitorRouteNotices();
-    }
-
-    private void RefreshVirtualOutputSourceChoices(
-        string requestedMonitorId)
-    {
-        List<VirtualOutputSourceChoice> choices =
-        [
-            new VirtualOutputSourceChoice
-            {
-                Id = "",
-                Label = "Автоматически // основной активный экран"
-            }
-        ];
-        choices.AddRange(_monitors.Select(monitor =>
-            new VirtualOutputSourceChoice
-            {
-                Id = monitor.Id,
-                Label = monitor.Label
-            }));
-        VirtualOutputSourceCombo.ItemsSource = choices;
-        VirtualOutputSourceCombo.SelectedValue =
-            choices.Any(choice => string.Equals(
-                choice.Id,
-                requestedMonitorId,
-                StringComparison.OrdinalIgnoreCase))
-                ? requestedMonitorId
-                : "";
     }
 
     private void RefreshMonitorVisuals()
@@ -639,41 +642,72 @@ public partial class SettingsWindow : Window
             return;
 
         MonitorTopologyCanvas.Children.Clear();
-        System.Drawing.Rectangle desktop = _monitors
-            .Select(monitor => monitor.Bounds)
-            .Aggregate(System.Drawing.Rectangle.Union);
-        double availableWidth = MonitorTopologyCanvas.ActualWidth > 40
-            ? MonitorTopologyCanvas.ActualWidth
-            : 640;
-        double availableHeight = MonitorTopologyCanvas.ActualHeight > 40
-            ? MonitorTopologyCanvas.ActualHeight
-            : 267;
-        const double padding = 8;
-        double scale = Math.Min(
-            (availableWidth - padding * 2) / Math.Max(1, desktop.Width),
-            (availableHeight - padding * 2) / Math.Max(1, desktop.Height));
-        double layoutWidth = desktop.Width * scale;
-        double layoutHeight = desktop.Height * scale;
-        double originX = (availableWidth - layoutWidth) * 0.5;
-        double originY = (availableHeight - layoutHeight) * 0.5;
+        _virtualMonitorWidthCombo = null;
+        _virtualMonitorHeightCombo = null;
+        _virtualMonitorVisual = null;
 
-        for (int index = 0; index < _monitors.Count; index++)
+        List<(MonitorDescriptor Monitor, double Width, double Height)>
+            layout = _monitors
+                .Select(monitor =>
+                {
+                    double minimumWidth = monitor.IsVirtual ? 190 : 150;
+                    double minimumHeight = monitor.IsVirtual ? 125 : 115;
+                    return (
+                        monitor,
+                        Math.Max(
+                            minimumWidth,
+                            monitor.Bounds.Width * TopologyDeviceScale),
+                        Math.Max(
+                            minimumHeight,
+                            monitor.Bounds.Height * TopologyDeviceScale));
+                })
+                .ToList();
+        double minimumLeft = layout.Min(item =>
+            item.Monitor.Bounds.Left * TopologyDeviceScale);
+        double minimumTop = layout.Min(item =>
+            item.Monitor.Bounds.Top * TopologyDeviceScale);
+        double maximumRight = layout.Max(item =>
+            item.Monitor.Bounds.Left * TopologyDeviceScale
+            + item.Width);
+        double maximumBottom = layout.Max(item =>
+            item.Monitor.Bounds.Top * TopologyDeviceScale
+            + item.Height);
+        _topologyOriginX =
+            (minimumLeft - TopologyPadding) / TopologyDeviceScale;
+        _topologyOriginY =
+            (minimumTop - TopologyPadding) / TopologyDeviceScale;
+        MonitorTopologyCanvas.Width = Math.Max(
+            320,
+            maximumRight - minimumLeft + TopologyPadding * 2);
+        MonitorTopologyCanvas.Height = Math.Max(
+            220,
+            maximumBottom - minimumTop + TopologyPadding * 2);
+
+        int physicalIndex = 0;
+        foreach ((
+                     MonitorDescriptor monitor,
+                     double width,
+                     double height) in layout)
         {
-            MonitorDescriptor monitor = _monitors[index];
             MonitorProfile? profile = MonitorTopology.Find(
                 _draftSettings.MonitorProfiles,
                 monitor.Id);
             if (profile is null)
                 continue;
 
-            double width = Math.Max(54, monitor.Bounds.Width * scale);
-            double height = Math.Max(42, monitor.Bounds.Height * scale);
-            double left = originX + (monitor.Bounds.Left - desktop.Left) * scale;
-            double top = originY + (monitor.Bounds.Top - desktop.Top) * scale;
+            int number = monitor.IsVirtual
+                ? 0
+                : MonitorNumber(monitor, physicalIndex++);
+            double left =
+                (monitor.Bounds.Left - _topologyOriginX)
+                * TopologyDeviceScale;
+            double top =
+                (monitor.Bounds.Top - _topologyOriginY)
+                * TopologyDeviceScale;
             Border visual = CreateMonitorVisual(
                 monitor,
                 profile,
-                MonitorNumber(monitor, index),
+                number,
                 width,
                 height);
             visual.Width = width;
@@ -681,7 +715,14 @@ public partial class SettingsWindow : Window
             Canvas.SetLeft(visual, left);
             Canvas.SetTop(visual, top);
             MonitorTopologyCanvas.Children.Add(visual);
+            if (monitor.IsVirtual)
+                _virtualMonitorVisual = visual;
         }
+
+        MonitorTopologyScaleTransform.ScaleX = _topologyZoom;
+        MonitorTopologyScaleTransform.ScaleY = _topologyZoom;
+        if (_topologyAutoFit)
+            QueueMonitorTopologyFit();
     }
 
     private Border CreateMonitorVisual(
@@ -710,49 +751,150 @@ public partial class SettingsWindow : Window
                 4,
                 badgeSize + 8,
                 4,
-                18),
-            Children =
-            {
-                new TextBlock
-                {
-                    Text = $"ЭКРАН {number}",
-                    HorizontalAlignment = HorizontalAlignment.Center,
-                    FontFamily = new FontFamily("Consolas"),
-                    FontSize = titleFontSize,
-                    FontWeight = FontWeights.Bold,
-                    Foreground = BrushFromRgb(
-                        selected ? 0xD8 : 0x79,
-                        selected ? 0xFF : 0xA8,
-                        selected ? 0xE5 : 0x88)
-                },
-                new TextBlock
-                {
-                    Text = $"{monitor.Bounds.Width}×{monitor.Bounds.Height}",
-                    Visibility = height >= 68
-                        ? Visibility.Visible
-                        : Visibility.Collapsed,
-                    HorizontalAlignment = HorizontalAlignment.Center,
-                    FontFamily = new FontFamily("Consolas"),
-                    FontSize = detailFontSize,
-                    Foreground = BrushFromRgb(0x83, 0xFF, 0xAA)
-                },
-                new TextBlock
-                {
-                    Text = monitor.FriendlyName,
-                    Visibility = height >= 88 && width >= 90
-                        ? Visibility.Visible
-                        : Visibility.Collapsed,
-                    Width = contentWidth,
-                    HorizontalAlignment = HorizontalAlignment.Center,
-                    TextAlignment = TextAlignment.Center,
-                    TextTrimming = TextTrimming.CharacterEllipsis,
-                    FontFamily = new FontFamily("Consolas"),
-                    FontSize = nameFontSize,
-                    Foreground = BrushFromRgb(0x55, 0xB9, 0x78)
-                }
-            }
+                18)
         };
+        identity.Children.Add(new TextBlock
+        {
+            Text = monitor.IsVirtual
+                ? "ВИРТУАЛЬНЫЙ"
+                : $"ЭКРАН {number}",
+            HorizontalAlignment = HorizontalAlignment.Center,
+            FontFamily = new FontFamily("Consolas"),
+            FontSize = titleFontSize,
+            FontWeight = FontWeights.Bold,
+            Foreground = BrushFromRgb(
+                selected ? 0xD8 : 0x79,
+                selected ? 0xFF : 0xA8,
+                selected ? 0xE5 : 0x88)
+        });
+        if (monitor.IsVirtual)
+        {
+            double inputWidth = Math.Max(
+                46,
+                (width - 32) * 0.5);
+            StackPanel resolution = new()
+            {
+                Orientation = System.Windows.Controls.Orientation.Horizontal,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Margin = new Thickness(0, 3, 0, 0)
+            };
+            _virtualMonitorWidthCombo =
+                CreateVirtualResolutionCombo(
+                    true,
+                    monitor.Bounds.Width,
+                    inputWidth);
+            _virtualMonitorHeightCombo =
+                CreateVirtualResolutionCombo(
+                    false,
+                    monitor.Bounds.Height,
+                    inputWidth);
+            resolution.Children.Add(
+                _virtualMonitorWidthCombo);
+            resolution.Children.Add(new TextBlock
+            {
+                Text = "×",
+                Width = 14,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                TextAlignment = TextAlignment.Center,
+                FontFamily = new FontFamily("Consolas"),
+                FontSize = 10,
+                Foreground = BrushFromRgb(0x83, 0xFF, 0xAA)
+            });
+            resolution.Children.Add(
+                _virtualMonitorHeightCombo);
+            identity.Children.Add(resolution);
+        }
+        else
+        {
+            identity.Children.Add(new TextBlock
+            {
+                Text = $"{monitor.Bounds.Width}×{monitor.Bounds.Height}",
+                Visibility = height >= 68
+                    ? Visibility.Visible
+                    : Visibility.Collapsed,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                FontFamily = new FontFamily("Consolas"),
+                FontSize = detailFontSize,
+                Foreground = BrushFromRgb(0x83, 0xFF, 0xAA)
+            });
+            identity.Children.Add(new TextBlock
+            {
+                Text = monitor.FriendlyName,
+                Visibility = height >= 88 && width >= 90
+                    ? Visibility.Visible
+                    : Visibility.Collapsed,
+                Width = contentWidth,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                TextAlignment = TextAlignment.Center,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                FontFamily = new FontFamily("Consolas"),
+                FontSize = nameFontSize,
+                Foreground = BrushFromRgb(0x55, 0xB9, 0x78)
+            });
+        }
         screen.Children.Add(identity);
+
+        if (monitor.IsVirtual)
+        {
+            Border dragHandle = new()
+            {
+                Tag = monitor.Id,
+                Width = 34,
+                Height = 19,
+                Margin = new Thickness(0, 3, 0, 0),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Top,
+                Background = BrushFromRgb(0x05, 0x24, 0x16),
+                BorderBrush = BrushFromRgb(0x16, 0x71, 0x3D),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(3),
+                Cursor = WpfCursors.SizeAll,
+                ToolTip = "Переместить виртуальный монитор",
+                Child = new TextBlock
+                {
+                    Text = "⠿",
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    FontFamily = new FontFamily("Segoe UI Symbol"),
+                    FontSize = 13,
+                    Foreground = BrushFromRgb(0x62, 0xFF, 0x8F)
+                }
+            };
+            dragHandle.PreviewMouseLeftButtonDown +=
+                VirtualMonitorDragHandle_MouseLeftButtonDown;
+            dragHandle.PreviewMouseMove +=
+                VirtualMonitorDragHandle_MouseMove;
+            dragHandle.PreviewMouseLeftButtonUp +=
+                VirtualMonitorDragHandle_MouseLeftButtonUp;
+            dragHandle.LostMouseCapture +=
+                VirtualMonitorDragHandle_LostMouseCapture;
+            screen.Children.Add(dragHandle);
+        }
+
+        bool flowDisabled =
+            profile.FlowMode == MonitorLinkMode.Disabled;
+        System.Windows.Controls.Button openWindow = new()
+        {
+            Tag = monitor.Id,
+            Content = _openOutputMonitorIds.Contains(monitor.Id)
+                ? "\uE711"
+                : "\uE8A7",
+            FontFamily = new FontFamily("Segoe MDL2 Assets"),
+            Width = Math.Clamp(shortSide * 0.27, 24, 32),
+            Height = Math.Clamp(shortSide * 0.23, 22, 29),
+            Padding = new Thickness(3, 1, 3, 1),
+            Margin = new Thickness(0, 0, 3, 3),
+            HorizontalAlignment = HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Bottom,
+            Style = TryFindResource("QuickIconButton") as Style,
+            IsEnabled = !flowDisabled,
+            ToolTip = _openOutputMonitorIds.Contains(monitor.Id)
+                    ? "Закрыть отдельное окно этого потока"
+                    : "Открыть копию этого потока в отдельном окне"
+        };
+        openWindow.Click += MonitorOutputWindowButton_Click;
+        screen.Children.Add(openWindow);
 
         screen.Children.Add(new Ellipse
         {
@@ -772,7 +914,7 @@ public partial class SettingsWindow : Window
             AddMonitorBadge(
                 screen,
                 MonitorBadgeKind.FlowRelay,
-                SourceMonitorNumber(profile.FlowSourceMonitorId),
+                SourceMonitorMarker(profile.FlowSourceMonitorId),
                 HorizontalAlignment.Left,
                 VerticalAlignment.Top,
                 badgeSize);
@@ -782,7 +924,7 @@ public partial class SettingsWindow : Window
             AddMonitorBadge(
                 screen,
                 MonitorBadgeKind.FlowExtend,
-                SourceMonitorNumber(profile.FlowSourceMonitorId),
+                SourceMonitorMarker(profile.FlowSourceMonitorId),
                 HorizontalAlignment.Left,
                 VerticalAlignment.Top,
                 badgeSize);
@@ -803,7 +945,7 @@ public partial class SettingsWindow : Window
             AddMonitorBadge(
                 screen,
                 MonitorBadgeKind.DatabaseRelay,
-                SourceMonitorNumber(profile.DatabaseSourceMonitorId),
+                SourceMonitorMarker(profile.DatabaseSourceMonitorId),
                 HorizontalAlignment.Right,
                 VerticalAlignment.Top,
                 badgeSize);
@@ -813,7 +955,7 @@ public partial class SettingsWindow : Window
             AddMonitorBadge(
                 screen,
                 MonitorBadgeKind.DatabaseExtend,
-                SourceMonitorNumber(profile.DatabaseSourceMonitorId),
+                SourceMonitorMarker(profile.DatabaseSourceMonitorId),
                 HorizontalAlignment.Right,
                 VerticalAlignment.Top,
                 badgeSize);
@@ -822,10 +964,15 @@ public partial class SettingsWindow : Window
         Border border = new()
         {
             Tag = monitor.Id,
-            Background = BrushFromRgb(
-                selected ? 0x09 : 0x02,
-                selected ? 0x27 : 0x08,
-                selected ? 0x19 : 0x06),
+            Background = monitor.IsVirtual
+                ? BrushFromRgb(
+                    selected ? 0x08 : 0x03,
+                    selected ? 0x2B : 0x12,
+                    selected ? 0x29 : 0x13)
+                : BrushFromRgb(
+                    selected ? 0x09 : 0x02,
+                    selected ? 0x27 : 0x08,
+                    selected ? 0x19 : 0x06),
             BorderBrush = BrushFromRgb(
                 selected ? 0x00 : 0x16,
                 selected ? 0xE6 : 0x4B,
@@ -833,6 +980,7 @@ public partial class SettingsWindow : Window
             BorderThickness = new Thickness(selected ? 2 : 1),
             CornerRadius = new CornerRadius(3),
             Padding = new Thickness(5),
+            Opacity = monitor.IsVirtual && flowDisabled ? 0.54 : 1.0,
             Child = screen,
             Cursor = WpfCursors.Hand,
             ToolTip = $"{monitor.FriendlyName}\n"
@@ -845,10 +993,52 @@ public partial class SettingsWindow : Window
         return border;
     }
 
+    private ComboBox CreateVirtualResolutionCombo(
+        bool widthInput,
+        int value,
+        double width)
+    {
+        ComboBox input = new()
+        {
+            IsEditable = true,
+            IsTextSearchEnabled = false,
+            Width = width,
+            Height = 23,
+            Padding = new Thickness(2, 0, 2, 0),
+            FontFamily = new FontFamily("Consolas"),
+            FontSize = 9,
+            ToolTip = widthInput
+                ? "Ширина виртуального монитора, px"
+                : "Высота виртуального монитора, px"
+        };
+        int[] values = widthInput
+            ? [1280, 1920, 2560, 3440, 3840, 5120, 7680]
+            : [720, 1080, 1440, 1600, 2160, 2880, 4320];
+        foreach (int option in values)
+        {
+            input.Items.Add(new ComboBoxItem
+            {
+                Content = option.ToString(
+                    CultureInfo.InvariantCulture)
+            });
+        }
+        input.Text = value.ToString(
+            CultureInfo.InvariantCulture);
+        input.DropDownClosed +=
+            VirtualResolutionCombo_DropDownClosed;
+        input.LostKeyboardFocus +=
+            VirtualResolutionCombo_LostKeyboardFocus;
+        input.PreviewKeyDown +=
+            VirtualResolutionCombo_PreviewKeyDown;
+        input.PreviewMouseWheel +=
+            VirtualResolutionCombo_PreviewMouseWheel;
+        return input;
+    }
+
     private static void AddMonitorBadge(
         Grid screen,
         MonitorBadgeKind kind,
-        int? sourceNumber,
+        string? sourceMarker,
         HorizontalAlignment horizontal,
         VerticalAlignment vertical,
         double size)
@@ -859,7 +1049,7 @@ public partial class SettingsWindow : Window
             : BrushFromRgb(0x7D, 0xE7, 0xFF);
         Grid glyph = new()
         {
-            Width = size + (sourceNumber is null ? 4 : 10),
+            Width = size + (sourceMarker is null ? 4 : 10),
             Height = size + 4
         };
         glyph.Children.Add(new Viewbox
@@ -879,7 +1069,7 @@ public partial class SettingsWindow : Window
                 Fill = System.Windows.Media.Brushes.Transparent
             }
         });
-        if (sourceNumber is int number)
+        if (!string.IsNullOrWhiteSpace(sourceMarker))
         {
             glyph.Children.Add(new Border
             {
@@ -894,7 +1084,7 @@ public partial class SettingsWindow : Window
                 CornerRadius = new CornerRadius(2),
                 Child = new TextBlock
                 {
-                    Text = number.ToString(CultureInfo.InvariantCulture),
+                    Text = sourceMarker,
                     HorizontalAlignment = HorizontalAlignment.Center,
                     VerticalAlignment = VerticalAlignment.Center,
                     FontFamily = new FontFamily("Consolas"),
@@ -951,18 +1141,17 @@ public partial class SettingsWindow : Window
         MonitorLinkMode mode,
         string sourceMonitorId)
     {
-        string source = SourceMonitorNumber(sourceMonitorId).ToString(
-            CultureInfo.InvariantCulture);
+        string source = SourceMonitorMarker(sourceMonitorId);
         return mode switch
         {
-            MonitorLinkMode.Relay => $"ретрансляция с экрана {source}",
-            MonitorLinkMode.Extend => $"расширение экрана {source}",
+            MonitorLinkMode.Relay => $"ретрансляция с устройства {source}",
+            MonitorLinkMode.Extend => $"расширение устройства {source}",
             MonitorLinkMode.Disabled => "отключено",
             _ => "изолировано"
         };
     }
 
-    private int SourceMonitorNumber(string monitorId)
+    private string SourceMonitorMarker(string monitorId)
     {
         for (int index = 0; index < _monitors.Count; index++)
         {
@@ -971,10 +1160,13 @@ public partial class SettingsWindow : Window
                 monitorId,
                 StringComparison.OrdinalIgnoreCase))
             {
-                return MonitorNumber(_monitors[index], index);
+                return _monitors[index].IsVirtual
+                    ? "V"
+                    : MonitorNumber(_monitors[index], index)
+                        .ToString(CultureInfo.InvariantCulture);
             }
         }
-        return 0;
+        return "?";
     }
 
     private static int MonitorNumber(
@@ -993,18 +1185,604 @@ public partial class SettingsWindow : Window
             (byte)green,
             (byte)blue));
 
-    private void MonitorTopologyCanvas_SizeChanged(
+    private void MonitorTopologyScrollViewer_SizeChanged(
         object sender,
         SizeChangedEventArgs e)
     {
+        if (!_loading && _topologyAutoFit)
+            QueueMonitorTopologyFit();
+    }
+
+    private void MonitorTopologyScrollViewer_PreviewMouseWheel(
+        object sender,
+        MouseWheelEventArgs e)
+    {
+        if (_loading || _virtualMonitorDragging)
+            return;
+        if (e.OriginalSource is DependencyObject origin
+            && IsFocusedVirtualResolutionInput(origin))
+        {
+            return;
+        }
+
+        System.Windows.Point pointer =
+            e.GetPosition(MonitorTopologyScrollViewer);
+        double previous = _topologyZoom;
+        double factor = e.Delta > 0 ? 1.12 : 1.0 / 1.12;
+        double next = Math.Clamp(
+            previous * factor,
+            MinimumTopologyZoom,
+            3.0);
+        if (Math.Abs(next - previous) < 0.0001)
+            return;
+
+        double logicalX =
+            (MonitorTopologyScrollViewer.HorizontalOffset + pointer.X)
+            / previous;
+        double logicalY =
+            (MonitorTopologyScrollViewer.VerticalOffset + pointer.Y)
+            / previous;
+        _topologyAutoFit = false;
+        SetMonitorTopologyZoom(next);
+        Dispatcher.BeginInvoke(
+            DispatcherPriority.Loaded,
+            () =>
+            {
+                MonitorTopologyScrollViewer.UpdateLayout();
+                MonitorTopologyScrollViewer.ScrollToHorizontalOffset(
+                    logicalX * next - pointer.X);
+                MonitorTopologyScrollViewer.ScrollToVerticalOffset(
+                    logicalY * next - pointer.Y);
+            });
+        e.Handled = true;
+    }
+
+    private void MonitorTopologyScrollViewer_PreviewMouseDown(
+        object sender,
+        MouseButtonEventArgs e)
+    {
+        if (e.ChangedButton is not (MouseButton.Right or MouseButton.Middle))
+            return;
+
+        _topologyPanning = true;
+        _topologyAutoFit = false;
+        _topologyPanStart =
+            e.GetPosition(MonitorTopologyScrollViewer);
+        _topologyPanHorizontalOffset =
+            MonitorTopologyScrollViewer.HorizontalOffset;
+        _topologyPanVerticalOffset =
+            MonitorTopologyScrollViewer.VerticalOffset;
+        MonitorTopologyScrollViewer.Cursor = WpfCursors.ScrollAll;
+        MonitorTopologyScrollViewer.CaptureMouse();
+        e.Handled = true;
+    }
+
+    private void MonitorTopologyScrollViewer_PreviewMouseMove(
+        object sender,
+        System.Windows.Input.MouseEventArgs e)
+    {
+        if (!_topologyPanning)
+            return;
+        if (e.RightButton != MouseButtonState.Pressed
+            && e.MiddleButton != MouseButtonState.Pressed)
+        {
+            EndMonitorTopologyPan();
+            return;
+        }
+
+        System.Windows.Point current =
+            e.GetPosition(MonitorTopologyScrollViewer);
+        MonitorTopologyScrollViewer.ScrollToHorizontalOffset(
+            _topologyPanHorizontalOffset
+            - (current.X - _topologyPanStart.X));
+        MonitorTopologyScrollViewer.ScrollToVerticalOffset(
+            _topologyPanVerticalOffset
+            - (current.Y - _topologyPanStart.Y));
+        e.Handled = true;
+    }
+
+    private void MonitorTopologyScrollViewer_PreviewMouseUp(
+        object sender,
+        MouseButtonEventArgs e)
+    {
+        if (!_topologyPanning
+            || e.ChangedButton
+                is not (MouseButton.Right or MouseButton.Middle))
+        {
+            return;
+        }
+        EndMonitorTopologyPan();
+        e.Handled = true;
+    }
+
+    private void MonitorTopologyScrollViewer_MouseLeave(
+        object sender,
+        System.Windows.Input.MouseEventArgs e)
+    {
+        if (_topologyPanning
+            && e.RightButton != MouseButtonState.Pressed
+            && e.MiddleButton != MouseButtonState.Pressed)
+        {
+            EndMonitorTopologyPan();
+        }
+    }
+
+    private void EndMonitorTopologyPan()
+    {
+        _topologyPanning = false;
+        MonitorTopologyScrollViewer.ReleaseMouseCapture();
+        MonitorTopologyScrollViewer.Cursor = WpfCursors.Arrow;
+    }
+
+    private void FitMonitorTopologyButton_Click(
+        object sender,
+        RoutedEventArgs e)
+    {
+        _topologyAutoFit = true;
+        QueueMonitorTopologyFit();
+    }
+
+    private void QueueMonitorTopologyFit()
+    {
+        if (_topologyFitQueued)
+            return;
+        _topologyFitQueued = true;
+        Dispatcher.BeginInvoke(
+            DispatcherPriority.Loaded,
+            () =>
+            {
+                _topologyFitQueued = false;
+                if (_topologyAutoFit)
+                    FitMonitorTopology();
+            });
+    }
+
+    private void FitMonitorTopology()
+    {
+        double viewportWidth =
+            MonitorTopologyScrollViewer.ActualWidth;
+        double viewportHeight =
+            MonitorTopologyScrollViewer.ActualHeight;
+        if (viewportWidth < 40
+            || viewportHeight < 40
+            || MonitorTopologyCanvas.Width <= 0
+            || MonitorTopologyCanvas.Height <= 0)
+        {
+            return;
+        }
+
+        const double breathingRoom = 0.965;
+        double fit = Math.Min(
+            viewportWidth / MonitorTopologyCanvas.Width,
+            viewportHeight / MonitorTopologyCanvas.Height)
+            * breathingRoom;
+        SetMonitorTopologyZoom(
+            Math.Clamp(fit, MinimumTopologyZoom, 2.0));
+        Dispatcher.BeginInvoke(
+            DispatcherPriority.Loaded,
+            () =>
+            {
+                MonitorTopologyScrollViewer.UpdateLayout();
+                MonitorTopologyScrollViewer.ScrollToHorizontalOffset(
+                    Math.Max(
+                        0,
+                        (MonitorTopologyScrollViewer.ExtentWidth
+                         - MonitorTopologyScrollViewer.ViewportWidth)
+                        * 0.5));
+                MonitorTopologyScrollViewer.ScrollToVerticalOffset(
+                    Math.Max(
+                        0,
+                        (MonitorTopologyScrollViewer.ExtentHeight
+                         - MonitorTopologyScrollViewer.ViewportHeight)
+                        * 0.5));
+            });
+    }
+
+    private void SetMonitorTopologyZoom(double zoom)
+    {
+        _topologyZoom = Math.Clamp(
+            zoom,
+            MinimumTopologyZoom,
+            3.0);
+        MonitorTopologyScaleTransform.ScaleX = _topologyZoom;
+        MonitorTopologyScaleTransform.ScaleY = _topologyZoom;
+    }
+
+    private void VirtualMonitorDragHandle_MouseLeftButtonDown(
+        object sender,
+        MouseButtonEventArgs e)
+    {
+        if (_loading
+            || _virtualMonitorVisual is null
+            || sender is not UIElement handle)
+        {
+            return;
+        }
+
+        _virtualMonitorDragging = true;
+        _topologyAutoFit = false;
+        _virtualMonitorDragStart =
+            e.GetPosition(MonitorTopologyCanvas);
+        _virtualMonitorDragLeft =
+            Canvas.GetLeft(_virtualMonitorVisual);
+        _virtualMonitorDragTop =
+            Canvas.GetTop(_virtualMonitorVisual);
+        handle.CaptureMouse();
+        e.Handled = true;
+    }
+
+    private void VirtualMonitorDragHandle_MouseMove(
+        object sender,
+        System.Windows.Input.MouseEventArgs e)
+    {
+        if (!_virtualMonitorDragging
+            || _virtualMonitorVisual is null)
+        {
+            return;
+        }
+        if (e.LeftButton != MouseButtonState.Pressed)
+        {
+            FinishVirtualMonitorDrag(sender as UIElement);
+            return;
+        }
+
+        System.Windows.Point current =
+            e.GetPosition(MonitorTopologyCanvas);
+        double left = _virtualMonitorDragLeft
+            + current.X - _virtualMonitorDragStart.X;
+        double top = _virtualMonitorDragTop
+            + current.Y - _virtualMonitorDragStart.Y;
+        ExpandMonitorTopologyForDrag(ref left, ref top);
+        Canvas.SetLeft(_virtualMonitorVisual, left);
+        Canvas.SetTop(_virtualMonitorVisual, top);
+        e.Handled = true;
+    }
+
+    private void VirtualMonitorDragHandle_MouseLeftButtonUp(
+        object sender,
+        MouseButtonEventArgs e)
+    {
+        if (!_virtualMonitorDragging)
+            return;
+        FinishVirtualMonitorDrag(sender as UIElement);
+        e.Handled = true;
+    }
+
+    private void VirtualMonitorDragHandle_LostMouseCapture(
+        object sender,
+        System.Windows.Input.MouseEventArgs e)
+    {
+        if (_virtualMonitorDragging)
+            FinishVirtualMonitorDrag(sender as UIElement);
+    }
+
+    private void ExpandMonitorTopologyForDrag(
+        ref double left,
+        ref double top)
+    {
+        if (_virtualMonitorVisual is null)
+            return;
+
+        const double expansion = 220;
+        if (left < TopologyPadding * 0.5)
+        {
+            foreach (UIElement child in MonitorTopologyCanvas.Children)
+                Canvas.SetLeft(child, Canvas.GetLeft(child) + expansion);
+            MonitorTopologyCanvas.Width += expansion;
+            _topologyOriginX -= expansion / TopologyDeviceScale;
+            _virtualMonitorDragLeft += expansion;
+            left += expansion;
+            MonitorTopologyScrollViewer.ScrollToHorizontalOffset(
+                MonitorTopologyScrollViewer.HorizontalOffset
+                + expansion * _topologyZoom);
+        }
+        if (top < TopologyPadding * 0.5)
+        {
+            foreach (UIElement child in MonitorTopologyCanvas.Children)
+                Canvas.SetTop(child, Canvas.GetTop(child) + expansion);
+            MonitorTopologyCanvas.Height += expansion;
+            _topologyOriginY -= expansion / TopologyDeviceScale;
+            _virtualMonitorDragTop += expansion;
+            top += expansion;
+            MonitorTopologyScrollViewer.ScrollToVerticalOffset(
+                MonitorTopologyScrollViewer.VerticalOffset
+                + expansion * _topologyZoom);
+        }
+        if (left + _virtualMonitorVisual.Width
+            > MonitorTopologyCanvas.Width - TopologyPadding * 0.5)
+        {
+            MonitorTopologyCanvas.Width += expansion;
+        }
+        if (top + _virtualMonitorVisual.Height
+            > MonitorTopologyCanvas.Height - TopologyPadding * 0.5)
+        {
+            MonitorTopologyCanvas.Height += expansion;
+        }
+    }
+
+    private void FinishVirtualMonitorDrag(UIElement? handle)
+    {
+        if (!_virtualMonitorDragging
+            || _virtualMonitorVisual is null)
+        {
+            return;
+        }
+        _virtualMonitorDragging = false;
+        handle?.ReleaseMouseCapture();
+
+        MonitorDescriptor? primary = _monitors
+            .FirstOrDefault(monitor =>
+                !monitor.IsVirtual && monitor.Primary)
+            ?? _monitors.FirstOrDefault(monitor => !monitor.IsVirtual);
+        if (primary is null)
+            return;
+
+        int logicalLeft = (int)Math.Round(
+            _topologyOriginX
+            + Canvas.GetLeft(_virtualMonitorVisual)
+            / TopologyDeviceScale);
+        int logicalTop = (int)Math.Round(
+            _topologyOriginY
+            + Canvas.GetTop(_virtualMonitorVisual)
+            / TopologyDeviceScale);
+        double previousOriginX = _topologyOriginX;
+        double previousOriginY = _topologyOriginY;
+        double previousHorizontalOffset =
+            MonitorTopologyScrollViewer.HorizontalOffset;
+        double previousVerticalOffset =
+            MonitorTopologyScrollViewer.VerticalOffset;
+        AppSettings current = ReadSettingsFromControls();
+        current.VirtualMonitorOffsetX =
+            logicalLeft - primary.Bounds.Left;
+        current.VirtualMonitorOffsetY =
+            logicalTop - primary.Bounds.Top;
+        RebuildOutputDevices(current);
+        double horizontalCorrection =
+            (previousOriginX - _topologyOriginX)
+            * TopologyDeviceScale
+            * _topologyZoom;
+        double verticalCorrection =
+            (previousOriginY - _topologyOriginY)
+            * TopologyDeviceScale
+            * _topologyZoom;
+        Dispatcher.BeginInvoke(
+            DispatcherPriority.Loaded,
+            () =>
+            {
+                MonitorTopologyScrollViewer.ScrollToHorizontalOffset(
+                    previousHorizontalOffset + horizontalCorrection);
+                MonitorTopologyScrollViewer.ScrollToVerticalOffset(
+                    previousVerticalOffset + verticalCorrection);
+            });
+    }
+
+    private void VirtualResolutionCombo_LostKeyboardFocus(
+        object sender,
+        KeyboardFocusChangedEventArgs e) =>
+        CommitVirtualResolution(
+            sender as ComboBox,
+            preferSelectedItem: false);
+
+    private void VirtualResolutionCombo_DropDownClosed(
+        object? sender,
+        EventArgs e)
+    {
+        if (_loading)
+            return;
+        CommitVirtualResolution(
+            sender as ComboBox,
+            preferSelectedItem: true);
+    }
+
+    private void VirtualResolutionCombo_PreviewKeyDown(
+        object sender,
+        KeyEventArgs e)
+    {
+        if (e.Key != Key.Enter)
+            return;
+        CommitVirtualResolution(
+            sender as ComboBox,
+            preferSelectedItem: false);
+        e.Handled = true;
+    }
+
+    private void VirtualResolutionCombo_PreviewMouseWheel(
+        object sender,
+        MouseWheelEventArgs e)
+    {
+        if (_loading
+            || sender is not ComboBox input
+            || !input.IsKeyboardFocusWithin)
+        {
+            return;
+        }
+        input.ApplyTemplate();
+        if (input.Template.FindName(
+                "PART_EditableTextBox",
+                input) is not TextBox editor
+            || !editor.IsKeyboardFocused)
+        {
+            return;
+        }
+
+        string originalText = editor.Text;
+        int originalCaret = Math.Clamp(
+            editor.CaretIndex,
+            0,
+            originalText.Length);
+        int digitIndex = FindTargetDigit(
+            originalText,
+            originalCaret);
+        if (digitIndex < 0
+            || !int.TryParse(
+                originalText,
+                NumberStyles.Integer,
+                CultureInfo.CurrentCulture,
+                out int current))
+        {
+            return;
+        }
+
+        bool width = ReferenceEquals(
+            input,
+            _virtualMonitorWidthCombo);
+        int minimum = width ? 320 : 180;
+        int maximum = width ? 7680 : 4320;
+        int exponent = Math.Max(
+            0,
+            DigitExponent(originalText, digitIndex));
+        int step = (int)Math.Pow(10, Math.Min(3, exponent));
+        int next = Math.Clamp(
+            current + (e.Delta > 0 ? step : -step),
+            minimum,
+            maximum);
+        string nextText = next.ToString(
+            CultureInfo.InvariantCulture);
+        editor.Text = nextText;
+        input.Text = nextText;
+        editor.CaretIndex = originalCaret >= originalText.Length
+            ? nextText.Length
+            : Math.Min(originalCaret, nextText.Length);
+        if (width)
+            VirtualOutputWidthSlider.Value = next;
+        else
+            VirtualOutputHeightSlider.Value = next;
+        _virtualResolutionTimer.Stop();
+        _virtualResolutionTimer.Start();
+        e.Handled = true;
+    }
+
+    private bool IsFocusedVirtualResolutionInput(
+        DependencyObject origin)
+    {
+        DependencyObject? current = origin;
+        while (current is not null
+               && !ReferenceEquals(
+                   current,
+                   MonitorTopologyScrollViewer))
+        {
+            if (ReferenceEquals(
+                    current,
+                    _virtualMonitorWidthCombo)
+                || ReferenceEquals(
+                    current,
+                    _virtualMonitorHeightCombo))
+            {
+                return current is ComboBox input
+                    && input.IsKeyboardFocusWithin;
+            }
+            current = VisualTreeHelper.GetParent(current);
+        }
+        return false;
+    }
+
+    private void CommitVirtualResolution(
+        ComboBox? input,
+        bool preferSelectedItem)
+    {
+        if (_loading || input is null)
+            return;
+        _virtualResolutionTimer.Stop();
+        bool width = ReferenceEquals(
+            input,
+            _virtualMonitorWidthCombo);
+        int fallback = width
+            ? (int)Math.Round(VirtualOutputWidthSlider.Value)
+            : (int)Math.Round(VirtualOutputHeightSlider.Value);
+        int minimum = width ? 320 : 180;
+        int maximum = width ? 7680 : 4320;
+        string valueText = preferSelectedItem
+            && input.SelectedItem is ComboBoxItem item
+            ? item.Content?.ToString() ?? input.Text
+            : input.Text;
+        int parsed = int.TryParse(
+            valueText,
+            NumberStyles.Integer,
+            CultureInfo.CurrentCulture,
+            out int value)
+                ? Math.Clamp(value, minimum, maximum)
+                : fallback;
+        input.Text = parsed.ToString(CultureInfo.InvariantCulture);
+        if (width)
+        {
+            VirtualOutputWidthSlider.Value = parsed;
+        }
+        else
+        {
+            VirtualOutputHeightSlider.Value = parsed;
+        }
+        RebuildOutputDevices(ReadSettingsFromControls());
+    }
+
+    private void VirtualResolutionTimer_Tick(
+        object? sender,
+        EventArgs e)
+    {
+        _virtualResolutionTimer.Stop();
         if (!_loading)
-            RefreshMonitorVisuals();
+            RebuildOutputDevices(ReadSettingsFromControls());
+    }
+
+    private void RebuildOutputDevices(
+        AppSettings current,
+        bool selectVirtual = false)
+    {
+        current.Normalize();
+        _monitors = OutputDeviceCatalog.Capture(current);
+        MonitorTopology.EnsureProfiles(current, _monitors);
+        _draftSettings = current.Copy();
+        if (selectVirtual
+            && _monitors.Any(monitor => monitor.IsVirtual))
+        {
+            _selectedMonitorId = OutputDeviceCatalog.VirtualMonitorId;
+        }
+        EnsureSelectedMonitor();
+        LoadSettingsCore(current, preserveAppliedSettings: true);
+        PublishTopologyPreview();
+    }
+
+    private void MonitorOutputWindowButton_Click(
+        object sender,
+        RoutedEventArgs e)
+    {
+        e.Handled = true;
+        if (_loading
+            || sender is not FrameworkElement { Tag: string monitorId })
+        {
+            return;
+        }
+
+        AppSettings requested = ReadSettingsFromControls();
+        string previousSource =
+            requested.VirtualOutputSourceMonitorId;
+        bool closesCurrent =
+            _openOutputMonitorIds.Contains(monitorId);
+        requested.VirtualOutputSourceMonitorId = monitorId;
+        _draftSettings = requested.Copy();
+        if (!closesCurrent)
+        {
+            AppSettings visualPreview = requested.Copy();
+            visualPreview.VirtualOutputSourceMonitorId =
+                previousSource;
+            SettingsPreviewed?.Invoke(visualPreview);
+        }
+        VirtualOutputRequested?.Invoke(requested, !closesCurrent);
+        StatusText.Text = closesCurrent
+            ? "ОКНО ПОТОКА ЗАКРЫВАЕТСЯ"
+            : "КОПИЯ ПОТОКА ОТКРЫВАЕТСЯ В ОТДЕЛЬНОМ ОКНЕ";
+        RefreshMonitorVisuals();
     }
 
     private void MonitorVisual_MouseLeftButtonDown(
         object sender,
         MouseButtonEventArgs e)
     {
+        if (IsInteractiveMonitorChild(
+                e.OriginalSource as DependencyObject,
+                sender as DependencyObject))
+        {
+            return;
+        }
         e.Handled = true;
         if (_loading
             || sender is not FrameworkElement { Tag: string monitorId }
@@ -1019,6 +1797,25 @@ public partial class SettingsWindow : Window
         _draftSettings = ReadSettingsFromControls();
         _selectedMonitorId = monitorId;
         LoadSettingsCore(_draftSettings, preserveAppliedSettings: true);
+    }
+
+    private static bool IsInteractiveMonitorChild(
+        DependencyObject? origin,
+        DependencyObject? monitorVisual)
+    {
+        DependencyObject? current = origin;
+        while (current is not null
+               && !ReferenceEquals(current, monitorVisual))
+        {
+            if (current is ComboBox
+                or TextBox
+                or System.Windows.Controls.Button)
+            {
+                return true;
+            }
+            current = VisualTreeHelper.GetParent(current);
+        }
+        return false;
     }
 
     private List<MonitorRouteChoice> CreateRouteChoices(
@@ -1048,7 +1845,8 @@ public partial class SettingsWindow : Window
                      !string.Equals(
                          monitor.Id,
                          selectedMonitorId,
-                         StringComparison.OrdinalIgnoreCase)))
+                         StringComparison.OrdinalIgnoreCase)
+                     && IsRouteSourceAvailable(monitor.Id, domain)))
         {
             result.Add(new MonitorRouteChoice
             {
@@ -1061,7 +1859,8 @@ public partial class SettingsWindow : Window
                      !string.Equals(
                          monitor.Id,
                          selectedMonitorId,
-                         StringComparison.OrdinalIgnoreCase)))
+                         StringComparison.OrdinalIgnoreCase)
+                     && IsRouteSourceAvailable(monitor.Id, domain)))
         {
             result.Add(new MonitorRouteChoice
             {
@@ -1071,6 +1870,20 @@ public partial class SettingsWindow : Window
             });
         }
         return result;
+    }
+
+    private bool IsRouteSourceAvailable(
+        string monitorId,
+        MonitorRouteDomain domain)
+    {
+        MonitorProfile? profile = MonitorTopology.Find(
+            _draftSettings.MonitorProfiles,
+            monitorId);
+        if (profile is null)
+            return false;
+        return domain == MonitorRouteDomain.Flow
+            ? profile.FlowMode != MonitorLinkMode.Disabled
+            : profile.DatabaseMode != MonitorLinkMode.Disabled;
     }
 
     private static MonitorRouteChoice? MatchRouteChoice(
@@ -1120,6 +1933,19 @@ public partial class SettingsWindow : Window
             _selectedMonitorId,
             choice.Mode,
             choice.SourceMonitorId);
+        if (domain == MonitorRouteDomain.Flow
+            && OutputDeviceCatalog.IsVirtual(_selectedMonitorId))
+        {
+            current.VirtualMonitorEnabled =
+                choice.Mode != MonitorLinkMode.Disabled;
+            if (!current.VirtualMonitorEnabled
+                && _openOutputMonitorIds.Contains(_selectedMonitorId))
+            {
+                current.VirtualOutputSourceMonitorId =
+                    _selectedMonitorId;
+                VirtualOutputRequested?.Invoke(current, false);
+            }
+        }
         LoadSettingsCore(current, preserveAppliedSettings: true);
         PublishTopologyPreview();
     }
@@ -1157,6 +1983,7 @@ public partial class SettingsWindow : Window
 
     private void PublishTopologyPreview()
     {
+        _virtualResolutionTimer.Stop();
         _previewTimer.Stop();
         _fontPreviewTimer.Stop();
         _colorPreviewTimer.Stop();
@@ -1515,9 +2342,21 @@ public partial class SettingsWindow : Window
         OperatorPreset preset,
         AppSettings current)
     {
-        IReadOnlyList<MonitorDescriptor> monitors = _monitors.Count > 0
-            ? _monitors
-            : MonitorCatalog.Capture();
+        AppSettings topology = current.Copy();
+        topology.VirtualMonitorEnabled =
+            preset.Settings.VirtualMonitorEnabled;
+        topology.VirtualOutputWidth =
+            preset.Settings.VirtualOutputWidth;
+        topology.VirtualOutputHeight =
+            preset.Settings.VirtualOutputHeight;
+        topology.VirtualMonitorOffsetX =
+            preset.Settings.VirtualMonitorOffsetX;
+        topology.VirtualMonitorOffsetY =
+            preset.Settings.VirtualMonitorOffsetY;
+        topology.VirtualMonitorDock =
+            preset.Settings.VirtualMonitorDock;
+        IReadOnlyList<MonitorDescriptor> monitors =
+            OutputDeviceCatalog.Capture(topology);
         AppSettings result = MonitorPresetAdapter.Adapt(
             preset.Settings,
             current,
@@ -1533,9 +2372,8 @@ public partial class SettingsWindow : Window
         BuiltInPreset preset,
         AppSettings current)
     {
-        IReadOnlyList<MonitorDescriptor> monitors = _monitors.Count > 0
-            ? _monitors
-            : MonitorCatalog.Capture();
+        IReadOnlyList<MonitorDescriptor> monitors =
+            OutputDeviceCatalog.Capture(current);
         AppSettings result = BuiltInPresetCatalog.Apply(
             preset,
             current,
@@ -1595,9 +2433,8 @@ public partial class SettingsWindow : Window
         AppSettings settings,
         OperatorPreset preset)
     {
-        IReadOnlyList<MonitorDescriptor> monitors = _monitors.Count > 0
-            ? _monitors
-            : MonitorCatalog.Capture();
+        IReadOnlyList<MonitorDescriptor> monitors =
+            OutputDeviceCatalog.Capture(settings);
         AppSettings baseline = MonitorPresetAdapter.Adapt(
             preset.Settings,
             settings,
@@ -1617,9 +2454,8 @@ public partial class SettingsWindow : Window
         AppSettings settings,
         BuiltInPreset preset)
     {
-        IReadOnlyList<MonitorDescriptor> monitors = _monitors.Count > 0
-            ? _monitors
-            : MonitorCatalog.Capture();
+        IReadOnlyList<MonitorDescriptor> monitors =
+            OutputDeviceCatalog.Capture(settings);
         AppSettings baseline = BuiltInPresetCatalog.Apply(
             preset,
             settings,
@@ -2130,27 +2966,6 @@ public partial class SettingsWindow : Window
             : "ПОТОК ВОЗОБНОВЛЁН";
     }
 
-    private void VirtualOutputButton_Click(
-        object sender,
-        RoutedEventArgs e)
-    {
-        if (HasInvalidNumericInput())
-        {
-            StatusText.Text =
-                "ВИРТУАЛЬНЫЙ ВЫХОД НЕ ИЗМЕНЁН // ПРОВЕРЬТЕ ЧИСЛОВЫЕ ПОЛЯ";
-            return;
-        }
-        CommitNumericInput(VirtualOutputWidthInput);
-        CommitNumericInput(VirtualOutputHeightInput);
-        bool open = !_virtualOutputOpen;
-        VirtualOutputRequested?.Invoke(
-            ReadSettingsFromControls(),
-            open);
-        StatusText.Text = open
-            ? "ВИРТУАЛЬНЫЙ ВЫХОД ЗАПУСКАЕТСЯ"
-            : "ВИРТУАЛЬНЫЙ ВЫХОД ЗАКРЫВАЕТСЯ";
-    }
-
     private void TestAttackButton_Click(
         object sender,
         RoutedEventArgs e)
@@ -2265,10 +3080,6 @@ public partial class SettingsWindow : Window
                 AttackTransitionSecondsSlider.Value =
                     standard.AttackTransitionSeconds;
                 break;
-            case "VirtualOutputSource":
-                RefreshVirtualOutputSourceChoices(
-                    standard.VirtualOutputSourceMonitorId);
-                break;
             case "VirtualOutputWidth":
                 VirtualOutputWidthSlider.Value =
                     standard.VirtualOutputWidth;
@@ -2276,11 +3087,6 @@ public partial class SettingsWindow : Window
             case "VirtualOutputHeight":
                 VirtualOutputHeightSlider.Value =
                     standard.VirtualOutputHeight;
-                break;
-            case "VirtualOutputFit":
-                SelectByTag(
-                    VirtualOutputFitCombo,
-                    standard.VirtualOutputFit);
                 break;
             case "CurrentContour":
                 ResetCurrentContour(standard);
@@ -2968,6 +3774,7 @@ public partial class SettingsWindow : Window
 
     private void DiscardPreview()
     {
+        _virtualResolutionTimer.Stop();
         _previewTimer.Stop();
         _fontPreviewTimer.Stop();
         _colorPreviewTimer.Stop();
@@ -3064,8 +3871,6 @@ public partial class SettingsWindow : Window
         yield return ImageToneCalmnessInput;
         yield return AttackIdleMinutesInput;
         yield return AttackTransitionSecondsInput;
-        yield return VirtualOutputWidthInput;
-        yield return VirtualOutputHeightInput;
     }
 
     private void NumericInput_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
@@ -3178,8 +3983,6 @@ public partial class SettingsWindow : Window
         CommitNumericInput(ImageToneCalmnessInput);
         CommitNumericInput(AttackIdleMinutesInput);
         CommitNumericInput(AttackTransitionSecondsInput);
-        CommitNumericInput(VirtualOutputWidthInput);
-        CommitNumericInput(VirtualOutputHeightInput);
     }
 
     private void CommitNumericInput(TextBox input)
@@ -3307,18 +4110,6 @@ public partial class SettingsWindow : Window
             "0.#",
             AppSettings.MinimumAttackTransitionSeconds,
             AppSettings.MaximumAttackTransitionSeconds),
-        "VirtualOutputWidth" => new NumericInputSpec(
-            VirtualOutputWidthSlider,
-            1,
-            "0",
-            320,
-            7680),
-        "VirtualOutputHeight" => new NumericInputSpec(
-            VirtualOutputHeightSlider,
-            1,
-            "0",
-            180,
-            4320),
         _ => null
     };
 
@@ -3575,16 +4366,6 @@ public partial class SettingsWindow : Window
             AttackTransitionSecondsInput,
             _attackTransitionSecondsValue,
             "0.#",
-            force);
-        UpdateNumericInput(
-            VirtualOutputWidthInput,
-            VirtualOutputWidthSlider.Value,
-            "0",
-            force);
-        UpdateNumericInput(
-            VirtualOutputHeightInput,
-            VirtualOutputHeightSlider.Value,
-            "0",
             force);
         UpdateNumericInput(CalibrationDensityInput, DensitySlider.Value * 100, "0.#", force);
         UpdateNumericInput(CalibrationTrailMinInput, TrailMinSlider.Value * 100, "0.#", force);
