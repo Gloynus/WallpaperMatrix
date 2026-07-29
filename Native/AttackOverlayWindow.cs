@@ -43,7 +43,10 @@ internal sealed class AttackOverlayWindow : IDisposable
         _bounds = bounds;
         _scene = frame.PrimaryScene;
         _presentations = frame.Presentations.ToArray();
-        _transitionSeconds = Math.Clamp(transitionSeconds, 1.0, 30.0);
+        _transitionSeconds = Math.Clamp(
+            transitionSeconds,
+            AppSettings.MinimumAttackTransitionSeconds,
+            AppSettings.MaximumAttackTransitionSeconds);
         _existingStreamCutoff = frame.LatestStreamId;
         _thread = new Thread(RenderThreadMain)
         {
@@ -271,11 +274,18 @@ internal sealed class AttackOverlayWindow : IDisposable
     private double AttackDesktopOpacity(double elapsedSeconds)
     {
         const double revealDelay = 0.35;
+        double fadeSeconds = Math.Max(
+            0.001,
+            _transitionSeconds - revealDelay);
         double progress = Math.Clamp(
-            (elapsedSeconds - revealDelay) / _transitionSeconds,
+            (elapsedSeconds - revealDelay) / fadeSeconds,
             0,
             1);
-        return 1.0 - SmoothStep(progress);
+        // This timer controls only the uniform desktop veil. Stream generation,
+        // motion, image deposits and cell fading continue on their own clocks.
+        // A linear alpha makes the operator value the literal time during which
+        // the interface remains visibly in transition.
+        return 1.0 - progress;
     }
 
     private static double SmoothStep(double value) =>

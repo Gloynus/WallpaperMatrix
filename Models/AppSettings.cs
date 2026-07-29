@@ -8,8 +8,10 @@ public sealed class AppSettings
     public const double MaximumManualSpeed = 10.0;
     public const double MinimumImageDurationSeconds = 0.1;
     public const double MaximumImageDurationSeconds = 600.0;
+    public const double MinimumAttackTransitionSeconds = 1.0;
+    public const double MaximumAttackTransitionSeconds = 600.0;
 
-    public int SettingsVersion { get; set; } = 31;
+    public int SettingsVersion { get; set; } = 32;
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public double Speed { get; set; }
     public double SpeedMin { get; set; } = 0.20;
@@ -91,18 +93,11 @@ public sealed class AppSettings
     public double ImageToneCalmness { get; set; }
     public string ImageStructureMode { get; set; } = "Tonal";
 
-    public bool ClockEnabled { get; set; }
-    public string ClockPosition { get; set; } = "Top";
-    public int ClockHorizontalMarginCells { get; set; } = 2;
-    public int ClockVerticalMarginCells { get; set; } = 2;
-    public double ClockBrightness { get; set; } = 0.55;
-    public double ClockWeight { get; set; } = 1.0;
-
     public bool StartWithWindows { get; set; }
     public bool PauseDuringFullscreenApps { get; set; } = true;
     public bool AttackSystemEnabled { get; set; }
     public double AttackIdleMinutes { get; set; } = 10.0;
-    public double AttackTransitionSeconds { get; set; } = 8.0;
+    public double AttackTransitionSeconds { get; set; } = 30.0;
     public bool WelcomeShown { get; set; }
     public string ActivePresetId { get; set; } = "";
     public List<MonitorProfile> MonitorProfiles { get; set; } = [];
@@ -175,12 +170,6 @@ public sealed class AppSettings
         ImagePaletteAdaptation = ImagePaletteAdaptation,
         ImageToneCalmness = ImageToneCalmness,
         ImageStructureMode = ImageStructureMode,
-        ClockEnabled = ClockEnabled,
-        ClockPosition = ClockPosition,
-        ClockHorizontalMarginCells = ClockHorizontalMarginCells,
-        ClockVerticalMarginCells = ClockVerticalMarginCells,
-        ClockBrightness = ClockBrightness,
-        ClockWeight = ClockWeight,
         StartWithWindows = StartWithWindows,
         PauseDuringFullscreenApps = PauseDuringFullscreenApps,
         AttackSystemEnabled = AttackSystemEnabled,
@@ -228,15 +217,10 @@ public sealed class AppSettings
         {
             HeadBrightness = 0.72;
             HeadWeight = 0.34;
-            ClockPosition = "TopRight";
-            ClockHorizontalMarginCells = 2;
-            ClockVerticalMarginCells = 2;
             SettingsVersion = 6;
         }
         if (SettingsVersion < 7)
         {
-            ClockBrightness = 0.5;
-            ClockWeight = 0;
             SettingsVersion = 7;
         }
         if (SettingsVersion < 8)
@@ -470,6 +454,8 @@ public sealed class AppSettings
             SettingsVersion = 30;
         if (SettingsVersion < 31)
             SettingsVersion = 31;
+        if (SettingsVersion < 32)
+            SettingsVersion = 32;
         SpeedMin = Math.Clamp(
             SpeedMin,
             MinimumSpeed,
@@ -590,19 +576,11 @@ public sealed class AppSettings
             ActiveImagePlaylistId = ImagePlaylists[0].Id;
         }
         ImageFit = ImageFit is "Fill" or "Uniform" ? ImageFit : "Uniform";
-        ClockPosition = ClockPosition is "Top" or "TopRight" or "Right" or "BottomRight"
-            or "Bottom" or "BottomLeft" or "Left" or "TopLeft"
-            ? ClockPosition
-            : "TopRight";
-        ClockHorizontalMarginCells = Math.Clamp(ClockHorizontalMarginCells, 0, 100);
-        ClockVerticalMarginCells = Math.Clamp(ClockVerticalMarginCells, 0, 100);
-        ClockBrightness = Math.Clamp(ClockBrightness, 0.5, 1.0);
-        ClockWeight = Math.Clamp(ClockWeight, 0.0, 1.0);
         AttackIdleMinutes = Math.Clamp(AttackIdleMinutes, 1.0, 1440.0);
         AttackTransitionSeconds = Math.Clamp(
             AttackTransitionSeconds,
-            1.0,
-            30.0);
+            MinimumAttackTransitionSeconds,
+            MaximumAttackTransitionSeconds);
         ActivePresetId = ActivePresetId?.Trim() ?? "";
         OperatorPlaylistId = OperatorPlaylistId?.Trim() ?? "";
         OperatorPlaylistName = OperatorPlaylistName?.Trim() ?? "";

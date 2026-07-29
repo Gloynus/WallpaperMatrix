@@ -93,10 +93,6 @@ internal static class GlyphAtlasBuilder
                 baseWeight + (int)Math.Round(settings.HeadWeight * 300),
                 100,
                 900);
-            int clockWeight = Math.Clamp(
-                baseWeight + (int)Math.Round(settings.ClockWeight * 300),
-                100,
-                900);
             int imageLightWeight = Math.Clamp(baseWeight - 200, 100, 900);
             int imageBoldWeight = Math.Clamp(baseWeight + 200, 100, 900);
             foreach (string family in BuildFontChain(settings.FontFamily))
@@ -104,12 +100,10 @@ internal static class GlyphAtlasBuilder
                 FontStyleSet set = new(
                     CreateFont(pixelHeight, pixelWidth, baseWeight, family),
                     CreateFont(pixelHeight, pixelWidth, headWeight, family),
-                    CreateFont(pixelHeight, pixelWidth, clockWeight, family),
                     CreateFont(pixelHeight, pixelWidth, imageLightWeight, family),
                     CreateFont(pixelHeight, pixelWidth, imageBoldWeight, family));
                 if (set.Normal != IntPtr.Zero
                     && set.Head != IntPtr.Zero
-                    && set.Clock != IntPtr.Zero
                     && set.ImageLight != IntPtr.Zero
                     && set.ImageBold != IntPtr.Zero)
                 {
@@ -140,7 +134,9 @@ internal static class GlyphAtlasBuilder
                 cellHeight);
             DrawStyle(
                 memoryDc,
-                fonts.Select(set => set.Clock).ToArray(),
+                // Atlas row 2 stays reserved for backwards-compatible style
+                // numbering; the removed clock feature no longer owns a font.
+                fonts.Select(set => set.Normal).ToArray(),
                 glyphFontIndices,
                 style: 2,
                 cellWidth,
@@ -440,8 +436,6 @@ internal static class GlyphAtlasBuilder
             NativeMethods.DeleteObject(set.Normal);
         if (set.Head != IntPtr.Zero)
             NativeMethods.DeleteObject(set.Head);
-        if (set.Clock != IntPtr.Zero)
-            NativeMethods.DeleteObject(set.Clock);
         if (set.ImageLight != IntPtr.Zero)
             NativeMethods.DeleteObject(set.ImageLight);
         if (set.ImageBold != IntPtr.Zero)
@@ -472,7 +466,6 @@ internal static class GlyphAtlasBuilder
     private readonly record struct FontStyleSet(
         IntPtr Normal,
         IntPtr Head,
-        IntPtr Clock,
         IntPtr ImageLight,
         IntPtr ImageBold);
 }

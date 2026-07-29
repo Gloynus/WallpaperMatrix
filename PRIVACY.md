@@ -1,31 +1,36 @@
 # Privacy policy
 
-Wallpaper Matrix does not collect telemetry, analytics, advertising identifiers
-or crash reports. It does not contain application networking code and does not
-send files, settings, diagnostics, process information, screenshots or image
-contents to the author or any other service.
+Wallpaper Matrix does not collect telemetry, analytics, advertising
+identifiers or crash reports. The application contains no feature that sends
+settings, diagnostics, process information, screenshots, image contents or
+personal data to the author or another service.
 
 **This program will not transfer any information to other networked systems
-unless specifically requested by the user or the person installing or operating
-it.**
+unless specifically requested by the user or the person installing or
+operating it.**
 
-The application processes only local information required for its functions:
+The application reads only local information required for its functions:
 
-- monitor layout and desktop-window state;
+- monitor identities, geometry and desktop-window state;
 - user-selected image files and folders;
 - installed font information;
-- foreground/full-screen application state for the optional game pause;
-- a transient desktop capture for the optional “АТАКА СИСТЕМЫ” transition.
+- foreground and full-screen application state for the optional game pause;
+- keyboard and mouse idle time for the optional “АТАКА СИСТЕМЫ” mode.
 
-The transition capture exists only in process and graphics memory and is not
-written to disk. Settings, playlists, presets and diagnostics are stored locally
-in the `OperatorData` folder next to the executable. Source images are never
-modified.
+“АТАКА СИСТЕМЫ” does not capture, save or analyse the visual contents of the
+desktop. It presents the already-running Matrix scene on a transparent
+top-level surface and gradually replaces uncovered areas with the configured
+background.
 
-Wallpaper Matrix opens an image in the Windows-associated viewer or opens the
-user's mail application only after an explicit user action. Those external
-applications have their own privacy behavior.
+Settings, playlists, presets and diagnostics are stored locally in the
+`OperatorData` folder next to the executable. Source images are never modified.
+The diagnostic log may contain local file paths and should be reviewed before
+it is shared publicly.
 
-The optional autostart setting creates or removes only the current user's
+Wallpaper Matrix opens an image in the Windows-associated viewer or copies the
+author’s email address only after an explicit user action. External
+applications have their own privacy behaviour.
+
+The optional autostart setting creates or removes only the current user’s
 Wallpaper Matrix entry in the Windows `Run` registry key. No service, driver,
 scheduled task or system-wide component is installed.

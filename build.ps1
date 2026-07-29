@@ -47,6 +47,9 @@ if ($LASTEXITCODE -ne 0) {
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "PORTABLE-README.txt") `
     -Destination (Join-Path $OutputPath "README.txt") `
     -Force
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot "REFERENCE.md") `
+    -Destination (Join-Path $OutputPath "OPERATOR-REFERENCE.txt") `
+    -Force
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "THIRD-PARTY-NOTICES.txt") `
     -Destination (Join-Path $OutputPath "THIRD-PARTY-NOTICES.txt") `
     -Force

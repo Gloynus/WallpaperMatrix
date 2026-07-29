@@ -147,19 +147,44 @@ internal sealed class NativeWallpaperWindow : IDisposable
 
     public void SetPaused(bool paused)
     {
+        SetPausedCore(paused, changeVisibility: true);
+    }
+
+    public void SetSimulationPaused(bool paused)
+    {
+        SetPausedCore(paused, changeVisibility: false);
+    }
+
+    public void SetMotionScale(double scale)
+    {
+        lock (_runtimeLock)
+        {
+            foreach (SceneRuntime runtime in _sceneRuntimes)
+                runtime.Renderer.SetMotionScale(scale);
+        }
+    }
+
+    private void SetPausedCore(bool paused, bool changeVisibility)
+    {
         Volatile.Write(ref _paused, paused ? 1 : 0);
         if (paused)
         {
             _renderingEnabled.Reset();
-            IntPtr window = _window;
-            if (window != IntPtr.Zero)
-                NativeWindow.ShowWindowAsync(window, NativeWindow.ShowHide);
+            if (changeVisibility)
+            {
+                IntPtr window = _window;
+                if (window != IntPtr.Zero)
+                    NativeWindow.ShowWindowAsync(window, NativeWindow.ShowHide);
+            }
         }
         else
         {
-            IntPtr window = _window;
-            if (window != IntPtr.Zero)
-                NativeWindow.ShowWindowAsync(window, NativeWindow.ShowNoActivate);
+            if (changeVisibility)
+            {
+                IntPtr window = _window;
+                if (window != IntPtr.Zero)
+                    NativeWindow.ShowWindowAsync(window, NativeWindow.ShowNoActivate);
+            }
             _renderingEnabled.Set();
         }
     }
@@ -180,9 +205,17 @@ internal sealed class NativeWallpaperWindow : IDisposable
                     + "рабочего стола.");
             }
             foreach (MonitorScenePlan scenePlan in _currentPlan.Scenes)
-                _sceneRuntimes.Add(CreateSceneRuntime(scenePlan));
+            {
+                _sceneRuntimes.Add(CreateSceneRuntime(
+                    scenePlan,
+                    seedInitialStreams:
+                        scenePlan.IsFlowMaster && !_animateStartupReveal));
+            }
             if (_sceneRuntimes.Count == 0)
                 _sceneRuntimes.Add(CreateDisabledRuntime());
+            ConfigureFlowSharing(_sceneRuntimes);
+            _sceneRuntimes.Sort(static (left, right) =>
+                right.IsFlowMaster.CompareTo(left.IsFlowMaster));
             _direct3DPresenter = Direct3D11Presenter.Create(
                 _window,
                 _bounds.Width,
@@ -482,7 +515,45 @@ internal sealed class NativeWallpaperWindow : IDisposable
                         scenePlan.Id,
                         out SceneRuntime? runtime))
                 {
-                    runtime = CreateSceneRuntime(scenePlan);
+                    runtime = existing.Values.FirstOrDefault(candidate =>
+                        candidate.CanReuseFor(scenePlan));
+                    if (runtime is not null)
+                    {
+                        existing.Remove(runtime.Id);
+                        reused.Add((runtime, scenePlan));
+                        next.Add(runtime);
+                        continue;
+                    }
+
+                    SceneRuntime? transferSource = scenePlan.IsFlowMaster
+                        ? existing.Values.FirstOrDefault(candidate =>
+                            candidate.IsFlowMaster
+                            && string.Equals(
+                                candidate.FlowRootMonitorId,
+                                scenePlan.FlowRootMonitorId,
+                                StringComparison.OrdinalIgnoreCase))
+                        : null;
+                    transferSource ??= existing.Values.FirstOrDefault(
+                        candidate =>
+                            candidate.TargetMonitorIds.Overlaps(
+                                scenePlan.Targets.Select(
+                                    target => target.MonitorId)));
+                    runtime = CreateSceneRuntime(
+                        scenePlan,
+                        seedInitialStreams: transferSource is null
+                            && scenePlan.IsFlowMaster);
+                    if (transferSource is not null)
+                    {
+                        runtime.Renderer.ImportStateFrom(
+                            transferSource.Renderer,
+                            transferSource.CanvasBounds,
+                            scenePlan.CanvasBounds);
+                        DiagnosticLog.Write(
+                            $"Состояние потока перенесено без повторного запуска: "
+                            + $"root={scenePlan.FlowRootMonitorId}; "
+                            + $"from={transferSource.CanvasBounds}; "
+                            + $"to={scenePlan.CanvasBounds}.");
+                    }
                     created.Add(runtime);
                 }
                 else
@@ -513,6 +584,11 @@ internal sealed class NativeWallpaperWindow : IDisposable
 
         foreach ((SceneRuntime runtime, MonitorScenePlan scenePlan) in reused)
             UpdateSceneRuntime(runtime, scenePlan);
+        ConfigureFlowSharing(next);
+        foreach (SceneRuntime runtime in next)
+            runtime.Renderer.RefreshPublishedScene();
+        next.Sort(static (left, right) =>
+            right.IsFlowMaster.CompareTo(left.IsFlowMaster));
 
         lock (_runtimeLock)
         {
@@ -531,10 +607,13 @@ internal sealed class NativeWallpaperWindow : IDisposable
             $"Маршрутизация перестроена без пересоздания D3D11: "
             + $"renderer=0x{_window.ToInt64():X}; "
             + $"scenes={plan.Scenes.Count}; "
+            + $"flowGenerators={plan.Scenes.Count(scene => scene.IsFlowMaster)}; "
             + $"viewports={plan.ActiveMonitorCount}.");
     }
 
-    private SceneRuntime CreateSceneRuntime(MonitorScenePlan scenePlan)
+    private SceneRuntime CreateSceneRuntime(
+        MonitorScenePlan scenePlan,
+        bool seedInitialStreams = true)
     {
         SharedMatrixScene scene = new(
             Math.Max(1, scenePlan.CanvasBounds.Width),
@@ -543,10 +622,15 @@ internal sealed class NativeWallpaperWindow : IDisposable
             _window,
             scene,
             scenePlan.Settings,
-            scenePlan.RandomSeed);
+            scenePlan.RandomSeed,
+            seedInitialStreams);
         SceneRuntime runtime = new(
             scenePlan.Id,
+            scenePlan.FlowRootMonitorId,
+            scenePlan.IsFlowMaster,
             scenePlan.DatabaseRootMonitorId,
+            scenePlan.CanvasBounds,
+            scenePlan.Targets.Select(target => target.MonitorId),
             scenePlan.ImageProjection,
             scene,
             renderer,
@@ -564,6 +648,10 @@ internal sealed class NativeWallpaperWindow : IDisposable
         return new SceneRuntime(
             "DISABLED",
             "",
+            true,
+            "",
+            new DrawingRectangle(0, 0, 1, 1),
+            [],
             new MatrixImageProjection(
                 1,
                 1,
@@ -603,6 +691,39 @@ internal sealed class NativeWallpaperWindow : IDisposable
         runtime.Renderer.SetImage(
             ImageForDatabaseRoot(scenePlan.DatabaseRootMonitorId),
             scenePlan.ImageProjection);
+        runtime.Id = scenePlan.Id;
+        runtime.DatabaseRootMonitorId = scenePlan.DatabaseRootMonitorId;
+        runtime.ImageProjection = scenePlan.ImageProjection;
+        runtime.TargetMonitorIds = scenePlan.Targets
+            .Select(target => target.MonitorId)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static void ConfigureFlowSharing(
+        IReadOnlyList<SceneRuntime> runtimes)
+    {
+        Dictionary<string, SceneRuntime> masters = runtimes
+            .Where(runtime => runtime.IsFlowMaster)
+            .GroupBy(
+                runtime => runtime.FlowRootMonitorId,
+                StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(
+                group => group.Key,
+                group => group.First(),
+                StringComparer.OrdinalIgnoreCase);
+
+        foreach (SceneRuntime runtime in runtimes)
+        {
+            MatrixSceneRenderer? source = null;
+            if (!runtime.IsFlowMaster)
+            {
+                masters.TryGetValue(
+                    runtime.FlowRootMonitorId,
+                    out SceneRuntime? master);
+                source = master?.Renderer;
+            }
+            runtime.Renderer.FollowFlowFrom(source);
+        }
     }
 
     private PreparedImage? ImageForDatabaseRoot(string rootMonitorId)
@@ -658,23 +779,46 @@ internal sealed class NativeWallpaperWindow : IDisposable
 
     private sealed class SceneRuntime : IDisposable
     {
-        public string Id { get; }
-        public string DatabaseRootMonitorId { get; }
-        public MatrixImageProjection ImageProjection { get; }
+        public string Id { get; set; }
+        public string FlowRootMonitorId { get; }
+        public bool IsFlowMaster { get; }
+        public string DatabaseRootMonitorId { get; set; }
+        public DrawingRectangle CanvasBounds { get; }
+        public HashSet<string> TargetMonitorIds { get; set; }
+        public MatrixImageProjection ImageProjection { get; set; }
         public SharedMatrixScene Scene { get; }
         public MatrixSceneRenderer Renderer { get; }
         public AppSettings LastGoodSettings { get; set; }
 
+        public bool CanReuseFor(MonitorScenePlan plan) =>
+            string.Equals(
+                FlowRootMonitorId,
+                plan.FlowRootMonitorId,
+                StringComparison.OrdinalIgnoreCase)
+            && IsFlowMaster == plan.IsFlowMaster
+            && CanvasBounds == plan.CanvasBounds
+            && TargetMonitorIds.Overlaps(
+                plan.Targets.Select(target => target.MonitorId));
+
         public SceneRuntime(
             string id,
+            string flowRootMonitorId,
+            bool isFlowMaster,
             string databaseRootMonitorId,
+            DrawingRectangle canvasBounds,
+            IEnumerable<string> targetMonitorIds,
             MatrixImageProjection imageProjection,
             SharedMatrixScene scene,
             MatrixSceneRenderer renderer,
             AppSettings lastGoodSettings)
         {
             Id = id;
+            FlowRootMonitorId = flowRootMonitorId;
+            IsFlowMaster = isFlowMaster;
             DatabaseRootMonitorId = databaseRootMonitorId;
+            CanvasBounds = canvasBounds;
+            TargetMonitorIds = targetMonitorIds.ToHashSet(
+                StringComparer.OrdinalIgnoreCase);
             ImageProjection = imageProjection;
             Scene = scene;
             Renderer = renderer;

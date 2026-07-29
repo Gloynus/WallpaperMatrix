@@ -17,6 +17,7 @@ internal sealed record MatrixImageProjection(
 internal sealed record MonitorScenePlan(
     string Id,
     string FlowRootMonitorId,
+    bool IsFlowMaster,
     string DatabaseRootMonitorId,
     DrawingRectangle CanvasBounds,
     MatrixImageProjection ImageProjection,
@@ -73,6 +74,12 @@ internal sealed record MonitorOutputPlan(
             string databaseRoot = database.Mode == MonitorLinkMode.Disabled
                 ? ""
                 : database.RootMonitorId;
+            MonitorDescriptor flowViewMonitor =
+                monitorById.GetValueOrDefault(flow.ViewMonitorId)
+                ?? monitorById[flow.RootMonitorId];
+            MonitorDescriptor databaseViewMonitor =
+                monitorById.GetValueOrDefault(database.ViewMonitorId)
+                ?? monitor;
             MonitorProfile targetProfile =
                 MonitorTopology.Find(
                     normalized.MonitorProfiles,
@@ -120,12 +127,12 @@ internal sealed record MonitorOutputPlan(
             DrawingRectangle flowViewport = flowExtended
                 ? flow.Mode == MonitorLinkMode.Relay
                     ? new DrawingRectangle(
-                        monitorById[flow.RootMonitorId].Bounds.Left
+                        flowViewMonitor.Bounds.Left
                             - canvasBounds.Left,
-                        monitorById[flow.RootMonitorId].Bounds.Top
+                        flowViewMonitor.Bounds.Top
                             - canvasBounds.Top,
-                        monitorById[flow.RootMonitorId].Bounds.Width,
-                        monitorById[flow.RootMonitorId].Bounds.Height)
+                        flowViewMonitor.Bounds.Width,
+                        flowViewMonitor.Bounds.Height)
                     : new DrawingRectangle(
                         monitor.Bounds.Left - canvasBounds.Left,
                         monitor.Bounds.Top - canvasBounds.Top,
@@ -149,12 +156,6 @@ internal sealed record MonitorOutputPlan(
                             databaseRoutes[candidate.Id].RootMonitorId,
                             database.RootMonitorId,
                             StringComparison.OrdinalIgnoreCase)));
-            bool relayCopiesFlowRootProjection =
-                database.Mode == MonitorLinkMode.Relay
-                && string.Equals(
-                    flow.RootMonitorId,
-                    database.RootMonitorId,
-                    StringComparison.OrdinalIgnoreCase);
             DrawingRectangle databaseCanvas = databaseExtended
                 ? monitors
                     .Where(candidate =>
@@ -175,12 +176,29 @@ internal sealed record MonitorOutputPlan(
                     .Aggregate(DrawingRectangle.Union)
                 : database.Mode == MonitorLinkMode.Disabled
                     ? monitor.Bounds
-                    : relayCopiesFlowRootProjection
-                        ? monitorById[database.RootMonitorId].Bounds
-                        : monitor.Bounds;
+                    : monitorById[database.RootMonitorId].Bounds;
+            DrawingRectangle databaseViewport = databaseExtended
+                ? new DrawingRectangle(
+                    (database.Mode == MonitorLinkMode.Relay
+                        ? databaseViewMonitor.Bounds.Left
+                        : monitor.Bounds.Left) - databaseCanvas.Left,
+                    (database.Mode == MonitorLinkMode.Relay
+                        ? databaseViewMonitor.Bounds.Top
+                        : monitor.Bounds.Top) - databaseCanvas.Top,
+                    database.Mode == MonitorLinkMode.Relay
+                        ? databaseViewMonitor.Bounds.Width
+                        : monitor.Bounds.Width,
+                    database.Mode == MonitorLinkMode.Relay
+                        ? databaseViewMonitor.Bounds.Height
+                        : monitor.Bounds.Height)
+                : new DrawingRectangle(
+                    0,
+                    0,
+                    databaseCanvas.Width,
+                    databaseCanvas.Height);
             bool sharedSpatialProjection =
-                flowExtended == databaseExtended
-                && canvasBounds == databaseCanvas;
+                canvasBounds == databaseCanvas
+                && flowViewport == databaseViewport;
             DrawingRectangle imageDestination = sharedSpatialProjection
                 ? new DrawingRectangle(
                     0,
@@ -188,30 +206,17 @@ internal sealed record MonitorOutputPlan(
                     canvasBounds.Width,
                     canvasBounds.Height)
                 : presentationSource;
-            DrawingRectangle databaseViewport = sharedSpatialProjection
-                || !databaseExtended
+            DrawingRectangle imageViewport = sharedSpatialProjection
                 ? new DrawingRectangle(
                     0,
                     0,
                     databaseCanvas.Width,
                     databaseCanvas.Height)
-                : new DrawingRectangle(
-                    (database.Mode == MonitorLinkMode.Relay
-                        ? monitorById[database.RootMonitorId].Bounds.Left
-                        : monitor.Bounds.Left) - databaseCanvas.Left,
-                    (database.Mode == MonitorLinkMode.Relay
-                        ? monitorById[database.RootMonitorId].Bounds.Top
-                        : monitor.Bounds.Top) - databaseCanvas.Top,
-                    database.Mode == MonitorLinkMode.Relay
-                        ? monitorById[database.RootMonitorId].Bounds.Width
-                        : monitor.Bounds.Width,
-                    database.Mode == MonitorLinkMode.Relay
-                        ? monitorById[database.RootMonitorId].Bounds.Height
-                        : monitor.Bounds.Height);
+                : databaseViewport;
             MatrixImageProjection imageProjection = new(
                 Math.Max(1, databaseCanvas.Width),
                 Math.Max(1, databaseCanvas.Height),
-                databaseViewport,
+                imageViewport,
                 imageDestination);
 
             AppSettings effective = MonitorSettingsComposer.Compose(
@@ -230,7 +235,6 @@ internal sealed record MonitorOutputPlan(
                 flowExtended ? "EXTEND" : "RELAY",
                 databaseRoot,
                 databaseProjection,
-                ClockProjectionKey(targetProfile.Settings),
                 canvasBounds.Left,
                 canvasBounds.Top,
                 canvasBounds.Width,
@@ -238,6 +242,10 @@ internal sealed record MonitorOutputPlan(
             targets.Add(new TargetDraft(
                 sceneId,
                 flow.RootMonitorId,
+                string.Equals(
+                    monitor.Id,
+                    flow.RootMonitorId,
+                    StringComparison.OrdinalIgnoreCase),
                 databaseRoot,
                 canvasBounds,
                 imageProjection,
@@ -261,6 +269,7 @@ internal sealed record MonitorOutputPlan(
                 return new MonitorScenePlan(
                     first.SceneId,
                     first.FlowRootMonitorId,
+                    group.Any(target => target.IsFlowMasterTarget),
                     first.DatabaseRootMonitorId,
                     first.CanvasBounds,
                     first.ImageProjection,
@@ -337,19 +346,10 @@ internal sealed record MonitorOutputPlan(
             height);
     }
 
-    private static string ClockProjectionKey(AppSettings settings) =>
-        string.Join(
-            ":",
-            settings.ClockEnabled,
-            settings.ClockPosition,
-            settings.ClockHorizontalMarginCells,
-            settings.ClockVerticalMarginCells,
-            settings.ClockBrightness.ToString("R"),
-            settings.ClockWeight.ToString("R"));
-
     private sealed record TargetDraft(
         string SceneId,
         string FlowRootMonitorId,
+        bool IsFlowMasterTarget,
         string DatabaseRootMonitorId,
         DrawingRectangle CanvasBounds,
         MatrixImageProjection ImageProjection,

@@ -235,8 +235,18 @@ internal sealed class Direct3D11Presenter : IDisposable
         _transitionConstantBuffer =
             _device.CreateConstantBuffer<TransitionShaderConstants>();
         _sampler = _device.CreateSamplerState(SamplerDescription.LinearClamp);
+        // The shader returns straight (non-premultiplied) RGB, but the
+        // DirectComposition swap chain stores premultiplied alpha.  The
+        // built-in NonPremultiplied state also multiplies the alpha channel
+        // by source alpha; antialiased glyph edges would therefore punch
+        // translucent holes back through an already opaque background.
+        // Preserve accumulated destination alpha instead.
         _blendState = _device.CreateBlendState(
-            BlendDescription.NonPremultiplied);
+            new BlendDescription(
+                Blend.SourceAlpha,
+                Blend.InverseSourceAlpha,
+                Blend.One,
+                Blend.InverseSourceAlpha));
 
         DiagnosticLog.Write(
             $"Direct3D 11 создан: featureLevel={FormatFeatureLevel(featureLevel)}; "
@@ -599,18 +609,48 @@ internal sealed class Direct3D11Presenter : IDisposable
                     state.Parameters,
                     _surfaceBackgroundOpacity);
             }
-            DrawGlyphPass(
-                state,
-                streamFilterMode:
-                    _attackModeEnabled > 0.5f ? 1 : 0,
-                solidBody:
-                    _attackModeEnabled > 0.5f
-                        ? _desktopOpacity
-                        : 0,
-                haloFactor:
-                    _attackModeEnabled > 0.5f
-                        ? _attackHaloFactor
-                        : 1);
+            // While the real wallpaper is still visible below our
+            // alpha-capable startup surface, keep glyph bodies honest and
+            // suppress translucent halos. Antialiasing and phosphor return
+            // only during the final opaque quarter of the background reveal,
+            // so desktop colours cannot tint portrait or scaled viewports.
+            float startupGlyphBlend = Math.Clamp(
+                (_surfaceBackgroundOpacity - 0.75f) * 4.0f,
+                0.0f,
+                1.0f);
+            if (_attackModeEnabled > 0.5f)
+            {
+                // New streams do the visible takeover and rebuild the image.
+                // Near the end, only ordinary glyphs from the old wallpaper
+                // join them to preserve continuity; already developed image
+                // cells never rise as a finished picture over the interface.
+                float takeoverProgress = 1.0f - _desktopOpacity;
+                float inheritedFlow = Math.Clamp(
+                    (takeoverProgress - 0.58f) / 0.42f,
+                    0.0f,
+                    1.0f);
+                inheritedFlow = inheritedFlow * inheritedFlow
+                    * (3.0f - 2.0f * inheritedFlow);
+                DrawGlyphPass(
+                    state,
+                    streamFilterMode: 3,
+                    solidBody: _desktopOpacity,
+                    haloFactor: _attackHaloFactor,
+                    opacityFactor: inheritedFlow);
+                DrawGlyphPass(
+                    state,
+                    streamFilterMode: 1,
+                    solidBody: _desktopOpacity,
+                    haloFactor: _attackHaloFactor);
+            }
+            else
+            {
+                DrawGlyphPass(
+                    state,
+                    streamFilterMode: 0,
+                    solidBody: 1.0f - startupGlyphBlend,
+                    haloFactor: startupGlyphBlend);
+            }
         }
     }
 
@@ -618,7 +658,8 @@ internal sealed class Direct3D11Presenter : IDisposable
         SceneDrawState state,
         float streamFilterMode,
         float solidBody,
-        float haloFactor)
+        float haloFactor,
+        float opacityFactor = 1)
     {
         if (state.Resources.InstanceBuffer is null
             || state.InstanceCount <= 0
@@ -666,7 +707,9 @@ internal sealed class Direct3D11Presenter : IDisposable
             state.Atlas.GlyphCount,
             aspectScaleX,
             aspectScaleY,
-            _glyphOpacity * _surfaceGlyphOpacity,
+            _glyphOpacity
+                * _surfaceGlyphOpacity
+                * Math.Clamp(opacityFactor, 0, 1),
             _attackModeEnabled > 0.5f
                 && state.Presentation.AttackStreamCutoff >= 0
                     ? state.Presentation.AttackStreamCutoff
@@ -1057,6 +1100,8 @@ internal sealed class Direct3D11Presenter : IDisposable
             else if (StreamFilterMode > 1.5)
             {
                 clip(AttackStreamCutoff + 0.5 - input.StreamId);
+                if (StreamFilterMode > 2.5)
+                    clip(2.5 - input.Style);
             }
 
             float center = SampleGlyph(input, input.Local);

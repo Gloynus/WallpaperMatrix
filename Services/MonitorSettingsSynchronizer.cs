@@ -53,13 +53,5 @@ internal static class MonitorSettingsSynchronizer
         {
             settings.ImageMode = false;
         }
-        settings.ClockEnabled = primary.Settings.ClockEnabled;
-        settings.ClockPosition = primary.Settings.ClockPosition;
-        settings.ClockHorizontalMarginCells =
-            primary.Settings.ClockHorizontalMarginCells;
-        settings.ClockVerticalMarginCells =
-            primary.Settings.ClockVerticalMarginCells;
-        settings.ClockBrightness = primary.Settings.ClockBrightness;
-        settings.ClockWeight = primary.Settings.ClockWeight;
     }
 }

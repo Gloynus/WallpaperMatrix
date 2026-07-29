@@ -21,6 +21,25 @@ internal static class MonitorPresetAdapter
             return result;
         }
 
+        // A preset saved for this exact set of physical displays is already in
+        // its canonical form. Re-composing relay/extension profiles would turn
+        // their stored operator state into effective root state and make an
+        // unchanged preset appear modified immediately after Save or Apply.
+        // Portable geometric mapping remains active when monitor identities
+        // differ, so presets still move cleanly between computers.
+        HashSet<string> connectedPresetIds = result.MonitorProfiles
+            .Where(profile => profile.WasConnected)
+            .Select(profile => profile.MonitorId)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        HashSet<string> currentMonitorIds = monitors
+            .Select(monitor => monitor.Id)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (connectedPresetIds.SetEquals(currentMonitorIds))
+        {
+            MonitorTopology.EnsureProfiles(result, monitors);
+            return result;
+        }
+
         AppSettings current = currentSettings.Copy();
         MonitorTopology.EnsureProfiles(current, monitors);
         List<MonitorProfile> sources = result.MonitorProfiles
@@ -274,6 +293,16 @@ internal static class MonitorPresetAdapter
             return (MonitorLinkMode.Disabled, "");
         if (mode == MonitorLinkMode.Isolated)
             return (MonitorLinkMode.Isolated, "");
+        string directSource = domain == MonitorRouteDomain.Flow
+            ? source.FlowSourceMonitorId
+            : source.DatabaseSourceMonitorId;
+        if (!string.IsNullOrWhiteSpace(directSource)
+            && sourceToTarget.TryGetValue(
+                directSource,
+                out string? targetSource))
+        {
+            return (mode, targetSource);
+        }
         if (sourceToTarget.TryGetValue(
                 root.MonitorId,
                 out string? targetRoot))

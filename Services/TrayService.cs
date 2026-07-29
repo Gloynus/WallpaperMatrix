@@ -50,7 +50,7 @@ public sealed class TrayService : IDisposable
         _pauseItem.Checked = isManuallyPaused || isPausedByFullscreenApp;
         _pauseItem.Enabled = !isPausedByFullscreenApp;
         _pauseItem.Text = isPausedByFullscreenApp
-            ? "Полноэкранное приложение — поток остановлен"
+            ? "Полноэкранное приложение — поток плавно остановлен"
             : isManuallyPaused
                 ? "Возобновить поток"
                 : "Остановить и скрыть поток";

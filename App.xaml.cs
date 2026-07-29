@@ -55,8 +55,17 @@ public partial class App : System.Windows.Application
                 if (validateTopology)
                 {
                     MonitorTopologyValidation.Validate();
+                    IReadOnlyList<MonitorDescriptor> monitors =
+                        MonitorCatalog.Capture();
                     DiagnosticLog.Write(
-                        "Самопроверка маршрутизации устройств вывода завершена успешно.");
+                        "Самопроверка маршрутизации устройств вывода "
+                        + "завершена успешно. Метки каналов Wallpaper Matrix: "
+                        + string.Join(
+                            "; ",
+                            monitors.Select(monitor =>
+                                $"{monitor.DisplayNumber}="
+                                + $"{monitor.SystemName} "
+                                + $"«{monitor.FriendlyName}»")));
                 }
                 if (validateShaders || validateAttack)
                 {
@@ -114,6 +123,8 @@ public partial class App : System.Windows.Application
 
         _settingsStore = new SettingsStore();
         _settings = _settingsStore.Load();
+        if (validateRouteSwitch)
+            _settings.PauseDuringFullscreenApps = false;
         IReadOnlyList<MonitorDescriptor> startupMonitors =
             MonitorCatalog.Capture();
         MonitorTopology.EnsureProfiles(
@@ -275,6 +286,41 @@ public partial class App : System.Windows.Application
                 }
 
                 if (phase == 2)
+                {
+                    _wallpaperManager?.ApplySettings(original);
+                    DiagnosticLog.Write(
+                        "Самопроверка бесшовной маршрутизации: "
+                        + "изолированное устройство подключено к реальной "
+                        + "общей сцене ретрансляции.");
+                    return;
+                }
+
+                if (phase == 3)
+                {
+                    IReadOnlyList<MonitorDescriptor> monitors =
+                        MonitorCatalog.Capture();
+                    AppSettings extended = original.Copy();
+                    MonitorTopology.EnsureProfiles(extended, monitors);
+                    MonitorDescriptor root = monitors.First(monitor =>
+                        monitor.Primary);
+                    MonitorDescriptor target = monitors.First(monitor =>
+                        !monitor.Primary);
+                    MonitorTopology.SetRoute(
+                        extended.MonitorProfiles,
+                        monitors,
+                        MonitorRouteDomain.Flow,
+                        target.Id,
+                        MonitorLinkMode.Extend,
+                        root.Id);
+                    _wallpaperManager?.ApplySettings(extended);
+                    DiagnosticLog.Write(
+                        "Самопроверка бесшовной маршрутизации: "
+                        + $"устройство «{target.Label}» расширило поток "
+                        + "с переносом уже идущих струй.");
+                    return;
+                }
+
+                if (phase == 4)
                 {
                     _wallpaperManager?.ApplySettings(original);
                     DiagnosticLog.Write(

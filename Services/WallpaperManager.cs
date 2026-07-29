@@ -17,6 +17,7 @@ public sealed class WallpaperManager : IDisposable
     private readonly DispatcherTimer _displayChangeTimer;
     private readonly DispatcherTimer _sessionResumeTimer;
     private readonly DispatcherTimer _attackTimer;
+    private readonly DispatcherTimer _fullscreenTransitionTimer;
     private readonly SemaphoreSlim _imageLoadGate = new(1, 1);
     private readonly Dictionary<string, DatabaseImageChannel>
         _secondaryDatabaseChannels =
@@ -34,6 +35,11 @@ public sealed class WallpaperManager : IDisposable
     private DateTime _attackRetryAfterUtc;
     private bool _manualPaused;
     private bool _fullscreenPaused;
+    private bool _fullscreenSimulationFrozen;
+    private double _fullscreenMotionScale = 1.0;
+    private double _fullscreenTransitionStartScale = 1.0;
+    private double _fullscreenTransitionTargetScale = 1.0;
+    private DateTime _fullscreenTransitionStartedUtc;
     private bool _sessionUnavailable;
     private int _sessionResumeAttempts;
     private bool _disposed;
@@ -80,6 +86,12 @@ public sealed class WallpaperManager : IDisposable
             Interval = TimeSpan.FromMilliseconds(500)
         };
         _attackTimer.Tick += OnAttackTimer;
+        _fullscreenTransitionTimer = new DispatcherTimer(
+            DispatcherPriority.Render)
+        {
+            Interval = TimeSpan.FromMilliseconds(16)
+        };
+        _fullscreenTransitionTimer.Tick += OnFullscreenTransitionTimer;
         _fullscreenMonitor.ActivityChanged += OnFullscreenActivityChanged;
     }
 
@@ -167,22 +179,92 @@ public sealed class WallpaperManager : IDisposable
 
         if (_sessionUnavailable)
         {
+            StopFullscreenTransition();
             // A renderer tied to the old desktop must never be resurrected
             // while the secure desktop or a disconnected session is active.
         }
         else if (_manualPaused)
         {
+            StopFullscreenTransition();
             StopOutputAndRestoreDesktop();
         }
         else if (_fullscreenPaused)
         {
-            _output.Suspend();
+            StartFullscreenTransition(paused: true);
         }
         else
         {
             ResumeOutput();
+            StartFullscreenTransition(paused: false);
         }
         PauseStateChanged?.Invoke();
+    }
+
+    private void StartFullscreenTransition(bool paused)
+    {
+        if (_output.WindowCount == 0)
+            return;
+
+        double target = paused ? 0.0 : 1.0;
+        if (!paused && _fullscreenSimulationFrozen)
+        {
+            _output.SetMotionScale(0);
+            _output.FreezeMotion(false);
+            _fullscreenSimulationFrozen = false;
+            _fullscreenMotionScale = 0;
+        }
+        if (Math.Abs(_fullscreenMotionScale - target) < 0.001)
+        {
+            _fullscreenTransitionTimer.Stop();
+            if (paused && !_fullscreenSimulationFrozen)
+            {
+                _output.SetMotionScale(0);
+                _output.FreezeMotion(true);
+                _fullscreenSimulationFrozen = true;
+            }
+            return;
+        }
+
+        _fullscreenTransitionStartScale = _fullscreenMotionScale;
+        _fullscreenTransitionTargetScale = target;
+        _fullscreenTransitionStartedUtc = DateTime.UtcNow;
+        _fullscreenTransitionTimer.Start();
+    }
+
+    private void OnFullscreenTransitionTimer(object? sender, EventArgs e)
+    {
+        const double durationSeconds = 0.7;
+        double progress = Math.Clamp(
+            (DateTime.UtcNow - _fullscreenTransitionStartedUtc).TotalSeconds
+                / durationSeconds,
+            0,
+            1);
+        double eased = progress * progress * (3.0 - 2.0 * progress);
+        _fullscreenMotionScale =
+            _fullscreenTransitionStartScale
+            + (_fullscreenTransitionTargetScale
+                - _fullscreenTransitionStartScale) * eased;
+        _output.SetMotionScale(_fullscreenMotionScale);
+        if (progress < 1)
+            return;
+
+        _fullscreenTransitionTimer.Stop();
+        _fullscreenMotionScale = _fullscreenTransitionTargetScale;
+        if (_fullscreenMotionScale <= 0.001
+            && !_fullscreenSimulationFrozen)
+        {
+            _output.FreezeMotion(true);
+            _fullscreenSimulationFrozen = true;
+        }
+    }
+
+    private void StopFullscreenTransition()
+    {
+        _fullscreenTransitionTimer.Stop();
+        _fullscreenMotionScale = 1;
+        _fullscreenTransitionStartScale = 1;
+        _fullscreenTransitionTargetScale = 1;
+        _fullscreenSimulationFrozen = false;
     }
 
     public void NextImage()
@@ -1224,6 +1306,7 @@ public sealed class WallpaperManager : IDisposable
         _attackTimer.Stop();
         _displayChangeTimer.Stop();
         _sessionResumeTimer.Stop();
+        _fullscreenTransitionTimer.Stop();
         AbortAttackImmediately();
         _imagePreparation.Clear();
         _output.Dispose();

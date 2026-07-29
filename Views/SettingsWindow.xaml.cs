@@ -7,12 +7,17 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Shapes;
 using System.Windows.Threading;
 using WallpaperMatrix.Models;
 using WallpaperMatrix.Services;
 using ComboBox = System.Windows.Controls.ComboBox;
+using FontFamily = System.Windows.Media.FontFamily;
+using HorizontalAlignment = System.Windows.HorizontalAlignment;
 using KeyEventArgs = System.Windows.Input.KeyEventArgs;
 using TextBox = System.Windows.Controls.TextBox;
+using VerticalAlignment = System.Windows.VerticalAlignment;
+using WpfCursors = System.Windows.Input.Cursors;
 
 namespace WallpaperMatrix.Views;
 
@@ -27,17 +32,20 @@ public partial class SettingsWindow : Window
             : $"Изменён: {Preset.ModifiedLabel}";
     }
 
-    private sealed class MonitorChoice
-    {
-        public required MonitorDescriptor Monitor { get; init; }
-        public string Label => Monitor.Label;
-    }
-
     private sealed class MonitorRouteChoice
     {
         public required MonitorLinkMode Mode { get; init; }
         public string SourceMonitorId { get; init; } = "";
         public required string Label { get; init; }
+    }
+
+    private enum MonitorBadgeKind
+    {
+        FlowRelay,
+        FlowExtend,
+        DatabaseIsolated,
+        DatabaseRelay,
+        DatabaseExtend
     }
 
     private AppSettings _source = new();
@@ -244,11 +252,6 @@ public partial class SettingsWindow : Window
         _curveAdjustments[FlowCurveProfiles.MemoryKind] =
             displaySettings.MemoryCurveAdjustment.Copy();
         ImageModeCheck.IsChecked = displaySettings.ImageMode;
-        ClockEnabledCheck.IsChecked = displaySettings.ClockEnabled;
-        ClockHorizontalMarginSlider.Value = displaySettings.ClockHorizontalMarginCells;
-        ClockVerticalMarginSlider.Value = displaySettings.ClockVerticalMarginCells;
-        ClockBrightnessSlider.Value = displaySettings.ClockBrightness;
-        ClockWeightSlider.Value = displaySettings.ClockWeight;
         _playlists = displaySettings.ImagePlaylists
             .Select(playlist => playlist.Copy())
             .ToList();
@@ -274,7 +277,6 @@ public partial class SettingsWindow : Window
         SelectByTag(ImageFitCombo, displaySettings.ImageFit);
         SelectByTag(ImagePreparationModeCombo, displaySettings.ImagePreparationMode);
         SelectByTag(ImageStructureModeCombo, displaySettings.ImageStructureMode);
-        SelectByTag(ClockPositionCombo, displaySettings.ClockPosition);
         SelectByTag(FpsCombo, container.FramesPerSecond.ToString());
         if (CurveKindCombo.SelectedIndex < 0)
             SelectByTag(CurveKindCombo, FlowCurveProfiles.TerminalKind);
@@ -481,12 +483,6 @@ public partial class SettingsWindow : Window
         display.ImageToneCalmness = ImageToneCalmnessSlider.Value;
         display.ImageStructureMode = SelectedTag(ImageStructureModeCombo, "Tonal");
         display.ImageMode = ImageModeCheck.IsChecked == true;
-        display.ClockEnabled = ClockEnabledCheck.IsChecked == true;
-        display.ClockPosition = SelectedTag(ClockPositionCombo, "TopRight");
-        display.ClockHorizontalMarginCells = (int)Math.Round(ClockHorizontalMarginSlider.Value);
-        display.ClockVerticalMarginCells = (int)Math.Round(ClockVerticalMarginSlider.Value);
-        display.ClockBrightness = ClockBrightnessSlider.Value;
-        display.ClockWeight = ClockWeightSlider.Value;
         display.ImagePlaylists = _playlists
             .Select(playlist => playlist.Copy())
             .ToList();
@@ -541,7 +537,7 @@ public partial class SettingsWindow : Window
 
     private void RefreshMonitorTopologyUi()
     {
-        if (MonitorDeviceCombo is null
+        if (MonitorTopologyCanvas is null
             || MonitorFlowModeCombo is null
             || MonitorDatabaseModeCombo is null)
         {
@@ -549,27 +545,6 @@ public partial class SettingsWindow : Window
         }
 
         MonitorProfile selected = SelectedMonitorProfile(_draftSettings);
-        List<MonitorChoice> devices = _monitors
-            .Select(monitor => new MonitorChoice { Monitor = monitor })
-            .ToList();
-        MonitorDeviceCombo.ItemsSource = devices;
-        MonitorDeviceCombo.SelectedItem = devices.FirstOrDefault(choice =>
-            string.Equals(
-                choice.Monitor.Id,
-                selected.MonitorId,
-                StringComparison.OrdinalIgnoreCase));
-
-        MonitorDescriptor? descriptor = _monitors.FirstOrDefault(monitor =>
-            string.Equals(
-                monitor.Id,
-                selected.MonitorId,
-                StringComparison.OrdinalIgnoreCase));
-        MonitorDeviceDetails.Text = descriptor is null
-            ? selected.LastKnownName
-            : $"{descriptor.SystemName} // "
-                + $"{descriptor.Bounds.Width}×{descriptor.Bounds.Height} // "
-                + $"X {descriptor.Bounds.Left}, Y {descriptor.Bounds.Top}";
-
         List<MonitorRouteChoice> flowChoices =
             CreateRouteChoices(MonitorRouteDomain.Flow, selected.MonitorId);
         MonitorFlowModeCombo.ItemsSource = flowChoices;
@@ -585,7 +560,396 @@ public partial class SettingsWindow : Window
             databaseChoices,
             selected.DatabaseMode,
             selected.DatabaseSourceMonitorId);
+        RefreshMonitorVisuals();
         UpdateMonitorRouteNotices();
+    }
+
+    private void RefreshMonitorVisuals()
+    {
+        if (MonitorTopologyCanvas is null || _monitors.Count == 0)
+            return;
+
+        MonitorTopologyCanvas.Children.Clear();
+        System.Drawing.Rectangle desktop = _monitors
+            .Select(monitor => monitor.Bounds)
+            .Aggregate(System.Drawing.Rectangle.Union);
+        double availableWidth = MonitorTopologyCanvas.ActualWidth > 40
+            ? MonitorTopologyCanvas.ActualWidth
+            : 640;
+        double availableHeight = MonitorTopologyCanvas.ActualHeight > 40
+            ? MonitorTopologyCanvas.ActualHeight
+            : 267;
+        const double padding = 8;
+        double scale = Math.Min(
+            (availableWidth - padding * 2) / Math.Max(1, desktop.Width),
+            (availableHeight - padding * 2) / Math.Max(1, desktop.Height));
+        double layoutWidth = desktop.Width * scale;
+        double layoutHeight = desktop.Height * scale;
+        double originX = (availableWidth - layoutWidth) * 0.5;
+        double originY = (availableHeight - layoutHeight) * 0.5;
+
+        for (int index = 0; index < _monitors.Count; index++)
+        {
+            MonitorDescriptor monitor = _monitors[index];
+            MonitorProfile? profile = MonitorTopology.Find(
+                _draftSettings.MonitorProfiles,
+                monitor.Id);
+            if (profile is null)
+                continue;
+
+            double width = Math.Max(54, monitor.Bounds.Width * scale);
+            double height = Math.Max(42, monitor.Bounds.Height * scale);
+            double left = originX + (monitor.Bounds.Left - desktop.Left) * scale;
+            double top = originY + (monitor.Bounds.Top - desktop.Top) * scale;
+            Border visual = CreateMonitorVisual(
+                monitor,
+                profile,
+                MonitorNumber(monitor, index),
+                width,
+                height);
+            visual.Width = width;
+            visual.Height = height;
+            Canvas.SetLeft(visual, left);
+            Canvas.SetTop(visual, top);
+            MonitorTopologyCanvas.Children.Add(visual);
+        }
+    }
+
+    private Border CreateMonitorVisual(
+        MonitorDescriptor monitor,
+        MonitorProfile profile,
+        int number,
+        double width,
+        double height)
+    {
+        bool selected = string.Equals(
+            monitor.Id,
+            _selectedMonitorId,
+            StringComparison.OrdinalIgnoreCase);
+        double shortSide = Math.Min(width, height);
+        double titleFontSize = Math.Clamp(shortSide * 0.13, 12, 17);
+        double detailFontSize = Math.Clamp(shortSide * 0.095, 10, 13);
+        double nameFontSize = Math.Clamp(shortSide * 0.085, 9, 12);
+        double badgeSize = Math.Clamp(shortSide * 0.24, 20, 31);
+        double contentWidth = Math.Max(36, width - 20);
+        Grid screen = new();
+        StackPanel identity = new()
+        {
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(
+                4,
+                badgeSize + 8,
+                4,
+                18),
+            Children =
+            {
+                new TextBlock
+                {
+                    Text = $"ЭКРАН {number}",
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    FontFamily = new FontFamily("Consolas"),
+                    FontSize = titleFontSize,
+                    FontWeight = FontWeights.Bold,
+                    Foreground = BrushFromRgb(
+                        selected ? 0xD8 : 0x79,
+                        selected ? 0xFF : 0xA8,
+                        selected ? 0xE5 : 0x88)
+                },
+                new TextBlock
+                {
+                    Text = $"{monitor.Bounds.Width}×{monitor.Bounds.Height}",
+                    Visibility = height >= 68
+                        ? Visibility.Visible
+                        : Visibility.Collapsed,
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    FontFamily = new FontFamily("Consolas"),
+                    FontSize = detailFontSize,
+                    Foreground = BrushFromRgb(0x83, 0xFF, 0xAA)
+                },
+                new TextBlock
+                {
+                    Text = monitor.FriendlyName,
+                    Visibility = height >= 88 && width >= 90
+                        ? Visibility.Visible
+                        : Visibility.Collapsed,
+                    Width = contentWidth,
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    TextAlignment = TextAlignment.Center,
+                    TextTrimming = TextTrimming.CharacterEllipsis,
+                    FontFamily = new FontFamily("Consolas"),
+                    FontSize = nameFontSize,
+                    Foreground = BrushFromRgb(0x55, 0xB9, 0x78)
+                }
+            }
+        };
+        screen.Children.Add(identity);
+
+        screen.Children.Add(new Ellipse
+        {
+            Width = 10,
+            Height = 10,
+            Margin = new Thickness(0, 0, 0, 4),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Bottom,
+            Fill = profile.FlowMode == MonitorLinkMode.Disabled
+                ? BrushFromRgb(0xFF, 0x45, 0x45)
+                : BrushFromRgb(0x00, 0xE6, 0x67),
+            Effect = null
+        });
+
+        if (profile.FlowMode == MonitorLinkMode.Relay)
+        {
+            AddMonitorBadge(
+                screen,
+                MonitorBadgeKind.FlowRelay,
+                SourceMonitorNumber(profile.FlowSourceMonitorId),
+                HorizontalAlignment.Left,
+                VerticalAlignment.Top,
+                badgeSize);
+        }
+        else if (profile.FlowMode == MonitorLinkMode.Extend)
+        {
+            AddMonitorBadge(
+                screen,
+                MonitorBadgeKind.FlowExtend,
+                SourceMonitorNumber(profile.FlowSourceMonitorId),
+                HorizontalAlignment.Left,
+                VerticalAlignment.Top,
+                badgeSize);
+        }
+
+        if (profile.DatabaseMode == MonitorLinkMode.Isolated)
+        {
+            AddMonitorBadge(
+                screen,
+                MonitorBadgeKind.DatabaseIsolated,
+                null,
+                HorizontalAlignment.Right,
+                VerticalAlignment.Top,
+                badgeSize);
+        }
+        else if (profile.DatabaseMode == MonitorLinkMode.Relay)
+        {
+            AddMonitorBadge(
+                screen,
+                MonitorBadgeKind.DatabaseRelay,
+                SourceMonitorNumber(profile.DatabaseSourceMonitorId),
+                HorizontalAlignment.Right,
+                VerticalAlignment.Top,
+                badgeSize);
+        }
+        else if (profile.DatabaseMode == MonitorLinkMode.Extend)
+        {
+            AddMonitorBadge(
+                screen,
+                MonitorBadgeKind.DatabaseExtend,
+                SourceMonitorNumber(profile.DatabaseSourceMonitorId),
+                HorizontalAlignment.Right,
+                VerticalAlignment.Top,
+                badgeSize);
+        }
+
+        Border border = new()
+        {
+            Tag = monitor.Id,
+            Background = BrushFromRgb(
+                selected ? 0x09 : 0x02,
+                selected ? 0x27 : 0x08,
+                selected ? 0x19 : 0x06),
+            BorderBrush = BrushFromRgb(
+                selected ? 0x00 : 0x16,
+                selected ? 0xE6 : 0x4B,
+                selected ? 0x67 : 0x2C),
+            BorderThickness = new Thickness(selected ? 2 : 1),
+            CornerRadius = new CornerRadius(3),
+            Padding = new Thickness(5),
+            Child = screen,
+            Cursor = WpfCursors.Hand,
+            ToolTip = $"{monitor.FriendlyName}\n"
+                + $"{monitor.Bounds.Width}×{monitor.Bounds.Height} "
+                + $"@ ({monitor.Bounds.Left}, {monitor.Bounds.Top})\n"
+                + $"Поток: {RouteSummary(profile.FlowMode, profile.FlowSourceMonitorId)}\n"
+                + $"База: {RouteSummary(profile.DatabaseMode, profile.DatabaseSourceMonitorId)}"
+        };
+        border.MouseLeftButtonDown += MonitorVisual_MouseLeftButtonDown;
+        return border;
+    }
+
+    private static void AddMonitorBadge(
+        Grid screen,
+        MonitorBadgeKind kind,
+        int? sourceNumber,
+        HorizontalAlignment horizontal,
+        VerticalAlignment vertical,
+        double size)
+    {
+        SolidColorBrush foreground = kind is MonitorBadgeKind.FlowRelay
+            or MonitorBadgeKind.FlowExtend
+            ? BrushFromRgb(0x62, 0xFF, 0x8F)
+            : BrushFromRgb(0x7D, 0xE7, 0xFF);
+        Grid glyph = new()
+        {
+            Width = size + (sourceNumber is null ? 4 : 10),
+            Height = size + 4
+        };
+        glyph.Children.Add(new Viewbox
+        {
+            Width = size,
+            Height = size,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Center,
+            Child = new System.Windows.Shapes.Path
+            {
+                Data = Geometry.Parse(MonitorBadgeGeometry(kind)),
+                Stroke = foreground,
+                StrokeThickness = 1.75,
+                StrokeStartLineCap = PenLineCap.Round,
+                StrokeEndLineCap = PenLineCap.Round,
+                StrokeLineJoin = PenLineJoin.Round,
+                Fill = System.Windows.Media.Brushes.Transparent
+            }
+        });
+        if (sourceNumber is int number)
+        {
+            glyph.Children.Add(new Border
+            {
+                MinWidth = Math.Max(13, size * 0.52),
+                Height = Math.Max(13, size * 0.52),
+                Padding = new Thickness(2, 0, 2, 0),
+                HorizontalAlignment = HorizontalAlignment.Right,
+                VerticalAlignment = VerticalAlignment.Bottom,
+                Background = BrushFromRgb(0x00, 0x0B, 0x07),
+                BorderBrush = foreground,
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(2),
+                Child = new TextBlock
+                {
+                    Text = number.ToString(CultureInfo.InvariantCulture),
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    FontFamily = new FontFamily("Consolas"),
+                    FontSize = Math.Max(10, size * 0.43),
+                    FontWeight = FontWeights.Bold,
+                    Foreground = foreground
+                }
+            });
+        }
+
+        screen.Children.Add(new Border
+        {
+            Margin = new Thickness(4, 3, 4, 3),
+            Padding = new Thickness(3, 2, 3, 2),
+            HorizontalAlignment = horizontal,
+            VerticalAlignment = vertical,
+            Background = BrushFromRgb(0x01, 0x0E, 0x08),
+            BorderBrush = BrushFromRgb(0x0A, 0x35, 0x20),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(3),
+            Child = glyph
+        });
+    }
+
+    private static string MonitorBadgeGeometry(MonitorBadgeKind kind) =>
+        kind switch
+        {
+            MonitorBadgeKind.FlowRelay =>
+                "M 6,3 L 6,17 M 2.5,13.5 L 6,17 L 9.5,13.5 "
+                + "M 17,3 L 17,17 M 13.5,13.5 L 17,17 L 20.5,13.5",
+            MonitorBadgeKind.FlowExtend =>
+                "M 6,3 L 6,11 C 6,13 8,14 10,14 L 18,14 "
+                + "M 14.5,10.5 L 18,14 L 14.5,17.5 "
+                + "M 12,4 L 18,4 L 18,9",
+            MonitorBadgeKind.DatabaseRelay =>
+                "M 2,6 C 2,3.8 10,3.8 10,6 C 10,8.2 2,8.2 2,6 "
+                + "M 2,6 L 2,16 C 2,18.2 10,18.2 10,16 L 10,6 "
+                + "M 2,11 C 2,13.2 10,13.2 10,11 "
+                + "M 14,7 C 14,5.2 21,5.2 21,7 C 21,8.8 14,8.8 14,7 "
+                + "M 14,7 L 14,17 C 14,18.8 21,18.8 21,17 L 21,7 "
+                + "M 14,12 C 14,13.8 21,13.8 21,12",
+            MonitorBadgeKind.DatabaseExtend =>
+                "M 2,6 C 2,3.8 12,3.8 12,6 C 12,8.2 2,8.2 2,6 "
+                + "M 2,6 L 2,17 C 2,19.2 12,19.2 12,17 L 12,6 "
+                + "M 2,11.5 C 2,13.7 12,13.7 12,11.5 "
+                + "M 12,12 L 20,12 M 16.5,8.5 L 20,12 L 16.5,15.5",
+            _ =>
+                "M 4,6 C 4,3.8 20,3.8 20,6 C 20,8.2 4,8.2 4,6 "
+                + "M 4,6 L 4,17 C 4,19.2 20,19.2 20,17 L 20,6 "
+                + "M 4,11.5 C 4,13.7 20,13.7 20,11.5"
+        };
+
+    private string RouteSummary(
+        MonitorLinkMode mode,
+        string sourceMonitorId)
+    {
+        string source = SourceMonitorNumber(sourceMonitorId).ToString(
+            CultureInfo.InvariantCulture);
+        return mode switch
+        {
+            MonitorLinkMode.Relay => $"ретрансляция с экрана {source}",
+            MonitorLinkMode.Extend => $"расширение экрана {source}",
+            MonitorLinkMode.Disabled => "отключено",
+            _ => "изолировано"
+        };
+    }
+
+    private int SourceMonitorNumber(string monitorId)
+    {
+        for (int index = 0; index < _monitors.Count; index++)
+        {
+            if (string.Equals(
+                _monitors[index].Id,
+                monitorId,
+                StringComparison.OrdinalIgnoreCase))
+            {
+                return MonitorNumber(_monitors[index], index);
+            }
+        }
+        return 0;
+    }
+
+    private static int MonitorNumber(
+        MonitorDescriptor monitor,
+        int fallbackIndex) =>
+        monitor.DisplayNumber > 0
+            ? monitor.DisplayNumber
+            : fallbackIndex + 1;
+
+    private static SolidColorBrush BrushFromRgb(
+        int red,
+        int green,
+        int blue) =>
+        new(System.Windows.Media.Color.FromRgb(
+            (byte)red,
+            (byte)green,
+            (byte)blue));
+
+    private void MonitorTopologyCanvas_SizeChanged(
+        object sender,
+        SizeChangedEventArgs e)
+    {
+        if (!_loading)
+            RefreshMonitorVisuals();
+    }
+
+    private void MonitorVisual_MouseLeftButtonDown(
+        object sender,
+        MouseButtonEventArgs e)
+    {
+        e.Handled = true;
+        if (_loading
+            || sender is not FrameworkElement { Tag: string monitorId }
+            || string.Equals(
+                monitorId,
+                _selectedMonitorId,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        _draftSettings = ReadSettingsFromControls();
+        _selectedMonitorId = monitorId;
+        LoadSettingsCore(_draftSettings, preserveAppliedSettings: true);
     }
 
     private List<MonitorRouteChoice> CreateRouteChoices(
@@ -652,27 +1016,6 @@ public partial class SettingsWindow : Window
                     sourceMonitorId,
                     StringComparison.OrdinalIgnoreCase)));
 
-    private void MonitorDeviceCombo_SelectionChanged(
-        object sender,
-        SelectionChangedEventArgs e)
-    {
-        e.Handled = true;
-        if (_loading
-            || MonitorDeviceCombo.SelectedItem is not MonitorChoice choice
-            || string.Equals(
-                choice.Monitor.Id,
-                _selectedMonitorId,
-                StringComparison.OrdinalIgnoreCase))
-        {
-            return;
-        }
-
-        _draftSettings = ReadSettingsFromControls();
-        _selectedMonitorId = choice.Monitor.Id;
-        LoadSettingsCore(_draftSettings, preserveAppliedSettings: true);
-        QueuePreview();
-    }
-
     private void MonitorFlowModeCombo_SelectionChanged(
         object sender,
         SelectionChangedEventArgs e)
@@ -709,7 +1052,7 @@ public partial class SettingsWindow : Window
             choice.Mode,
             choice.SourceMonitorId);
         LoadSettingsCore(current, preserveAppliedSettings: true);
-        QueuePreview();
+        PublishTopologyPreview();
     }
 
     private void OpenFlowSourceButton_Click(
@@ -730,19 +1073,26 @@ public partial class SettingsWindow : Window
             : selected.DatabaseSourceMonitorId;
         if (string.IsNullOrWhiteSpace(source))
             return;
-        MonitorChoice? choice = (MonitorDeviceCombo.ItemsSource
-                as IEnumerable<MonitorChoice>)
-            ?.FirstOrDefault(item => string.Equals(
-                item.Monitor.Id,
+        if (!_monitors.Any(monitor => string.Equals(
+                monitor.Id,
                 source,
-                StringComparison.OrdinalIgnoreCase));
-        if (choice is null)
+                StringComparison.OrdinalIgnoreCase)))
+        {
             return;
+        }
 
         _draftSettings = ReadSettingsFromControls();
-        _selectedMonitorId = choice.Monitor.Id;
+        _selectedMonitorId = source;
         LoadSettingsCore(_draftSettings, preserveAppliedSettings: true);
-        QueuePreview();
+    }
+
+    private void PublishTopologyPreview()
+    {
+        _previewTimer.Stop();
+        _fontPreviewTimer.Stop();
+        _colorPreviewTimer.Stop();
+        if (!HasInvalidNumericInput())
+            SettingsPreviewed?.Invoke(ReadLivePreviewSettings());
     }
 
     private void UpdateMonitorRouteNotices()
@@ -1722,10 +2072,6 @@ public partial class SettingsWindow : Window
             case "ImageShadowBalance": ImageShadowBalanceSlider.Value = standard.ImageShadowBalance; break;
             case "ImagePaletteAdaptation": ImagePaletteAdaptationSlider.Value = standard.ImagePaletteAdaptation; break;
             case "ImageToneCalmness": ImageToneCalmnessSlider.Value = standard.ImageToneCalmness; break;
-            case "ClockHorizontalMargin": ClockHorizontalMarginSlider.Value = standard.ClockHorizontalMarginCells; break;
-            case "ClockVerticalMargin": ClockVerticalMarginSlider.Value = standard.ClockVerticalMarginCells; break;
-            case "ClockBrightness": ClockBrightnessSlider.Value = standard.ClockBrightness; break;
-            case "ClockWeight": ClockWeightSlider.Value = standard.ClockWeight; break;
             case "FontFamily":
                 EnsureFontOption(standard.FontFamily);
                 SelectByTag(FontCombo, standard.FontFamily);
@@ -1734,8 +2080,6 @@ public partial class SettingsWindow : Window
             case "ImageStructureMode": SelectByTag(ImageStructureModeCombo, standard.ImageStructureMode); break;
             case "ImageFit": SelectByTag(ImageFitCombo, standard.ImageFit); break;
             case "FramesPerSecond": SelectByTag(FpsCombo, standard.FramesPerSecond.ToString()); break;
-            case "ClockEnabled": ClockEnabledCheck.IsChecked = standard.ClockEnabled; break;
-            case "ClockPosition": SelectByTag(ClockPositionCombo, standard.ClockPosition); break;
             case "ImageMode": ImageModeCheck.IsChecked = standard.ImageMode; break;
             case "StartWithWindows": AutostartCheck.IsChecked = standard.StartWithWindows; break;
             case "PauseDuringFullscreenApps":
@@ -1755,9 +2099,6 @@ public partial class SettingsWindow : Window
                 break;
             case "CurrentContour":
                 ResetCurrentContour(standard);
-                break;
-            case "ClockBlock":
-                ResetClockBlock(standard);
                 break;
             case "AnalysisBlock":
                 ResetAnalysisBlock(standard);
@@ -1968,15 +2309,6 @@ public partial class SettingsWindow : Window
             HeadImpulseDecaySlider.Value = standard.HeadImpulseDecay;
             HeadImpulseProbabilitySlider.Value = standard.HeadImpulseProbability;
         }
-    }
-
-    private void ResetClockBlock(AppSettings standard)
-    {
-        SelectByTag(ClockPositionCombo, standard.ClockPosition);
-        ClockHorizontalMarginSlider.Value = standard.ClockHorizontalMarginCells;
-        ClockVerticalMarginSlider.Value = standard.ClockVerticalMarginCells;
-        ClockBrightnessSlider.Value = standard.ClockBrightness;
-        ClockWeightSlider.Value = standard.ClockWeight;
     }
 
     private void ResetSourcesBlock(AppSettings standard)
@@ -2545,10 +2877,6 @@ public partial class SettingsWindow : Window
         yield return ImageShadowBalanceInput;
         yield return ImagePaletteAdaptationInput;
         yield return ImageToneCalmnessInput;
-        yield return ClockHorizontalMarginInput;
-        yield return ClockVerticalMarginInput;
-        yield return ClockBrightnessInput;
-        yield return ClockWeightInput;
     }
 
     private void NumericInput_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
@@ -2659,10 +2987,6 @@ public partial class SettingsWindow : Window
         CommitNumericInput(ImageShadowBalanceInput);
         CommitNumericInput(ImagePaletteAdaptationInput);
         CommitNumericInput(ImageToneCalmnessInput);
-        CommitNumericInput(ClockHorizontalMarginInput);
-        CommitNumericInput(ClockVerticalMarginInput);
-        CommitNumericInput(ClockBrightnessInput);
-        CommitNumericInput(ClockWeightInput);
         CommitNumericInput(AttackIdleMinutesInput);
         CommitNumericInput(AttackTransitionSecondsInput);
     }
@@ -2780,10 +3104,6 @@ public partial class SettingsWindow : Window
         "ImageShadowBalance" => new NumericInputSpec(ImageShadowBalanceSlider, 100, "0.#"),
         "ImagePaletteAdaptation" => new NumericInputSpec(ImagePaletteAdaptationSlider, 100, "0.#"),
         "ImageToneCalmness" => new NumericInputSpec(ImageToneCalmnessSlider, 100, "0.#"),
-        "ClockHorizontalMargin" => new NumericInputSpec(ClockHorizontalMarginSlider, 1, "0"),
-        "ClockVerticalMargin" => new NumericInputSpec(ClockVerticalMarginSlider, 1, "0"),
-        "ClockBrightness" => new NumericInputSpec(ClockBrightnessSlider, 100, "0.#"),
-        "ClockWeight" => new NumericInputSpec(ClockWeightSlider, 100, "0.#"),
         "AttackIdleMinutes" => new NumericInputSpec(
             AttackIdleMinutesSlider,
             1,
@@ -2794,8 +3114,8 @@ public partial class SettingsWindow : Window
             AttackTransitionSecondsSlider,
             1,
             "0.#",
-            1.0,
-            30.0),
+            AppSettings.MinimumAttackTransitionSeconds,
+            AppSettings.MaximumAttackTransitionSeconds),
         _ => null
     };
 
@@ -3043,10 +3363,6 @@ public partial class SettingsWindow : Window
             ImageToneCalmnessSlider.Value * 100,
             "0.#",
             force);
-        UpdateNumericInput(ClockHorizontalMarginInput, ClockHorizontalMarginSlider.Value, "0", force);
-        UpdateNumericInput(ClockVerticalMarginInput, ClockVerticalMarginSlider.Value, "0", force);
-        UpdateNumericInput(ClockBrightnessInput, ClockBrightnessSlider.Value * 100, "0.#", force);
-        UpdateNumericInput(ClockWeightInput, ClockWeightSlider.Value * 100, "0.#", force);
         UpdateNumericInput(
             AttackIdleMinutesInput,
             _attackIdleMinutesValue,
@@ -3489,12 +3805,6 @@ public partial class SettingsWindow : Window
 
     private void UpdateCollapsibleSections()
     {
-        if (ClockContentPanel is not null)
-        {
-            ClockContentPanel.Visibility = ClockEnabledCheck.IsChecked == true
-                ? Visibility.Visible
-                : Visibility.Collapsed;
-        }
         if (DatabaseContentPanel is not null)
         {
             MonitorProfile? profile = _monitors.Count == 0

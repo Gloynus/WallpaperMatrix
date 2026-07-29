@@ -95,12 +95,6 @@ internal static class AppSettingsComparer
         && Near(left.ImageToneCalmness, right.ImageToneCalmness)
         && left.ImageStructureMode == right.ImageStructureMode
         && left.ImageFit == right.ImageFit
-        && left.ClockEnabled == right.ClockEnabled
-        && left.ClockPosition == right.ClockPosition
-        && left.ClockHorizontalMarginCells == right.ClockHorizontalMarginCells
-        && left.ClockVerticalMarginCells == right.ClockVerticalMarginCells
-        && Near(left.ClockBrightness, right.ClockBrightness)
-        && Near(left.ClockWeight, right.ClockWeight)
         && left.StartWithWindows == right.StartWithWindows
         && left.PauseDuringFullscreenApps == right.PauseDuringFullscreenApps
         && left.AttackSystemEnabled == right.AttackSystemEnabled

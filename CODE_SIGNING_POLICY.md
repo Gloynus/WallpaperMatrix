@@ -1,57 +1,66 @@
-# Code signing policy
+# Release and code-signing policy
 
-## Official source and releases
+## Official source
 
-The official source repository is
+The official repository is
 [Gloynus/WallpaperMatrix](https://github.com/Gloynus/WallpaperMatrix).
-An official binary release must:
 
-- be built from an immutable version tag on the protected `main` branch;
-- be produced by the repository's `release-build` GitHub Actions workflow;
+Every public release must:
+
+- come from an immutable version tag on `main`;
+- be built by `.github/workflows/release-build.yml`;
 - use dependencies pinned by `packages.lock.json`;
-- contain the product name `Wallpaper Matrix` and one consistent product,
-  file and assembly version;
-- be approved for signing by the project approver;
-- be published through the repository's GitHub Releases page together with a
-  SHA-256 checksum.
+- contain matching product, file and assembly versions;
+- publish the portable archive and its SHA-256 checksum together;
+- publish release notes matching the version.
 
-Unsigned local builds and historical unsigned releases are development or
-legacy artifacts. They are not represented as signed official releases.
+The SHA-256 checksum verifies that a downloaded archive matches the release
+asset. It does not prove the identity of the publisher.
+
+## Current signature status
+
+An executable is digitally signed only when Windows reports a valid
+Authenticode signature for that exact file. A GitHub Release, version tag or
+SHA-256 checksum must never be described as a digital signature.
+
+Until a signing provider has issued and applied a certificate, public
+Wallpaper Matrix binaries are unsigned. Windows 11 Smart App Control can block
+an unsigned executable without offering a per-file bypass.
+
+The intended future provider is:
 
 Free code signing provided by
 [SignPath.io](https://about.signpath.io/), certificate by
 [SignPath Foundation](https://signpath.org/).
 
-This statement describes the selected signing provider and becomes applicable
-to a binary only when Windows reports a valid Authenticode signature for that
-specific file.
+This statement records the planned release process; it does not claim that an
+existing binary is signed.
 
-## Team roles
+## Verification
 
-- Committer and reviewer: [Gloynus](https://github.com/Gloynus)
-- Signing approver: [Gloynus](https://github.com/Gloynus)
+Checksum:
 
-Changes proposed by anyone other than the committer require review before they
-are merged. Signing requests require a separate manual approval by the signing
-approver. Multi-factor authentication is required for repository and signing
-service access.
+```powershell
+Get-FileHash .\WallpaperMatrix-3.6.5-portable-win-x64.zip -Algorithm SHA256
+```
 
-## Privacy and system changes
-
-The project privacy policy is published in [PRIVACY.md](PRIVACY.md).
-Wallpaper Matrix announces and exposes controls for its optional autostart
-registry entry. It installs no service, driver or system library and provides
-portable removal instructions in the README.
-
-## Signature verification
-
-For a downloaded release, Windows PowerShell should report `Valid`:
+Authenticode:
 
 ```powershell
 Get-AuthenticodeSignature .\WallpaperMatrix.exe |
     Format-List Status, StatusMessage, SignerCertificate
 ```
 
-The file properties dialog must also show a valid signature on the
-**Digital Signatures** tab. A missing or invalid signature must never be
-described as an official signed release.
+Only `Status: Valid` confirms a valid signature. A missing or invalid signature
+must be reported as unsigned.
+
+## Project controls
+
+- Committer, reviewer and signing approver:
+  [Gloynus](https://github.com/Gloynus)
+- Repository and signing accounts should use multi-factor authentication.
+- Third-party changes require review before merge.
+- Signing approval, when available, must be a separate explicit action.
+
+Wallpaper Matrix installs no service, driver or system library. Optional
+autostart is visible in the interface and belongs only to the current user.

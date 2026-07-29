@@ -67,6 +67,9 @@ internal sealed class MatrixSceneRenderer : IDisposable
     private float[] _trailImageResistance = [];
     private ushort[] _trailGlyphs = [];
     private long[] _trailStreamIds = [];
+    private long[] _trailGenerations = [];
+    private uint[] _trailRevealSeeds = [];
+    private long[] _observedTrailGenerations = [];
     private float[] _imageLevels = [];
     private float[] _imageInitialLevels = [];
     private float[] _imageHoldSeconds = [];
@@ -74,13 +77,8 @@ internal sealed class MatrixSceneRenderer : IDisposable
     private float[] _imageFadeSeconds = [];
     private ushort[] _imageGlyphs = [];
     private byte[] _imageStyles = [];
+    private long[] _imageStreamIds = [];
     private GlyphDensity[][] _imageGlyphDensities = [[], [], []];
-    private bool[] _clockCells = [];
-    private int[] _clockCellIndices = [];
-    private ushort[] _clockDisplayedGlyphs = [];
-    private double[] _clockBrightness = [];
-    private string _clockTargetText = "";
-    private int _clockTargetMinute = -1;
     private GlyphInstance[] _instances = [];
     private List<RainStream>[] _streamsByColumn = [];
     private ColumnSpawner[] _spawners = [];
@@ -94,12 +92,16 @@ internal sealed class MatrixSceneRenderer : IDisposable
     private double _simulationTime;
     private long _nextStreamId;
     private long _lastSlowFrameReportTimestamp;
+    private bool _seedFreshStreams;
+    private MatrixSceneRenderer? _flowSource;
+    private double _motionScale = 1.0;
 
     public MatrixSceneRenderer(
         IntPtr referenceWindow,
         SharedMatrixScene scene,
         AppSettings settings,
-        int? randomSeed = null)
+        int? randomSeed = null,
+        bool seedInitialStreams = true)
     {
         _referenceWindow = referenceWindow;
         _scene = scene;
@@ -111,6 +113,7 @@ internal sealed class MatrixSceneRenderer : IDisposable
             new System.Drawing.Rectangle(0, 0, _width, _height),
             new System.Drawing.Rectangle(0, 0, _width, _height));
         _settings = settings.Copy();
+        _seedFreshStreams = seedInitialStreams;
         _random = randomSeed.HasValue
             ? new Random(randomSeed.Value)
             : new Random();
@@ -134,15 +137,9 @@ internal sealed class MatrixSceneRenderer : IDisposable
         bool atlasChanged = gridGeometryChanged
             || fontFamilyChanged
             || Math.Abs(settings.GlyphWeight - _settings.GlyphWeight) > 0.001
-            || Math.Abs(settings.HeadWeight - _settings.HeadWeight) > 0.01
-            || Math.Abs(settings.ClockWeight - _settings.ClockWeight) > 0.01;
+            || Math.Abs(settings.HeadWeight - _settings.HeadWeight) > 0.01;
         bool gridChanged = gridGeometryChanged;
-        bool clockLayoutChanged = settings.ClockEnabled != _settings.ClockEnabled
-            || settings.ClockPosition != _settings.ClockPosition
-            || settings.ClockHorizontalMarginCells != _settings.ClockHorizontalMarginCells
-            || settings.ClockVerticalMarginCells != _settings.ClockVerticalMarginCells;
         bool maskChanged = gridChanged || settings.ImageFit != _settings.ImageFit;
-        bool imageModeDisabled = _settings.ImageMode && !settings.ImageMode;
         bool spawnCadenceChanged =
             Math.Abs(settings.InterceptionRate - _settings.InterceptionRate) > 0.001
             || Math.Abs(settings.Density - _settings.Density) > 0.001
@@ -189,8 +186,6 @@ internal sealed class MatrixSceneRenderer : IDisposable
             RebuildCurveLookups();
         if (gridChanged)
             RebuildGrid();
-        else if (clockLayoutChanged)
-            RebuildClockLayout();
         if (atlasChanged)
             RebuildAtlas();
         if (maskChanged)
@@ -200,16 +195,12 @@ internal sealed class MatrixSceneRenderer : IDisposable
             foreach (ColumnSpawner spawner in _spawners)
                 ScheduleNextSpawn(spawner, initial: true);
         }
-        if (imageModeDisabled)
-            ClearImageOverlay();
     }
 
     public void SetImage(PreparedImage? image)
     {
         _image = image;
         _maskDirty = true;
-        if (image is null)
-            ClearImageOverlay();
     }
 
     public void SetImage(
@@ -219,8 +210,6 @@ internal sealed class MatrixSceneRenderer : IDisposable
         _image = image;
         _imageProjection = projection;
         _maskDirty = true;
-        if (image is null)
-            ClearImageOverlay();
     }
 
     public void ResetImageOverlay(PreparedImage? image)
@@ -232,6 +221,58 @@ internal sealed class MatrixSceneRenderer : IDisposable
 
     public bool RenderIfDue(bool paused) =>
         RenderIfDue(paused, _clock.Elapsed);
+
+    public void FollowFlowFrom(MatrixSceneRenderer? source)
+    {
+        if (ReferenceEquals(source, this))
+            source = null;
+        if (ReferenceEquals(_flowSource, source))
+            return;
+
+        _flowSource = source;
+        if (source is null)
+        {
+            Array.Clear(_observedTrailGenerations);
+            return;
+        }
+
+        if (_observedTrailGenerations.Length != _trailGenerations.Length)
+            _observedTrailGenerations = new long[_trailGenerations.Length];
+        int count = Math.Min(
+            _observedTrailGenerations.Length,
+            source._trailGenerations.Length);
+        Array.Copy(
+            source._trailGenerations,
+            _observedTrailGenerations,
+            count);
+    }
+
+    public void SetMotionScale(double scale) =>
+        Volatile.Write(
+            ref _motionScale,
+            Math.Clamp(scale, 0.0, 1.0));
+
+    public void ImportStateFrom(
+        MatrixSceneRenderer source,
+        System.Drawing.Rectangle sourceCanvas,
+        System.Drawing.Rectangle targetCanvas)
+    {
+        GridSnapshot? snapshot = source.CaptureGridSnapshot();
+        if (snapshot is null)
+            return;
+
+        ClearGridState();
+        RestoreGridSnapshot(
+            snapshot,
+            new SpatialRestoreMap(sourceCanvas, targetCanvas));
+        PublishScene();
+    }
+
+    public void RefreshPublishedScene()
+    {
+        BuildRainCells();
+        PublishScene();
+    }
 
     public bool RenderIfDue(bool paused, TimeSpan now)
     {
@@ -255,13 +296,17 @@ internal sealed class MatrixSceneRenderer : IDisposable
 
         double dt = Math.Min(0.08, Math.Max(0.0, (now - _lastFrameAt).TotalSeconds));
         _lastFrameAt = now;
+        dt *= Volatile.Read(ref _motionScale);
         long frameStartedAt = Stopwatch.GetTimestamp();
         if (_settings.ImageMode && _image is not null)
             EnsureImageMask();
         long maskFinishedAt = Stopwatch.GetTimestamp();
         FadeImageCells(dt);
         long fadeFinishedAt = Stopwatch.GetTimestamp();
-        AdvanceStreams(dt);
+        if (_flowSource is null)
+            AdvanceStreams(dt);
+        else
+            SynchronizeFlowDeposits(_flowSource);
         long streamsFinishedAt = Stopwatch.GetTimestamp();
         BuildRainCells();
         long cellsFinishedAt = Stopwatch.GetTimestamp();
@@ -323,21 +368,24 @@ internal sealed class MatrixSceneRenderer : IDisposable
 
     private void BuildRainCells()
     {
+        MatrixSceneRenderer flow = _flowSource ?? this;
         Array.Clear(_nextRainLevels);
         Array.Clear(_nextRainStyles);
         Array.Clear(_nextRainEmphasis);
         Array.Clear(_nextRainGlow);
         Array.Clear(_nextRainCovered);
         Array.Clear(_nextRainGlyphs);
-        for (int index = 0; index < _trailOccupied.Length; index++)
+        for (int index = 0; index < flow._trailOccupied.Length; index++)
         {
-            if (!_trailOccupied[index])
+            if (!flow._trailOccupied[index])
                 continue;
 
             int row = index / _columns;
             int column = index - row * _columns;
             double horizontalShade = EdgeShade((column + 0.5) / _columns);
-            double age = Math.Max(0, _simulationTime - _trailBornAt[index]);
+            double age = Math.Max(
+                0,
+                flow._simulationTime - flow._trailBornAt[index]);
             double resistance = Math.Clamp(
                 _trailImageResistance[index],
                 0.0f,
@@ -348,21 +396,20 @@ internal sealed class MatrixSceneRenderer : IDisposable
             double effectiveAge = double.IsPositiveInfinity(fadeRate)
                 ? double.PositiveInfinity
                 : age * fadeRate;
-            double emphasis = _trailImpulseEnabled[index]
+            double emphasis = flow._trailImpulseEnabled[index]
                 ? HeadImpulseModel.Emphasis(
                     age,
-                    _trailPulseHoldSeconds[index],
-                    _trailPulseFadeSeconds[index])
+                    flow._trailPulseHoldSeconds[index],
+                    flow._trailPulseFadeSeconds[index])
                 : 0.0;
 
             double baseFade = double.IsPositiveInfinity(effectiveAge)
                 ? 0.0
                 : TrailMemoryModel.RemainingBrightness(
                     effectiveAge,
-                    _trailMemoryHoldSeconds[index],
-                    _trailMemoryFadeSeconds[index]);
-            bool imageCell = _settings.ImageMode
-                && _imageLevels[index] > 0.01f
+                    flow._trailMemoryHoldSeconds[index],
+                    flow._trailMemoryFadeSeconds[index]);
+            bool imageCell = _imageLevels[index] > 0.01f
                 && _imageStyles[index] >= 3;
             if (baseFade <= 0.001
                 && emphasis <= 0.001
@@ -374,13 +421,13 @@ internal sealed class MatrixSceneRenderer : IDisposable
 
             _nextRainCovered[index] = true;
             _nextRainGlow[index] = (float)Math.Clamp(
-                _trailGlowStrength[index] + _settings.HeadGlow * emphasis,
+                flow._trailGlowStrength[index] + _settings.HeadGlow * emphasis,
                 0.0,
                 2.0);
             if (_trailSuppressImage[index])
                 continue;
 
-            double baseIntensity = _trailBaseIntensity[index]
+            double baseIntensity = flow._trailBaseIntensity[index]
                 * horizontalShade
                 * EdgeShade((row + 0.5) / _rows);
             double intensity = baseFade
@@ -398,13 +445,12 @@ internal sealed class MatrixSceneRenderer : IDisposable
             else
             {
                 _nextRainLevels[index] = (byte)rainLevel;
-                _nextRainGlyphs[index] = _trailGlyphs[index];
+                _nextRainGlyphs[index] = flow._trailGlyphs[index];
                 _nextRainStyles[index] = emphasis > 0.001 ? (byte)1 : (byte)0;
             }
             _nextRainEmphasis[index] = (float)emphasis;
         }
 
-        ApplyClockCells();
         (_rainLevels, _nextRainLevels) = (_nextRainLevels, _rainLevels);
         (_rainStyles, _nextRainStyles) = (_nextRainStyles, _rainStyles);
         (_rainEmphasis, _nextRainEmphasis) = (_nextRainEmphasis, _rainEmphasis);
@@ -415,12 +461,12 @@ internal sealed class MatrixSceneRenderer : IDisposable
 
     private void PublishScene()
     {
+        MatrixSceneRenderer flow = _flowSource ?? this;
         int count = 0;
         for (int index = 0; index < _rainLevels.Length; index++)
         {
             int row = index / _columns;
             int column = index - row * _columns;
-            bool clockCell = _clockCells.Length > index && _clockCells[index];
             int rainLevel = _rainLevels[index];
             if (rainLevel > 0)
             {
@@ -433,11 +479,11 @@ internal sealed class MatrixSceneRenderer : IDisposable
                     _rainStyles[index],
                     _rainEmphasis[index],
                     _rainGlow[index],
-                    _trailStreamIds[index]);
+                    flow._trailStreamIds[index]);
                 continue;
             }
 
-            if (clockCell || _rainCovered[index] || !_settings.ImageMode || _imageLevels[index] <= 0)
+            if (_rainCovered[index] || _imageLevels[index] <= 0)
                 continue;
             AddInstance(
                 ref count,
@@ -448,7 +494,7 @@ internal sealed class MatrixSceneRenderer : IDisposable
                 _imageStyles[index],
                 emphasis: 0,
                 glow: 0,
-                streamId: 0);
+                streamId: _imageStreamIds[index]);
         }
 
         SignalRgb signal = SignalColorModel.ToRgb(
@@ -476,7 +522,7 @@ internal sealed class MatrixSceneRenderer : IDisposable
                 count,
                 _pendingAtlas,
                 parameters,
-                _nextStreamId);
+                flow._nextStreamId);
             _pendingAtlas = null;
         }
     }
@@ -508,10 +554,6 @@ internal sealed class MatrixSceneRenderer : IDisposable
     private void AdvanceStreams(double dt)
     {
         _simulationTime += dt;
-        UpdateClockTarget();
-        int minimumClockLevel = MinimumClockLevel();
-        for (int slot = 0; slot < _clockBrightness.Length; slot++)
-            _clockBrightness[slot] = Math.Max(minimumClockLevel, _clockBrightness[slot] - dt * 6.5);
 
         for (int column = 0; column < _streamsByColumn.Length; column++)
         {
@@ -538,7 +580,6 @@ internal sealed class MatrixSceneRenderer : IDisposable
                 stream.PreviousHead = stream.Head;
                 stream.Head += stream.Speed * dt;
                 DepositCrossedCells(column, stream);
-                AdvanceClockCell(column, stream.PreviousHead, stream.Head);
                 if (stream.Head > stream.TerminationRow)
                     streams.RemoveAt(index);
             }
@@ -578,12 +619,14 @@ internal sealed class MatrixSceneRenderer : IDisposable
                 column,
                 row,
                 stream.Seed,
-                stream.MemoryFadeSeconds);
+                stream.MemoryFadeSeconds,
+                stream.Id);
         }
         int index = row * _columns + column;
+        if (!imageInfluence)
+            ClearImageCell(index);
         uint noise = Hash((uint)column, (uint)row, stream.Seed);
-        bool imageCell = _settings.ImageMode
-            && _imageLevels[index] > 0.01f
+        bool imageCell = _imageLevels[index] > 0.01f
             && _imageStyles[index] >= 3;
         bool deliberateGap = (noise & 31) == 0 || ((noise >> 5) & 63) == 0;
         _trailOccupied[index] = true;
@@ -615,6 +658,57 @@ internal sealed class MatrixSceneRenderer : IDisposable
             Hash(noise, (uint)(row / 3), stream.Seed)
             % MatrixGlyphSet.GlyphStrings.Length);
         _trailStreamIds[index] = stream.Id;
+        _trailRevealSeeds[index] = stream.Seed;
+        _trailGenerations[index]++;
+    }
+
+    private void SynchronizeFlowDeposits(MatrixSceneRenderer source)
+    {
+        int count = Math.Min(
+            _trailImageResistance.Length,
+            source._trailGenerations.Length);
+        if (_observedTrailGenerations.Length != _trailImageResistance.Length)
+            _observedTrailGenerations = new long[_trailImageResistance.Length];
+
+        bool imageInfluence = _settings.ImageMode
+            && _imageMask is not null
+            && _imageMask.Length == _imageLevels.Length;
+        for (int index = 0; index < count; index++)
+        {
+            long generation = source._trailGenerations[index];
+            if (_observedTrailGenerations[index] == generation)
+                continue;
+            _observedTrailGenerations[index] = generation;
+            if (!source._trailOccupied[index])
+                continue;
+
+            int row = index / _columns;
+            int column = index - row * _columns;
+            uint revealSeed = source._trailRevealSeeds[index];
+            if (imageInfluence)
+            {
+                ReplaceImageCell(
+                    column,
+                    row,
+                    revealSeed,
+                    source._trailMemoryFadeSeconds[index],
+                    source._trailStreamIds[index]);
+            }
+            else
+            {
+                ClearImageCell(index);
+            }
+
+            uint noise = Hash((uint)column, (uint)row, revealSeed);
+            bool imageCell = _imageLevels[index] > 0.01f
+                && _imageStyles[index] >= 3;
+            bool deliberateGap =
+                (noise & 31) == 0 || ((noise >> 5) & 63) == 0;
+            _trailSuppressImage[index] = deliberateGap && !imageCell;
+            _trailImageResistance[index] = imageInfluence
+                ? (float)_settings.ImageResistance
+                : 0.0f;
+        }
     }
 
     private void SeedInitialTrail(int column, RainStream stream)
@@ -632,71 +726,9 @@ internal sealed class MatrixSceneRenderer : IDisposable
         stream.LastWrittenRow = headRow;
     }
 
-    private void ApplyClockCells()
-    {
-        int minimumClockLevel = MinimumClockLevel();
-        for (int slot = 0; slot < _clockCellIndices.Length; slot++)
-        {
-            int index = _clockCellIndices[slot];
-            if ((uint)index >= (uint)_nextRainLevels.Length)
-                continue;
-
-            int rainLevel = _nextRainLevels[index];
-            int rainClockLevel = minimumClockLevel
-                + (int)Math.Round(rainLevel / (double)PaletteLevels * (PaletteLevels - minimumClockLevel));
-            int clockLevel = Math.Max((int)Math.Round(_clockBrightness[slot]), rainClockLevel);
-            _nextRainLevels[index] = (byte)Math.Clamp(clockLevel, minimumClockLevel, PaletteLevels);
-            _nextRainGlyphs[index] = _clockDisplayedGlyphs[slot];
-            _nextRainStyles[index] = 2;
-            _nextRainEmphasis[index] = 0;
-        }
-    }
-
-    private int MinimumClockLevel() =>
-        Math.Clamp(
-            (int)Math.Round(_settings.ClockBrightness * PaletteLevels),
-            PaletteLevels / 2,
-            PaletteLevels);
-
-    private void UpdateClockTarget()
-    {
-        if (!_settings.ClockEnabled || _clockCellIndices.Length != 5)
-            return;
-        DateTime now = DateTime.Now;
-        int minuteOfDay = now.Hour * 60 + now.Minute;
-        if (minuteOfDay == _clockTargetMinute)
-            return;
-        _clockTargetMinute = minuteOfDay;
-        _clockTargetText = now.ToString("HH:mm", System.Globalization.CultureInfo.InvariantCulture);
-    }
-
-    private void AdvanceClockCell(int column, double previousHead, double currentHead)
-    {
-        if (_clockCellIndices.Length != 5 || _clockTargetText.Length != 5)
-            return;
-
-        int previousRow = (int)Math.Floor(previousHead);
-        int currentRow = (int)Math.Floor(currentHead);
-        for (int slot = 0; slot < _clockCellIndices.Length; slot++)
-        {
-            int index = _clockCellIndices[slot];
-            int clockRow = index / _columns;
-            int clockColumn = index - clockRow * _columns;
-            if (clockColumn != column || previousRow >= clockRow || currentRow < clockRow)
-                continue;
-
-            int glyphIndex = MatrixGlyphSet.Glyphs.IndexOf(
-                _clockTargetText[slot],
-                StringComparison.Ordinal);
-            if (glyphIndex >= 0)
-                _clockDisplayedGlyphs[slot] = (ushort)glyphIndex;
-            _clockBrightness[slot] = PaletteLevels;
-        }
-    }
-
     private void FadeImageCells(double dt)
     {
-        if (!_settings.ImageMode || dt <= 0 || _imageLevels.Length == 0)
+        if (dt <= 0 || _imageLevels.Length == 0)
             return;
 
         for (int index = 0; index < _imageLevels.Length; index++)
@@ -728,6 +760,7 @@ internal sealed class MatrixSceneRenderer : IDisposable
                 continue;
             _imageGlyphs[index] = 0;
             _imageStyles[index] = 0;
+            _imageStreamIds[index] = 0;
         }
     }
 
@@ -735,7 +768,8 @@ internal sealed class MatrixSceneRenderer : IDisposable
         int column,
         int row,
         uint revealSeed,
-        double fadeSeconds)
+        double fadeSeconds,
+        long streamId)
     {
         int index = row * _columns + column;
         double sourceTone = _imageMask![index] / 255.0;
@@ -755,6 +789,7 @@ internal sealed class MatrixSceneRenderer : IDisposable
             _imageFadeElapsed[index] = 0;
             _imageGlyphs[index] = 0;
             _imageStyles[index] = 0;
+            _imageStreamIds[index] = 0;
             return;
         }
 
@@ -780,6 +815,7 @@ internal sealed class MatrixSceneRenderer : IDisposable
         _imageFadeSeconds[index] = (float)Math.Max(0.1, fadeSeconds);
         _imageGlyphs[index] = (ushort)targetGlyph;
         _imageStyles[index] = targetLevel == 0 ? (byte)0 : (byte)(3 + weightTier);
+        _imageStreamIds[index] = targetLevel == 0 ? 0 : streamId;
     }
 
     private int SelectImageGlyph(
@@ -902,6 +938,9 @@ internal sealed class MatrixSceneRenderer : IDisposable
         _trailImageResistance = new float[cellCount];
         _trailGlyphs = new ushort[cellCount];
         _trailStreamIds = new long[cellCount];
+        _trailGenerations = new long[cellCount];
+        _trailRevealSeeds = new uint[cellCount];
+        _observedTrailGenerations = new long[cellCount];
         _imageLevels = new float[cellCount];
         _imageInitialLevels = new float[cellCount];
         _imageHoldSeconds = new float[cellCount];
@@ -909,11 +948,11 @@ internal sealed class MatrixSceneRenderer : IDisposable
         _imageFadeSeconds = Enumerable.Repeat(1.0f, cellCount).ToArray();
         _imageGlyphs = new ushort[cellCount];
         _imageStyles = new byte[cellCount];
+        _imageStreamIds = new long[cellCount];
         // The previous tone map belongs to the old grid. Initial streams are
         // seeded below, so detach it before they can reveal any image cells.
         _imageMask = null;
         _maskDirty = true;
-        _clockCells = new bool[cellCount];
         _instances = new GlyphInstance[cellCount];
         _streamsByColumn = new List<RainStream>[_columns];
         _spawners = new ColumnSpawner[_columns];
@@ -926,9 +965,8 @@ internal sealed class MatrixSceneRenderer : IDisposable
             SeedFreshGrid();
         else
             RestoreGridSnapshot(snapshot);
-        RebuildClockLayout();
-        if (snapshot is not null)
-            RestoreClockSnapshot(snapshot);
+        if (_flowSource is not null)
+            AlignObservedFlow(_flowSource);
     }
 
     private GridSnapshot? CaptureGridSnapshot()
@@ -938,6 +976,7 @@ internal sealed class MatrixSceneRenderer : IDisposable
             || _rows <= 0
             || _trailOccupied.Length != cellCount
             || _imageLevels.Length != cellCount
+            || _imageStreamIds.Length != cellCount
             || _streamsByColumn.Length != _columns)
         {
             return null;
@@ -961,6 +1000,8 @@ internal sealed class MatrixSceneRenderer : IDisposable
             _trailImageResistance,
             _trailGlyphs,
             _trailStreamIds,
+            _trailGenerations,
+            _trailRevealSeeds,
             _imageLevels,
             _imageInitialLevels,
             _imageHoldSeconds,
@@ -968,10 +1009,9 @@ internal sealed class MatrixSceneRenderer : IDisposable
             _imageFadeSeconds,
             _imageGlyphs,
             _imageStyles,
+            _imageStreamIds,
             _streamsByColumn,
-            _spawners,
-            _clockDisplayedGlyphs,
-            _clockBrightness);
+            _spawners);
     }
 
     private void SeedFreshGrid()
@@ -980,22 +1020,33 @@ internal sealed class MatrixSceneRenderer : IDisposable
         _nextStreamId = 0;
         for (int column = 0; column < _columns; column++)
         {
-            if (_random.NextDouble() <= _settings.Density)
+            if (_seedFreshStreams
+                && _random.NextDouble() <= _settings.Density)
+            {
                 SpawnStream(column, firstRun: true);
+            }
             ScheduleNextSpawn(_spawners[column], initial: true);
         }
+        // Empty seeding is a one-shot startup policy. Any later full rebuild
+        // (for example after recovery from a lost device) may restore the
+        // normal populated scene instead of remaining blank indefinitely.
+        _seedFreshStreams = true;
     }
 
-    private void RestoreGridSnapshot(GridSnapshot snapshot)
+    private void RestoreGridSnapshot(
+        GridSnapshot snapshot,
+        SpatialRestoreMap? spatialMap = null)
     {
         _simulationTime = snapshot.SimulationTime;
         _nextStreamId = snapshot.NextStreamId;
-        RestoreTrailCells(snapshot);
-        RestoreImageCells(snapshot);
-        RestoreStreams(snapshot);
+        RestoreTrailCells(snapshot, spatialMap);
+        RestoreImageCells(snapshot, spatialMap);
+        RestoreStreams(snapshot, spatialMap);
     }
 
-    private void RestoreTrailCells(GridSnapshot snapshot)
+    private void RestoreTrailCells(
+        GridSnapshot snapshot,
+        SpatialRestoreMap? spatialMap)
     {
         for (int oldIndex = 0;
              oldIndex < snapshot.TrailOccupied.Length;
@@ -1006,8 +1057,16 @@ internal sealed class MatrixSceneRenderer : IDisposable
 
             int oldRow = oldIndex / snapshot.Columns;
             int oldColumn = oldIndex - oldRow * snapshot.Columns;
-            int column = MapCellCenter(oldColumn, snapshot.Columns, _columns);
-            int row = MapCellCenter(oldRow, snapshot.Rows, _rows);
+            int column = MapRestoredColumn(
+                oldColumn,
+                snapshot.Columns,
+                spatialMap);
+            int row = MapRestoredRow(
+                oldRow,
+                snapshot.Rows,
+                spatialMap);
+            if (column < 0 || row < 0)
+                continue;
             int index = row * _columns + column;
             double candidateScore = TrailCellScore(
                 snapshot.SimulationTime,
@@ -1055,11 +1114,45 @@ internal sealed class MatrixSceneRenderer : IDisposable
                 snapshot.TrailImageResistance[oldIndex];
             _trailGlyphs[index] = snapshot.TrailGlyphs[oldIndex];
             _trailStreamIds[index] = snapshot.TrailStreamIds[oldIndex];
+            _trailGenerations[index] =
+                snapshot.TrailGenerations[oldIndex];
+            _trailRevealSeeds[index] =
+                snapshot.TrailRevealSeeds[oldIndex];
         }
     }
 
-    private void RestoreImageCells(GridSnapshot snapshot)
+    private void RestoreImageCells(
+        GridSnapshot snapshot,
+        SpatialRestoreMap? spatialMap)
     {
+        if (spatialMap is not null)
+        {
+            for (int oldIndex = 0;
+                 oldIndex < snapshot.ImageLevels.Length;
+                 oldIndex++)
+            {
+                float candidateLevel = snapshot.ImageLevels[oldIndex];
+                if (candidateLevel <= 0.01f)
+                    continue;
+                int oldRow = oldIndex / snapshot.Columns;
+                int oldColumn = oldIndex - oldRow * snapshot.Columns;
+                int column = MapRestoredColumn(
+                    oldColumn,
+                    snapshot.Columns,
+                    spatialMap);
+                int row = MapRestoredRow(
+                    oldRow,
+                    snapshot.Rows,
+                    spatialMap);
+                if (column < 0 || row < 0)
+                    continue;
+                int index = row * _columns + column;
+                if (_imageLevels[index] <= candidateLevel)
+                    CopyImageCell(snapshot, oldIndex, index);
+            }
+            return;
+        }
+
         bool refining = _columns >= snapshot.Columns
             && _rows >= snapshot.Rows;
         if (refining)
@@ -1116,23 +1209,28 @@ internal sealed class MatrixSceneRenderer : IDisposable
             snapshot.ImageFadeSeconds[oldIndex];
         _imageGlyphs[newIndex] = snapshot.ImageGlyphs[oldIndex];
         _imageStyles[newIndex] = snapshot.ImageStyles[oldIndex];
+        _imageStreamIds[newIndex] = snapshot.ImageStreamIds[oldIndex];
     }
 
-    private void RestoreStreams(GridSnapshot snapshot)
+    private void RestoreStreams(
+        GridSnapshot snapshot,
+        SpatialRestoreMap? spatialMap)
     {
         bool[] mappedSpawners = new bool[_columns];
         for (int oldColumn = 0;
              oldColumn < snapshot.StreamsByColumn.Length;
              oldColumn++)
         {
-            int column = MapCellCenter(
+            int column = MapRestoredColumn(
                 oldColumn,
                 snapshot.Columns,
-                _columns);
+                spatialMap);
+            if (column < 0)
+                continue;
             foreach (RainStream oldStream in snapshot.StreamsByColumn[oldColumn])
             {
                 _streamsByColumn[column].Add(
-                    ScaleStream(oldStream, snapshot.Rows));
+                    ScaleStream(oldStream, snapshot.Rows, spatialMap));
             }
 
             if ((uint)oldColumn >= (uint)snapshot.Spawners.Length)
@@ -1153,19 +1251,35 @@ internal sealed class MatrixSceneRenderer : IDisposable
         }
     }
 
-    private RainStream ScaleStream(RainStream source, int oldRows)
+    private RainStream ScaleStream(
+        RainStream source,
+        int oldRows,
+        SpatialRestoreMap? spatialMap)
     {
-        double rowScale = _rows / (double)Math.Max(1, oldRows);
+        double rowScale = spatialMap is null
+            ? _rows / (double)Math.Max(1, oldRows)
+            : spatialMap.Value.SourceCanvas.Height
+                / (double)Math.Max(1, oldRows)
+                * _rows
+                / Math.Max(1, spatialMap.Value.TargetCanvas.Height);
+        double rowOffset = spatialMap is null
+            ? 0
+            : (spatialMap.Value.SourceCanvas.Top
+                - spatialMap.Value.TargetCanvas.Top)
+                / (double)Math.Max(1, spatialMap.Value.TargetCanvas.Height)
+                * _rows;
         int lastWrittenRow = source.LastWrittenRow < 0
             ? -1
             : Math.Max(
                 -1,
-                (int)Math.Floor((source.LastWrittenRow + 1) * rowScale) - 1);
+                (int)Math.Floor(
+                    rowOffset
+                    + (source.LastWrittenRow + 1) * rowScale) - 1);
         return new RainStream
         {
             Id = source.Id,
-            Head = source.Head * rowScale,
-            PreviousHead = source.PreviousHead * rowScale,
+            Head = rowOffset + source.Head * rowScale,
+            PreviousHead = rowOffset + source.PreviousHead * rowScale,
             Speed = Math.Max(0.1, source.Speed * rowScale),
             Length = Math.Max(0, (int)Math.Round(source.Length * rowScale)),
             MemoryHoldSeconds = source.MemoryHoldSeconds,
@@ -1175,27 +1289,10 @@ internal sealed class MatrixSceneRenderer : IDisposable
             ImpulseEnabled = source.ImpulseEnabled,
             SignalStrength = source.SignalStrength,
             GlowStrength = source.GlowStrength,
-            TerminationRow = source.TerminationRow * rowScale,
+            TerminationRow = rowOffset + source.TerminationRow * rowScale,
             Seed = source.Seed,
             LastWrittenRow = lastWrittenRow
         };
-    }
-
-    private void RestoreClockSnapshot(GridSnapshot snapshot)
-    {
-        int count = Math.Min(
-            _clockDisplayedGlyphs.Length,
-            snapshot.ClockDisplayedGlyphs.Length);
-        for (int index = 0; index < count; index++)
-        {
-            _clockDisplayedGlyphs[index] =
-                snapshot.ClockDisplayedGlyphs[index];
-            if (index < snapshot.ClockBrightness.Length)
-            {
-                _clockBrightness[index] =
-                    snapshot.ClockBrightness[index];
-            }
-        }
     }
 
     private static int MapCellCenter(
@@ -1209,6 +1306,58 @@ internal sealed class MatrixSceneRenderer : IDisposable
                 * targetSize),
             0,
             Math.Max(0, targetSize - 1));
+
+    private int MapRestoredColumn(
+        int coordinate,
+        int sourceSize,
+        SpatialRestoreMap? spatialMap) =>
+        spatialMap is null
+            ? MapCellCenter(coordinate, sourceSize, _columns)
+            : MapSpatialCell(
+                coordinate,
+                sourceSize,
+                spatialMap.Value.SourceCanvas.Left,
+                spatialMap.Value.SourceCanvas.Width,
+                _columns,
+                spatialMap.Value.TargetCanvas.Left,
+                spatialMap.Value.TargetCanvas.Width);
+
+    private int MapRestoredRow(
+        int coordinate,
+        int sourceSize,
+        SpatialRestoreMap? spatialMap) =>
+        spatialMap is null
+            ? MapCellCenter(coordinate, sourceSize, _rows)
+            : MapSpatialCell(
+                coordinate,
+                sourceSize,
+                spatialMap.Value.SourceCanvas.Top,
+                spatialMap.Value.SourceCanvas.Height,
+                _rows,
+                spatialMap.Value.TargetCanvas.Top,
+                spatialMap.Value.TargetCanvas.Height);
+
+    private static int MapSpatialCell(
+        int coordinate,
+        int sourceCellCount,
+        int sourceStart,
+        int sourceLength,
+        int targetCellCount,
+        int targetStart,
+        int targetLength)
+    {
+        double global = sourceStart
+            + (coordinate + 0.5)
+            / Math.Max(1, sourceCellCount)
+            * Math.Max(1, sourceLength);
+        int mapped = (int)Math.Floor(
+            (global - targetStart)
+            / Math.Max(1, targetLength)
+            * targetCellCount);
+        return (uint)mapped < (uint)targetCellCount
+            ? mapped
+            : -1;
+    }
 
     private static double TrailCellScore(
         double simulationTime,
@@ -1234,86 +1383,6 @@ internal sealed class MatrixSceneRenderer : IDisposable
         return Math.Max(
             memory * Math.Clamp(baseIntensity, 0, 1),
             impulse);
-    }
-
-    private void RebuildClockLayout()
-    {
-        if (_clockCells.Length != _columns * _rows)
-            _clockCells = new bool[_columns * _rows];
-        else
-            Array.Clear(_clockCells);
-        _clockCellIndices = [];
-        _clockDisplayedGlyphs = [];
-        _clockBrightness = [];
-        _clockTargetText = "";
-        _clockTargetMinute = -1;
-        if (!_settings.ClockEnabled || _columns < 5 || _rows < 1)
-            return;
-
-        int layoutColumns = Math.Clamp(_width / _cellWidth, 5, _columns);
-        int layoutRows = Math.Clamp(_height / _cellHeight, 1, _rows);
-        int horizontalMargin = Math.Clamp(
-            _settings.ClockHorizontalMarginCells,
-            0,
-            Math.Max(0, layoutColumns - 5));
-        int verticalMargin = Math.Clamp(
-            _settings.ClockVerticalMarginCells,
-            0,
-            Math.Max(0, layoutRows - 1));
-        int column = Math.Max(0, (layoutColumns - 5) / 2);
-        int row = Math.Max(0, (layoutRows - 1) / 2);
-        switch (_settings.ClockPosition)
-        {
-            case "Top":
-                row = verticalMargin;
-                break;
-            case "TopRight":
-                column = layoutColumns - 5 - horizontalMargin;
-                row = verticalMargin;
-                break;
-            case "Right":
-                column = layoutColumns - 5 - horizontalMargin;
-                break;
-            case "BottomRight":
-                column = layoutColumns - 5 - horizontalMargin;
-                row = layoutRows - 1 - verticalMargin;
-                break;
-            case "Bottom":
-                row = layoutRows - 1 - verticalMargin;
-                break;
-            case "BottomLeft":
-                column = horizontalMargin;
-                row = layoutRows - 1 - verticalMargin;
-                break;
-            case "Left":
-                column = horizontalMargin;
-                break;
-            case "TopLeft":
-                column = horizontalMargin;
-                row = verticalMargin;
-                break;
-        }
-
-        column = Math.Clamp(column, 0, layoutColumns - 5);
-        row = Math.Clamp(row, 0, layoutRows - 1);
-        DateTime now = DateTime.Now;
-        _clockTargetMinute = now.Hour * 60 + now.Minute;
-        _clockTargetText = now.ToString("HH:mm", System.Globalization.CultureInfo.InvariantCulture);
-        _clockCellIndices = new int[5];
-        _clockDisplayedGlyphs = new ushort[5];
-        _clockBrightness = new double[5];
-        int minimumClockLevel = MinimumClockLevel();
-        for (int slot = 0; slot < 5; slot++)
-        {
-            _clockCellIndices[slot] = row * _columns + column + slot;
-            _clockCells[_clockCellIndices[slot]] = true;
-            _clockDisplayedGlyphs[slot] = (ushort)Math.Max(
-                0,
-                MatrixGlyphSet.Glyphs.IndexOf(
-                    _clockTargetText[slot],
-                    StringComparison.Ordinal));
-            _clockBrightness[slot] = minimumClockLevel;
-        }
     }
 
     private void SpawnStream(int column, bool firstRun)
@@ -1471,6 +1540,17 @@ internal sealed class MatrixSceneRenderer : IDisposable
         _trailStreamIds[index] = 0;
     }
 
+    private void AlignObservedFlow(MatrixSceneRenderer source)
+    {
+        Array.Clear(_observedTrailGenerations);
+        Array.Copy(
+            source._trailGenerations,
+            _observedTrailGenerations,
+            Math.Min(
+                source._trailGenerations.Length,
+                _observedTrailGenerations.Length));
+    }
+
     private void RebuildAtlas()
     {
         GlyphAtlasData atlas = GlyphAtlasBuilder.Build(
@@ -1532,6 +1612,56 @@ internal sealed class MatrixSceneRenderer : IDisposable
             Array.Clear(_imageGlyphs);
         if (_imageStyles.Length > 0)
             Array.Clear(_imageStyles);
+        if (_imageStreamIds.Length > 0)
+            Array.Clear(_imageStreamIds);
+    }
+
+    private void ClearGridState()
+    {
+        Array.Clear(_rainLevels);
+        Array.Clear(_nextRainLevels);
+        Array.Clear(_rainStyles);
+        Array.Clear(_nextRainStyles);
+        Array.Clear(_rainEmphasis);
+        Array.Clear(_nextRainEmphasis);
+        Array.Clear(_rainGlow);
+        Array.Clear(_nextRainGlow);
+        Array.Clear(_rainCovered);
+        Array.Clear(_nextRainCovered);
+        Array.Clear(_rainGlyphs);
+        Array.Clear(_nextRainGlyphs);
+        Array.Clear(_trailOccupied);
+        Array.Clear(_trailSuppressImage);
+        Array.Clear(_trailBornAt);
+        Array.Clear(_trailMemoryHoldSeconds);
+        Array.Clear(_trailMemoryFadeSeconds);
+        Array.Clear(_trailPulseHoldSeconds);
+        Array.Clear(_trailPulseFadeSeconds);
+        Array.Clear(_trailImpulseEnabled);
+        Array.Clear(_trailGlowStrength);
+        Array.Clear(_trailBaseIntensity);
+        Array.Clear(_trailImageResistance);
+        Array.Clear(_trailGlyphs);
+        Array.Clear(_trailStreamIds);
+        Array.Clear(_trailGenerations);
+        Array.Clear(_trailRevealSeeds);
+        Array.Clear(_observedTrailGenerations);
+        ClearImageOverlay();
+        foreach (List<RainStream> streams in _streamsByColumn)
+            streams.Clear();
+        foreach (ColumnSpawner spawner in _spawners)
+            spawner.NextSpawnAt = double.PositiveInfinity;
+    }
+
+    private void ClearImageCell(int index)
+    {
+        _imageLevels[index] = 0;
+        _imageInitialLevels[index] = 0;
+        _imageHoldSeconds[index] = 0;
+        _imageFadeElapsed[index] = 0;
+        _imageGlyphs[index] = 0;
+        _imageStyles[index] = 0;
+        _imageStreamIds[index] = 0;
     }
 
     private void EnsureImageMask()
@@ -1741,6 +1871,10 @@ internal sealed class MatrixSceneRenderer : IDisposable
         public double NextSpawnAt;
     }
 
+    private readonly record struct SpatialRestoreMap(
+        System.Drawing.Rectangle SourceCanvas,
+        System.Drawing.Rectangle TargetCanvas);
+
     private sealed record GridSnapshot(
         int Columns,
         int Rows,
@@ -1759,6 +1893,8 @@ internal sealed class MatrixSceneRenderer : IDisposable
         float[] TrailImageResistance,
         ushort[] TrailGlyphs,
         long[] TrailStreamIds,
+        long[] TrailGenerations,
+        uint[] TrailRevealSeeds,
         float[] ImageLevels,
         float[] ImageInitialLevels,
         float[] ImageHoldSeconds,
@@ -1766,10 +1902,9 @@ internal sealed class MatrixSceneRenderer : IDisposable
         float[] ImageFadeSeconds,
         ushort[] ImageGlyphs,
         byte[] ImageStyles,
+        long[] ImageStreamIds,
         List<RainStream>[] StreamsByColumn,
-        ColumnSpawner[] Spawners,
-        ushort[] ClockDisplayedGlyphs,
-        double[] ClockBrightness);
+        ColumnSpawner[] Spawners);
 
     private readonly record struct GlyphDensity(ushort Glyph, double Density);
 }

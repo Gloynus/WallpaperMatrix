@@ -742,26 +742,23 @@
                                         VerticalAlignment="Center"
                                         ToolTip="Настраивает способ вывода потока и образов на каждом подключённом экране."/>
                             </StackPanel>
-                            <Grid>
+                            <Border Background="#020806"
+                                    BorderBrush="#164B2C"
+                                    BorderThickness="1"
+                                    CornerRadius="5"
+                                    Padding="8">
+                                <Canvas x:Name="MonitorTopologyCanvas"
+                                        Height="267"
+                                        ClipToBounds="True"
+                                        SizeChanged="MonitorTopologyCanvas_SizeChanged"/>
+                            </Border>
+                            <Grid Margin="0,10,0,0">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition/>
                                     <ColumnDefinition Width="18"/>
                                     <ColumnDefinition/>
                                 </Grid.ColumnDefinitions>
                                 <StackPanel>
-                                    <TextBlock Text="Устройство вывода"
-                                               Margin="0,0,0,5"/>
-                                    <ComboBox x:Name="MonitorDeviceCombo"
-                                              SelectionChanged="MonitorDeviceCombo_SelectionChanged">
-                                        <ComboBox.ItemTemplate>
-                                            <DataTemplate>
-                                                <TextBlock Text="{Binding Label}"
-                                                           TextTrimming="CharacterEllipsis"/>
-                                            </DataTemplate>
-                                        </ComboBox.ItemTemplate>
-                                    </ComboBox>
-                                </StackPanel>
-                                <StackPanel Grid.Column="2">
                                     <TextBlock Text="Поток данных"
                                                Margin="0,0,0,5"/>
                                     <ComboBox x:Name="MonitorFlowModeCombo"
@@ -774,18 +771,6 @@
                                         </ComboBox.ItemTemplate>
                                     </ComboBox>
                                 </StackPanel>
-                            </Grid>
-                            <Grid Margin="0,9,0,0">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition/>
-                                    <ColumnDefinition Width="18"/>
-                                    <ColumnDefinition/>
-                                </Grid.ColumnDefinitions>
-                                <TextBlock x:Name="MonitorDeviceDetails"
-                                           VerticalAlignment="Center"
-                                           Foreground="{StaticResource MutedBrush}"
-                                           FontFamily="Consolas"
-                                           TextWrapping="Wrap"/>
                                 <StackPanel Grid.Column="2">
                                     <TextBlock Text="База данных"
                                                Margin="0,0,0,5"/>
@@ -1511,9 +1496,15 @@
                                        Text="Крайние точки закреплены. ЛКМ создаёт или перемещает внутреннюю точку; ПКМ либо Delete удаляет её."
                                        Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap"
                                        Margin="0,7,0,0"/>
-                            <Grid x:Name="TerminalSettingsPanel" Height="360"
-                                  Margin="0,12,0,0" Background="#031009"
-                                  ClipToBounds="True" Visibility="Collapsed">
+                            <Border x:Name="TerminalSettingsPanel" Height="360"
+                                    Margin="0,12,0,0"
+                                    Background="#031009"
+                                    BorderBrush="#164B2C"
+                                    BorderThickness="1"
+                                    CornerRadius="5"
+                                    ClipToBounds="True"
+                                    Visibility="Collapsed">
+                              <Grid>
                                 <Grid.RowDefinitions>
                                     <RowDefinition/>
                                     <RowDefinition Height="Auto"/>
@@ -1793,114 +1784,8 @@
                                                    FontFamily="Consolas" Foreground="#83FFAA"/>
                                     </StackPanel>
                                 </Grid>
-                            </Grid>
-                        </StackPanel>
-                    </Border>
-
-                    <Border Style="{StaticResource SectionBorder}">
-                        <StackPanel>
-                            <Grid>
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition/>
-                                    <ColumnDefinition Width="Auto"/>
-                                </Grid.ColumnDefinitions>
-                                <StackPanel Orientation="Horizontal">
-                                    <CheckBox x:Name="ClockEnabledCheck" Content="ЧАСЫ В ПОТОКЕ"
-                                              FontFamily="Consolas" FontWeight="Bold"
-                                              Foreground="#00E667"/>
-                                    <Button Style="{StaticResource HelpButton}" VerticalAlignment="Center"
-                                            ToolTip="Показывает время пятью ячейками текущего потока."/>
-                                </StackPanel>
-                                <Button Grid.Column="1"
-                                        Style="{StaticResource ResetParameterButton}"
-                                        Tag="ClockBlock" VerticalAlignment="Center"
-                                        ToolTip="Сбросить весь блок часов"/>
-                            </Grid>
-                            <StackPanel x:Name="ClockContentPanel">
-                            <Grid Margin="0,8,0,0">
-                                <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="18"/><ColumnDefinition/></Grid.ColumnDefinitions>
-                                <StackPanel>
-                                    <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
-                                        <TextBlock Text="Положение"/>
-                                        <Button Style="{StaticResource HelpButton}" ToolTip="Определяет край экрана, у которого размещаются часы."/>
-                                    </StackPanel>
-                                    <Grid>
-                                        <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                                        <ComboBox x:Name="ClockPositionCombo">
-                                            <ComboBoxItem Content="Сверху" Tag="Top"/>
-                                            <ComboBoxItem Content="Сверху справа" Tag="TopRight"/>
-                                            <ComboBoxItem Content="Справа" Tag="Right"/>
-                                            <ComboBoxItem Content="Снизу справа" Tag="BottomRight"/>
-                                            <ComboBoxItem Content="Снизу" Tag="Bottom"/>
-                                            <ComboBoxItem Content="Снизу слева" Tag="BottomLeft"/>
-                                            <ComboBoxItem Content="Слева" Tag="Left"/>
-                                            <ComboBoxItem Content="Сверху слева" Tag="TopLeft"/>
-                                        </ComboBox>
-                                        <Button Grid.Column="1" Style="{StaticResource ResetParameterButton}"
-                                                Tag="ClockPosition"/>
-                                    </Grid>
-                                </StackPanel>
-                                <StackPanel Grid.Column="2">
-                                    <TextBlock Text="Отступы в символах" Margin="0,0,0,5"/>
-                                    <Grid>
-                                        <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="8"/><ColumnDefinition/></Grid.ColumnDefinitions>
-                                        <StackPanel>
-                                            <Grid>
-                                                <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                                                <StackPanel Orientation="Horizontal">
-                                                    <TextBlock Text="По X" Foreground="{StaticResource MutedBrush}"/>
-                                        <Button Style="{StaticResource HelpButton}" ToolTip="Задаёт горизонтальный отступ часов в ячейках."/>
-                                                </StackPanel>
-                                                <TextBox Grid.Column="1" x:Name="ClockHorizontalMarginInput" Tag="ClockHorizontalMargin" Style="{StaticResource NumericInput}"/>
-                                            </Grid>
-                                            <Slider x:Name="ClockHorizontalMarginSlider" Minimum="0" Maximum="100" TickFrequency="1" IsSnapToTickEnabled="True" ValueChanged="AnySlider_ValueChanged"/>
-                                        </StackPanel>
-                                        <StackPanel Grid.Column="2">
-                                            <Grid>
-                                                <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                                                <StackPanel Orientation="Horizontal">
-                                                    <TextBlock Text="По Y" Foreground="{StaticResource MutedBrush}"/>
-                                        <Button Style="{StaticResource HelpButton}" ToolTip="Задаёт вертикальный отступ часов в ячейках."/>
-                                                </StackPanel>
-                                                <TextBox Grid.Column="1" x:Name="ClockVerticalMarginInput" Tag="ClockVerticalMargin" Style="{StaticResource NumericInput}"/>
-                                            </Grid>
-                                            <Slider x:Name="ClockVerticalMarginSlider" Minimum="0" Maximum="100" TickFrequency="1" IsSnapToTickEnabled="True" ValueChanged="AnySlider_ValueChanged"/>
-                                        </StackPanel>
-                                    </Grid>
-                                </StackPanel>
-                            </Grid>
-                            <Grid Margin="0,8,0,0">
-                                <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="18"/><ColumnDefinition/></Grid.ColumnDefinitions>
-                                <StackPanel>
-                                    <Grid>
-                                        <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                                        <StackPanel Orientation="Horizontal">
-                                            <TextBlock Text="Светимость часов"/>
-                                            <Button Style="{StaticResource HelpButton}" ToolTip="Задаёт минимальную яркость часов после затухания."/>
-                                        </StackPanel>
-                                        <StackPanel Grid.Column="1" Orientation="Horizontal">
-                                            <TextBox x:Name="ClockBrightnessInput" Tag="ClockBrightness" Style="{StaticResource NumericInput}"/>
-                                            <TextBlock Text="%" Margin="4,3,0,0" FontFamily="Consolas" Foreground="#83FFAA"/>
-                                        </StackPanel>
-                                    </Grid>
-                                    <Slider x:Name="ClockBrightnessSlider" Minimum="0.5" Maximum="1" TickFrequency="0.01" ValueChanged="AnySlider_ValueChanged"/>
-                                </StackPanel>
-                                <StackPanel Grid.Column="2">
-                                    <Grid>
-                                        <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                                        <StackPanel Orientation="Horizontal">
-                                            <TextBlock Text="Начертание часов"/>
-                                            <Button Style="{StaticResource HelpButton}" ToolTip="Определяет толщину пяти символов времени."/>
-                                        </StackPanel>
-                                        <StackPanel Grid.Column="1" Orientation="Horizontal">
-                                            <TextBox x:Name="ClockWeightInput" Tag="ClockWeight" Style="{StaticResource NumericInput}"/>
-                                            <TextBlock Text="%" Margin="4,3,0,0" FontFamily="Consolas" Foreground="#83FFAA"/>
-                                        </StackPanel>
-                                    </Grid>
-                                    <Slider x:Name="ClockWeightSlider" Minimum="0" Maximum="1" TickFrequency="0.01" ValueChanged="AnySlider_ValueChanged"/>
-                                </StackPanel>
-                            </Grid>
-                            </StackPanel>
+                              </Grid>
+                            </Border>
                         </StackPanel>
                     </Border>
 
@@ -2611,15 +2496,15 @@
                                                 <ColumnDefinition Width="Auto"/>
                                             </Grid.ColumnDefinitions>
                                             <StackPanel Orientation="Horizontal">
-                                                <TextBlock Text="Захват системы"/>
-                                                <Button Style="{StaticResource HelpButton}"
-                                                        ToolTip="Задаёт длительность превращения интерфейса в фон и символы потока."/>
+                                            <TextBlock Text="Захват системы"/>
+                                            <Button Style="{StaticResource HelpButton}"
+                                                    ToolTip="Задаёт длительность наплыва новых струй поверх интерфейса."/>
                                             </StackPanel>
                                             <StackPanel Grid.Column="1" Orientation="Horizontal">
                                                 <TextBox x:Name="AttackTransitionSecondsInput"
                                                          Tag="AttackTransitionSeconds"
                                                          Style="{StaticResource NumericInput}"
-                                                         ToolTip="Допустимый диапазон: 1–30 с."/>
+                                                         ToolTip="Длительность равномерного затемнения интерфейса: 1–600 с. Поток продолжает двигаться с обычной скоростью."/>
                                                 <TextBlock Text="с" Margin="4,3,0,0"
                                                            FontFamily="Consolas" Foreground="#83FFAA"/>
                                                 <Button Style="{StaticResource ResetParameterButton}"
@@ -2627,19 +2512,20 @@
                                             </StackPanel>
                                         </Grid>
                                         <Slider x:Name="AttackTransitionSecondsSlider"
-                                                Minimum="1" Maximum="30"
-                                                TickFrequency="0.5"
+                                                Minimum="1" Maximum="600"
+                                                TickFrequency="1"
                                                 ValueChanged="AnySlider_ValueChanged"/>
                                     </StackPanel>
                                 </Grid>
-                                <Button Content="ПРОВЕРИТЬ АТАКУ"
-                                        Height="29"
+                                <Button Height="29"
                                         Margin="0,10,0,0"
                                         HorizontalAlignment="Right"
-                                        Padding="12,2"
                                         Style="{StaticResource ActionButton}"
                                         Click="TestAttackButton_Click"
-                                        ToolTip="Немедленно показать переход без ожидания таймера."/>
+                                        ToolTip="Немедленно показать переход без ожидания таймера.">
+                                    <TextBlock Text="ПРОВЕРИТЬ АТАКУ"
+                                               Margin="14,2"/>
+                                </Button>
                             </StackPanel>
                         </StackPanel>
                     </Border>
@@ -2679,7 +2565,7 @@
                                 <CheckBox x:Name="PauseDuringFullscreenAppsCheck"
                                           Content="Пауза в играх"/>
                                 <Button Style="{StaticResource HelpButton}" VerticalAlignment="Center"
-                                        ToolTip="Полностью приостанавливает поток, пока активно полноэкранное приложение."/>
+                                        ToolTip="Плавно останавливает поток при полноэкранном приложении и возвращает его установленную скорость после выхода."/>
                             </StackPanel>
                             <StackPanel Orientation="Horizontal">
                                 <CheckBox x:Name="AutostartCheck" Content="Запускать вместе с Windows"/>

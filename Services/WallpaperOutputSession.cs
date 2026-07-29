@@ -184,6 +184,18 @@ internal sealed class WallpaperOutputSession : IDisposable
         // DWM reveals Explorer's already composed wallpaper underneath.
     }
 
+    public void FreezeMotion(bool frozen)
+    {
+        foreach (NativeWallpaperWindow window in _windows)
+            window.SetSimulationPaused(frozen);
+    }
+
+    public void SetMotionScale(double scale)
+    {
+        foreach (NativeWallpaperWindow window in _windows)
+            window.SetMotionScale(scale);
+    }
+
     public void StopAndRestoreDesktop() =>
         CloseWindows(restoreSystemWallpaper: true);
 
@@ -201,7 +213,8 @@ internal sealed class WallpaperOutputSession : IDisposable
             + string.Join(
                 "; ",
                 _monitors.Select(monitor =>
-                    $"{monitor.SystemName} «{monitor.FriendlyName}» "
+                    $"экран {monitor.DisplayNumber}: "
+                    + $"{monitor.SystemName} «{monitor.FriendlyName}» "
                     + $"{monitor.Bounds.Width}x{monitor.Bounds.Height} "
                     + $"@ ({monitor.Bounds.Left},{monitor.Bounds.Top}) "
                     + $"primary={monitor.Primary}")));
@@ -229,11 +242,19 @@ internal sealed class WallpaperOutputSession : IDisposable
                 {
                     MonitorRoute flow = flowRoutes[monitor.Id];
                     MonitorRoute database = databaseRoutes[monitor.Id];
-                    return $"{monitor.FriendlyName}: "
-                        + $"поток={flow.Mode}->{flow.RootMonitorId}; "
-                        + $"база={database.Mode}->{database.RootMonitorId}";
+                    return $"{monitor.FriendlyName} "
+                        + $"[{monitor.DisplayNumber}]: "
+                        + $"поток={flow.Mode}"
+                        + $"(source={flow.SourceMonitorId}, "
+                        + $"view={flow.ViewMonitorId}, "
+                        + $"root={flow.RootMonitorId}); "
+                        + $"база={database.Mode}"
+                        + $"(source={database.SourceMonitorId}, "
+                        + $"view={database.ViewMonitorId}, "
+                        + $"root={database.RootMonitorId})";
                 }))
             + $"; сцен={_plan.Scenes.Count}; "
+            + $"генераторов потока={_plan.Scenes.Count(scene => scene.IsFlowMaster)}; "
             + $"активных устройств={_plan.ActiveMonitorCount}.");
 
         List<NativeWallpaperWindow> created = [];

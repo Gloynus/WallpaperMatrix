@@ -10,18 +10,21 @@ public sealed record MonitorDescriptor(
     string Id,
     string SystemName,
     string FriendlyName,
+    int DisplayNumber,
     System.Drawing.Rectangle Bounds,
     bool Primary)
 {
     public string Label =>
-        $"{FriendlyName} // {Bounds.Width}×{Bounds.Height}"
+        $"{FriendlyName} [{DisplayNumber}] // {Bounds.Width}×{Bounds.Height}"
         + (Primary ? " // ОСНОВНОЙ" : "");
 }
 
 public sealed record MonitorRoute(
     string MonitorId,
     MonitorLinkMode Mode,
-    string RootMonitorId);
+    string SourceMonitorId,
+    string RootMonitorId,
+    string ViewMonitorId);
 
 /// <summary>
 /// Turns operator-friendly links into a flat, cycle-free routing graph.
@@ -196,7 +199,7 @@ public static class MonitorTopology
         }
 
         SetMode(selected, domain, mode);
-        SetSource(selected, domain, requestedRoot);
+        SetSource(selected, domain, requestedSource.MonitorId);
         Normalize(profiles, monitors, domain);
     }
 
@@ -216,9 +219,61 @@ public static class MonitorTopology
                 string root = mode == MonitorLinkMode.Disabled
                     ? ""
                     : ResolveRoot(profiles, monitor.Id, domain);
-                return new MonitorRoute(monitor.Id, mode, root);
+                string source = mode
+                    is MonitorLinkMode.Relay or MonitorLinkMode.Extend
+                        ? GetSource(profile, domain)
+                        : "";
+                string view = mode == MonitorLinkMode.Disabled
+                    ? ""
+                    : ResolveViewMonitor(
+                        profiles,
+                        monitor.Id,
+                        domain);
+                return new MonitorRoute(
+                    monitor.Id,
+                    mode,
+                    source,
+                    root,
+                    view);
             })
             .ToArray();
+    }
+
+    /// <summary>
+    /// Resolves the physical part of a shared canvas that a monitor presents.
+    /// Relay chains are flattened for rendering, while an extension keeps its
+    /// own viewport. This exposes any monitor-sized region without creating
+    /// another stream generator.
+    /// </summary>
+    public static string ResolveViewMonitor(
+        IEnumerable<MonitorProfile> profiles,
+        string monitorId,
+        MonitorRouteDomain domain)
+    {
+        Dictionary<string, MonitorProfile> byId = profiles
+            .Where(profile => profile is not null)
+            .GroupBy(profile => profile.MonitorId, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(
+                group => group.Key,
+                group => group.First(),
+                StringComparer.OrdinalIgnoreCase);
+        HashSet<string> visited = new(StringComparer.OrdinalIgnoreCase);
+        string current = monitorId;
+        while (byId.TryGetValue(current, out MonitorProfile? profile)
+               && visited.Add(current))
+        {
+            MonitorLinkMode mode = GetMode(profile, domain);
+            if (mode != MonitorLinkMode.Relay)
+                return current;
+            string source = GetSource(profile, domain);
+            if (string.IsNullOrWhiteSpace(source)
+                || !byId.ContainsKey(source))
+            {
+                return current;
+            }
+            current = source;
+        }
+        return monitorId;
     }
 
     public static string ResolveRoot(
@@ -338,7 +393,10 @@ public static class MonitorTopology
             }
         }
 
-        // Collapse every legal chain to one direct root reference.
+        // Keep the operator's direct source: a relay may deliberately copy
+        // the visible part of an extension instead of the root monitor.
+        // ResolveRoot/ResolveViewMonitor flatten the chain for rendering, so
+        // this does not add simulations or recursive work to a frame.
         foreach (MonitorProfile profile in byId.Values)
         {
             if (GetMode(profile, domain)
@@ -353,10 +411,6 @@ public static class MonitorTopology
             {
                 SetMode(profile, domain, MonitorLinkMode.Isolated);
                 SetSource(profile, domain, "");
-            }
-            else
-            {
-                SetSource(profile, domain, root);
             }
         }
     }
