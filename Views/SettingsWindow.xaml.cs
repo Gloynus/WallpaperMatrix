@@ -51,6 +51,14 @@ public partial class SettingsWindow : Window
         DatabaseExtend
     }
 
+    private enum WheelGestureTarget
+    {
+        MainForm,
+        Playlist,
+        MonitorTopology,
+        FocusedInput
+    }
+
     private AppSettings _source = new();
     private AppSettings _draftSettings = new();
     private IReadOnlyList<MonitorDescriptor> _monitors = [];
@@ -113,7 +121,8 @@ public partial class SettingsWindow : Window
     private double _virtualMonitorDragLeft;
     private double _virtualMonitorDragTop;
     private long _lastWheelTick;
-    private bool _mainScrollGesture;
+    private WheelGestureTarget _wheelGestureTarget =
+        WheelGestureTarget.MainForm;
     private string _runtimeStatus = "СОСТОЯНИЕ ВЫВОДА НЕ ПОЛУЧЕНО";
     private string _diagnosticLogPath = DiagnosticLog.LogPath;
     private readonly PresetStore _presetStore = new();
@@ -984,8 +993,139 @@ public partial class SettingsWindow : Window
                 + $"Поток: {RouteSummary(profile.FlowMode, profile.FlowSourceMonitorId)}\n"
                 + $"База: {RouteSummary(profile.DatabaseMode, profile.DatabaseSourceMonitorId)}"
         };
+        border.ContextMenu = CreateMonitorContextMenu(
+            monitor,
+            profile);
         border.MouseLeftButtonDown += MonitorVisual_MouseLeftButtonDown;
         return border;
+    }
+
+    private ContextMenu CreateMonitorContextMenu(
+        MonitorDescriptor monitor,
+        MonitorProfile profile)
+    {
+        ContextMenu context = new()
+        {
+            Background = BrushFromRgb(0x02, 0x08, 0x06),
+            BorderBrush = BrushFromRgb(0x23, 0x8A, 0x4B),
+            BorderThickness = new Thickness(1),
+            Padding = new Thickness(4)
+        };
+        Grid columns = new()
+        {
+            Margin = new Thickness(3)
+        };
+        columns.ColumnDefinitions.Add(new ColumnDefinition
+        {
+            Width = new GridLength(224)
+        });
+        columns.ColumnDefinitions.Add(new ColumnDefinition
+        {
+            Width = new GridLength(1)
+        });
+        columns.ColumnDefinitions.Add(new ColumnDefinition
+        {
+            Width = new GridLength(224)
+        });
+
+        columns.Children.Add(CreateMonitorRouteColumn(
+            context,
+            monitor,
+            profile,
+            MonitorRouteDomain.Flow));
+        Border separator = new()
+        {
+            Background = BrushFromRgb(0x16, 0x4B, 0x2C),
+            Margin = new Thickness(7, 0, 7, 0)
+        };
+        Grid.SetColumn(separator, 1);
+        columns.Children.Add(separator);
+        FrameworkElement databaseColumn = CreateMonitorRouteColumn(
+            context,
+            monitor,
+            profile,
+            MonitorRouteDomain.Database);
+        Grid.SetColumn(databaseColumn, 2);
+        columns.Children.Add(databaseColumn);
+
+        context.Items.Add(new MenuItem
+        {
+            Header = columns,
+            Style = TryFindResource("MonitorContextHostItem") as Style,
+            StaysOpenOnClick = true
+        });
+        return context;
+    }
+
+    private FrameworkElement CreateMonitorRouteColumn(
+        ContextMenu context,
+        MonitorDescriptor monitor,
+        MonitorProfile profile,
+        MonitorRouteDomain domain)
+    {
+        StackPanel column = new();
+        column.Children.Add(new TextBlock
+        {
+            Text = domain == MonitorRouteDomain.Flow
+                ? "ПОТОК ДАННЫХ"
+                : "БАЗА ДАННЫХ",
+            Margin = new Thickness(8, 5, 8, 7),
+            FontFamily = new FontFamily("Consolas"),
+            FontSize = 11,
+            FontWeight = FontWeights.Bold,
+            Foreground = domain == MonitorRouteDomain.Flow
+                ? BrushFromRgb(0x62, 0xFF, 0x8F)
+                : BrushFromRgb(0x7D, 0xE7, 0xFF)
+        });
+
+        MonitorLinkMode currentMode = domain == MonitorRouteDomain.Flow
+            ? profile.FlowMode
+            : profile.DatabaseMode;
+        string currentSource = domain == MonitorRouteDomain.Flow
+            ? profile.FlowSourceMonitorId
+            : profile.DatabaseSourceMonitorId;
+        foreach (MonitorRouteChoice choice in CreateRouteChoices(
+                     domain,
+                     monitor.Id))
+        {
+            bool current = choice.Mode == currentMode
+                && (choice.Mode
+                        is MonitorLinkMode.Isolated
+                        or MonitorLinkMode.Disabled
+                    || string.Equals(
+                        choice.SourceMonitorId,
+                        currentSource,
+                        StringComparison.OrdinalIgnoreCase));
+            System.Windows.Controls.Button route = new()
+            {
+                Content = (current ? "● " : "  ") + choice.Label,
+                Style = TryFindResource(
+                    "MonitorContextRouteButton") as Style,
+                Foreground = current
+                    ? BrushFromRgb(0x02, 0x08, 0x06)
+                    : BrushFromRgb(0xD8, 0xFF, 0xE5),
+                Background = current
+                    ? BrushFromRgb(0x00, 0xC9, 0x5B)
+                    : BrushFromRgb(0x06, 0x1A, 0x0F),
+                BorderBrush = current
+                    ? BrushFromRgb(0x83, 0xFF, 0xAA)
+                    : BrushFromRgb(0x16, 0x4B, 0x2C),
+                ToolTip = current
+                    ? "Текущий режим"
+                    : $"Применить к устройству «{monitor.Label}»"
+            };
+            route.Click += (_, e) =>
+            {
+                e.Handled = true;
+                context.IsOpen = false;
+                ApplyMonitorRouteSelection(
+                    domain,
+                    choice,
+                    monitor.Id);
+            };
+            column.Children.Add(route);
+        }
+        return column;
     }
 
     private ComboBox CreateVirtualResolutionCombo(
@@ -1640,9 +1780,8 @@ public partial class SettingsWindow : Window
             return;
         }
 
-        bool width = ReferenceEquals(
-            input,
-            _virtualMonitorWidthCombo);
+        if (!TryGetVirtualResolutionAxis(input, out bool width))
+            return;
         int minimum = width ? 320 : 180;
         int maximum = width ? 7680 : 4320;
         int exponent = Math.Max(
@@ -1697,12 +1836,13 @@ public partial class SettingsWindow : Window
         ComboBox? input,
         bool preferSelectedItem)
     {
-        if (_loading || input is null)
+        if (_loading
+            || input is null
+            || !TryGetVirtualResolutionAxis(input, out bool width))
+        {
             return;
+        }
         _virtualResolutionTimer.Stop();
-        bool width = ReferenceEquals(
-            input,
-            _virtualMonitorWidthCombo);
         int fallback = width
             ? (int)Math.Round(VirtualOutputWidthSlider.Value)
             : (int)Math.Round(VirtualOutputHeightSlider.Value);
@@ -1729,6 +1869,24 @@ public partial class SettingsWindow : Window
             VirtualOutputHeightSlider.Value = parsed;
         }
         RebuildOutputDevices(ReadSettingsFromControls());
+    }
+
+    private bool TryGetVirtualResolutionAxis(
+        ComboBox input,
+        out bool width)
+    {
+        if (ReferenceEquals(input, _virtualMonitorWidthCombo))
+        {
+            width = true;
+            return true;
+        }
+        if (ReferenceEquals(input, _virtualMonitorHeightCombo))
+        {
+            width = false;
+            return true;
+        }
+        width = false;
+        return false;
     }
 
     private void VirtualResolutionTimer_Tick(
@@ -1937,34 +2095,40 @@ public partial class SettingsWindow : Window
 
     private void ApplyMonitorRouteSelection(
         MonitorRouteDomain domain,
-        MonitorRouteChoice? choice)
+        MonitorRouteChoice? choice,
+        string? targetMonitorId = null)
     {
         if (_loading || choice is null)
             return;
 
         AppSettings current = ReadSettingsFromControls();
+        string monitorId = string.IsNullOrWhiteSpace(targetMonitorId)
+            ? _selectedMonitorId
+            : targetMonitorId;
         MonitorTopology.SetRoute(
             current.MonitorProfiles,
             _monitors,
             domain,
-            _selectedMonitorId,
+            monitorId,
             choice.Mode,
             choice.SourceMonitorId);
         if (domain == MonitorRouteDomain.Flow
-            && OutputDeviceCatalog.IsVirtual(_selectedMonitorId))
+            && OutputDeviceCatalog.IsVirtual(monitorId))
         {
             current.VirtualMonitorEnabled =
                 choice.Mode != MonitorLinkMode.Disabled;
             if (!current.VirtualMonitorEnabled
-                && _openOutputMonitorIds.Contains(_selectedMonitorId))
+                && _openOutputMonitorIds.Contains(monitorId))
             {
                 current.VirtualOutputSourceMonitorId =
-                    _selectedMonitorId;
+                    monitorId;
                 VirtualOutputRequested?.Invoke(current, false);
             }
         }
         LoadSettingsCore(current, preserveAppliedSettings: true);
         PublishTopologyPreview();
+        StatusText.Text =
+            $"МАРШРУТ ОБНОВЛЁН // {choice.Label}";
     }
 
     private void OpenFlowSourceButton_Click(
@@ -2665,6 +2829,8 @@ public partial class SettingsWindow : Window
     private void SettingsWindow_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
     {
         if (PlaylistList is null
+            || MonitorTopologyScrollViewer is null
+            || CurveKindCombo is null
             || MainScrollViewer is null
             || e.OriginalSource is not DependencyObject origin)
         {
@@ -2672,16 +2838,39 @@ public partial class SettingsWindow : Window
         }
 
         bool overPlaylist = IsDescendantOf(origin, PlaylistList);
+        bool overTopology = IsDescendantOf(
+            origin,
+            MonitorTopologyScrollViewer);
+        bool overFocusedInput = IsFocusedWheelInput(origin);
         long now = Environment.TickCount64;
         if (now - _lastWheelTick > 340)
-            _mainScrollGesture = !overPlaylist;
+        {
+            _wheelGestureTarget = overFocusedInput
+                ? WheelGestureTarget.FocusedInput
+                : overTopology
+                    ? WheelGestureTarget.MonitorTopology
+                    : overPlaylist
+                        ? WheelGestureTarget.Playlist
+                        : WheelGestureTarget.MainForm;
+        }
         _lastWheelTick = now;
 
-        // A wheel gesture keeps its original scroll target until the operator
-        // pauses. Moving the pointer across the playlist can therefore no
-        // longer seize a continuous page scroll halfway through.
-        if (!overPlaylist || !_mainScrollGesture)
+        // Nested lists and the zoomable topology keep a gesture only when it
+        // started there. A page scroll that crosses either area continues to
+        // move the long form until the operator pauses the wheel.
+        if (_wheelGestureTarget != WheelGestureTarget.MainForm)
+        {
+            bool stillOverGestureTarget = _wheelGestureTarget switch
+            {
+                WheelGestureTarget.Playlist => overPlaylist,
+                WheelGestureTarget.MonitorTopology => overTopology,
+                WheelGestureTarget.FocusedInput => overFocusedInput,
+                _ => false
+            };
+            if (!stillOverGestureTarget)
+                e.Handled = true;
             return;
+        }
 
         double step = e.Delta / 120.0 * 52.0;
         MainScrollViewer.ScrollToVerticalOffset(Math.Clamp(
@@ -2689,6 +2878,16 @@ public partial class SettingsWindow : Window
             0,
             MainScrollViewer.ScrollableHeight));
         e.Handled = true;
+    }
+
+    private static bool IsFocusedWheelInput(DependencyObject origin)
+    {
+        TextBox? textBox = FindAncestor<TextBox>(origin);
+        if (textBox?.IsKeyboardFocusWithin == true)
+            return true;
+        ComboBox? comboBox = FindAncestor<ComboBox>(origin);
+        return comboBox?.IsEditable == true
+            && comboBox.IsKeyboardFocusWithin;
     }
 
     private void PlaylistList_PreviewDragOver(object sender, System.Windows.DragEventArgs e)
