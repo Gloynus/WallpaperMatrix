@@ -23,6 +23,64 @@
             <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
             <Setter Property="FontSize" Value="14"/>
             <Setter Property="Margin" Value="0,5"/>
+            <Setter Property="Padding" Value="8,0,0,0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="CheckBox">
+                        <Grid Background="Transparent">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <Border x:Name="SwitchTrack"
+                                    Width="34" Height="18"
+                                    Background="#06140C"
+                                    BorderBrush="#356047"
+                                    BorderThickness="1"
+                                    CornerRadius="9"
+                                    VerticalAlignment="Center">
+                                <Ellipse x:Name="SwitchThumb"
+                                         Width="12" Height="12"
+                                         Margin="2"
+                                         HorizontalAlignment="Left"
+                                         Fill="#79A888"/>
+                            </Border>
+                            <ContentPresenter Grid.Column="1"
+                                              Margin="{TemplateBinding Padding}"
+                                              VerticalAlignment="Center"
+                                              RecognizesAccessKey="True"
+                                              TextElement.Foreground="{TemplateBinding Foreground}"/>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="SwitchTrack"
+                                        Property="Background"
+                                        Value="#0D4A27"/>
+                                <Setter TargetName="SwitchTrack"
+                                        Property="BorderBrush"
+                                        Value="#00E667"/>
+                                <Setter TargetName="SwitchThumb"
+                                        Property="HorizontalAlignment"
+                                        Value="Right"/>
+                                <Setter TargetName="SwitchThumb"
+                                        Property="Fill"
+                                        Value="#83FFAA"/>
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="SwitchTrack"
+                                        Property="BorderBrush"
+                                        Value="#83FFAA"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.42"/>
+                                <Setter Property="Cursor" Value="Arrow"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
         </Style>
         <Style TargetType="Slider">
             <Setter Property="Foreground" Value="{StaticResource GreenBrush}"/>
@@ -699,37 +757,6 @@
             <ScrollViewer x:Name="MainScrollViewer" Grid.Row="1"
                           VerticalScrollBarVisibility="Auto" Padding="20,18">
                 <StackPanel>
-                    <Border x:Name="RuntimeStatusBorder"
-                            Background="#071B10" BorderBrush="#238A4B"
-                            BorderThickness="1" CornerRadius="5"
-                            Padding="14,11" Margin="0,0,0,12">
-                        <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition/>
-                                <ColumnDefinition Width="Auto"/>
-                            </Grid.ColumnDefinitions>
-                            <StackPanel>
-                                <TextBlock x:Name="RuntimeStatusTitle"
-                                           Text="ДИАГНОСТИКА ВЫВОДА" FontFamily="Consolas"
-                                           FontWeight="Bold" Foreground="#83FFAA"/>
-                                <TextBlock x:Name="RuntimeStatusText" Margin="0,5,12,0"
-                                           Foreground="#BDECCA" TextWrapping="Wrap"/>
-                            </StackPanel>
-                            <StackPanel Grid.Column="1" Orientation="Horizontal"
-                                        VerticalAlignment="Center">
-                                <Button Content="&#xE8C8;" FontFamily="Segoe MDL2 Assets"
-                                        Style="{StaticResource QuickIconButton}"
-                                        Width="32" Height="30"
-                                        Click="CopyDiagnosticsButton_Click"
-                                        ToolTip="Копировать диагностический отчёт"/>
-                                <Button Content="&#xE8A5;" FontFamily="Segoe MDL2 Assets"
-                                        Style="{StaticResource QuickIconButton}"
-                                        Width="32" Height="30"
-                                        Click="OpenDiagnosticsButton_Click"
-                                        ToolTip="Открыть журнал диагностики"/>
-                            </StackPanel>
-                        </Grid>
-                    </Border>
                     <Border Style="{StaticResource SectionBorder}">
                         <StackPanel>
                             <StackPanel Orientation="Horizontal"
@@ -742,6 +769,42 @@
                                         VerticalAlignment="Center"
                                         ToolTip="Колесо масштабирует карту в точку курсора. Правая кнопка или колесо перемещает холст. Виртуальный экран включается режимом Потока и перемещается за захват."/>
                             </StackPanel>
+                            <Grid Margin="0,0,0,10">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock x:Name="RuntimeStatusTitle"
+                                           Text="Диагностика:"
+                                           Margin="0,0,6,0"
+                                           VerticalAlignment="Center"
+                                           FontFamily="Consolas"
+                                           Foreground="{StaticResource MutedBrush}"/>
+                                <TextBlock x:Name="RuntimeStatusText"
+                                           Grid.Column="1"
+                                           Margin="0,0,10,0"
+                                           VerticalAlignment="Center"
+                                           FontFamily="Consolas"
+                                           Foreground="#83FFAA"
+                                           TextWrapping="Wrap"/>
+                                <StackPanel Grid.Column="2"
+                                            Orientation="Horizontal"
+                                            VerticalAlignment="Center">
+                                    <Button Content="&#xE8C8;"
+                                            FontFamily="Segoe MDL2 Assets"
+                                            Style="{StaticResource QuickIconButton}"
+                                            Width="30" Height="28"
+                                            Click="CopyDiagnosticsButton_Click"
+                                            ToolTip="Копировать диагностический отчёт"/>
+                                    <Button Content="&#xE8A5;"
+                                            FontFamily="Segoe MDL2 Assets"
+                                            Style="{StaticResource QuickIconButton}"
+                                            Width="30" Height="28"
+                                            Click="OpenDiagnosticsButton_Click"
+                                            ToolTip="Открыть журнал диагностики"/>
+                                </StackPanel>
+                            </Grid>
                             <Border Background="#020806"
                                     BorderBrush="#164B2C"
                                     BorderThickness="1"
@@ -1907,6 +1970,7 @@
                                 </Grid.ColumnDefinitions>
                                 <StackPanel Orientation="Horizontal">
                                     <CheckBox x:Name="ImageModeCheck" Content="БАЗА ДАННЫХ"
+                                              Click="ImageModeCheck_Click"
                                               FontFamily="Consolas" FontWeight="Bold"
                                               Foreground="#00E667"/>
                                     <Button Style="{StaticResource HelpButton}" VerticalAlignment="Center"
@@ -1982,6 +2046,7 @@
                                                     <ColumnDefinition Width="Auto"/>
                                                 </Grid.ColumnDefinitions>
                                                 <ComboBox x:Name="PlaylistCombo"
+                                                          DropDownOpened="PlaylistCombo_DropDownOpened"
                                                           SelectionChanged="PlaylistCombo_SelectionChanged"/>
                                                 <Button Grid.Column="1" Content="＋"
                                                         Style="{StaticResource QuickIconButton}"
@@ -2589,8 +2654,6 @@
                                                          ToolTip="Ползунок: 1–120 мин. Ручной ввод: 1–1440 мин."/>
                                                 <TextBlock Text="мин" Margin="4,3,0,0"
                                                            FontFamily="Consolas" Foreground="#83FFAA"/>
-                                                <Button Style="{StaticResource ResetParameterButton}"
-                                                        Tag="AttackIdleMinutes"/>
                                             </StackPanel>
                                         </Grid>
                                         <Slider x:Name="AttackIdleMinutesSlider"
@@ -2616,8 +2679,6 @@
                                                          ToolTip="Длительность равномерного затемнения интерфейса: 1–600 с. Поток продолжает двигаться с обычной скоростью."/>
                                                 <TextBlock Text="с" Margin="4,3,0,0"
                                                            FontFamily="Consolas" Foreground="#83FFAA"/>
-                                                <Button Style="{StaticResource ResetParameterButton}"
-                                                        Tag="AttackTransitionSeconds"/>
                                             </StackPanel>
                                         </Grid>
                                         <Slider x:Name="AttackTransitionSecondsSlider"

@@ -1,4 +1,5 @@
 using System.IO;
+using System.Security.Cryptography;
 using System.Text.Json;
 using WallpaperMatrix.Models;
 
@@ -26,6 +27,25 @@ public sealed class PlaylistStore
     public PlaylistStore()
     {
         _playlistsPath = PortableStorage.PlaylistsPath;
+    }
+
+    public string FileVersion()
+    {
+        try
+        {
+            if (!File.Exists(_playlistsPath))
+                return "missing";
+            using FileStream stream = new(
+                _playlistsPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            return Convert.ToHexString(SHA256.HashData(stream));
+        }
+        catch
+        {
+            return "unavailable";
+        }
     }
 
     public void LoadInto(AppSettings settings)

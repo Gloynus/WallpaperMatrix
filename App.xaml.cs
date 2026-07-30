@@ -486,6 +486,7 @@ public partial class App : System.Windows.Application
             MainWindow = _settingsWindow;
             _settingsWindow.SettingsApplied += ApplySettings;
             _settingsWindow.PlaylistsSaved += SavePlaylists;
+            _settingsWindow.PlaylistsReloaded += ReloadPlaylists;
             _settingsWindow.SettingsPreviewed += PreviewSettings;
             _settingsWindow.ImageRequested += PreviewImage;
             _settingsWindow.PauseRequested += SetWallpaperPaused;
@@ -494,6 +495,13 @@ public partial class App : System.Windows.Application
                 SetVirtualOutput;
         }
 
+        AppSettings diskPlaylists = _settings.Copy();
+        _playlistStore?.LoadInto(diskPlaylists);
+        if (!AppSettingsComparer.Equivalent(_settings, diskPlaylists))
+        {
+            _settings = diskPlaylists;
+            _wallpaperManager?.ApplySettings(_settings);
+        }
         _settingsWindow.LoadSettings(_settings);
         _settingsWindow.SetPauseState(_wallpaperManager?.IsManuallyPaused ?? false);
         _settingsWindow.SetVirtualOutputStates(
@@ -539,27 +547,41 @@ public partial class App : System.Windows.Application
 
     private void SavePlaylists(AppSettings liveDraft)
     {
-        _settings.ImagePlaylists = liveDraft.ImagePlaylists
-            .Select(playlist => playlist.Copy())
-            .ToList();
-        _settings.ActiveImagePlaylistId = liveDraft.ActiveImagePlaylistId;
-        foreach (MonitorProfile liveProfile in liveDraft.MonitorProfiles)
-        {
-            MonitorProfile? savedProfile = MonitorTopology.Find(
-                _settings.MonitorProfiles,
-                liveProfile.MonitorId);
-            if (savedProfile is null)
-                continue;
-            savedProfile.Settings.ImagePlaylists =
-                liveProfile.Settings.ImagePlaylists
-                    .Select(playlist => playlist.Copy())
-                    .ToList();
-            savedProfile.Settings.ActiveImagePlaylistId =
-                liveProfile.Settings.ActiveImagePlaylistId;
-        }
+        CopyPlaylistState(_settings, liveDraft);
         _settings.Normalize();
         _playlistStore?.Save(_settings);
         _wallpaperManager?.ApplySettings(liveDraft);
+    }
+
+    private void ReloadPlaylists(AppSettings liveDraft)
+    {
+        CopyPlaylistState(_settings, liveDraft);
+        _settings.Normalize();
+        _wallpaperManager?.ApplySettings(liveDraft);
+    }
+
+    private static void CopyPlaylistState(
+        AppSettings target,
+        AppSettings source)
+    {
+        target.ImagePlaylists = source.ImagePlaylists
+            .Select(playlist => playlist.Copy())
+            .ToList();
+        target.ActiveImagePlaylistId = source.ActiveImagePlaylistId;
+        foreach (MonitorProfile sourceProfile in source.MonitorProfiles)
+        {
+            MonitorProfile? targetProfile = MonitorTopology.Find(
+                target.MonitorProfiles,
+                sourceProfile.MonitorId);
+            if (targetProfile is null)
+                continue;
+            targetProfile.Settings.ImagePlaylists =
+                sourceProfile.Settings.ImagePlaylists
+                    .Select(playlist => playlist.Copy())
+                    .ToList();
+            targetProfile.Settings.ActiveImagePlaylistId =
+                sourceProfile.Settings.ActiveImagePlaylistId;
+        }
     }
 
     private void PreviewImage(

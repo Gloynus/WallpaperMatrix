@@ -117,6 +117,8 @@ public partial class SettingsWindow : Window
     private string _runtimeStatus = "СОСТОЯНИЕ ВЫВОДА НЕ ПОЛУЧЕНО";
     private string _diagnosticLogPath = DiagnosticLog.LogPath;
     private readonly PresetStore _presetStore = new();
+    private readonly PlaylistStore _playlistStore = new();
+    private string _playlistFileVersion = "";
     private List<OperatorPreset> _presets = [];
     private string _selectedPresetId = "";
     private bool _updatingPresetUi;
@@ -124,6 +126,7 @@ public partial class SettingsWindow : Window
 
     public event Action<AppSettings>? SettingsApplied;
     public event Action<AppSettings>? PlaylistsSaved;
+    public event Action<AppSettings>? PlaylistsReloaded;
     public event Action<AppSettings>? SettingsPreviewed;
     public event Action<AppSettings, string, string>? ImageRequested;
     public event Action<bool>? PauseRequested;
@@ -188,6 +191,7 @@ public partial class SettingsWindow : Window
     public void LoadSettings(AppSettings settings)
     {
         LoadSettingsCore(settings, preserveAppliedSettings: false);
+        _playlistFileVersion = _playlistStore.FileVersion();
     }
 
     private void LoadSettingsCore(
@@ -376,28 +380,18 @@ public partial class SettingsWindow : Window
     {
         _runtimeStatus = status;
         _diagnosticLogPath = diagnosticLogPath;
-        if (RuntimeStatusBorder is null
-            || RuntimeStatusTitle is null
+        if (RuntimeStatusTitle is null
             || RuntimeStatusText is null)
             return;
         RuntimeStatusText.Text = status;
-        RuntimeStatusBorder.Visibility = Visibility.Visible;
-        RuntimeStatusBorder.Background = new SolidColorBrush(
-            isError
-                ? System.Windows.Media.Color.FromRgb(36, 16, 6)
-                : System.Windows.Media.Color.FromRgb(7, 27, 16));
-        RuntimeStatusBorder.BorderBrush = new SolidColorBrush(
-            isError
-                ? System.Windows.Media.Color.FromRgb(216, 120, 42)
-                : System.Windows.Media.Color.FromRgb(35, 138, 75));
         RuntimeStatusTitle.Foreground = new SolidColorBrush(
             isError
                 ? System.Windows.Media.Color.FromRgb(255, 177, 102)
-                : System.Windows.Media.Color.FromRgb(131, 255, 170));
+                : System.Windows.Media.Color.FromRgb(121, 168, 136));
         RuntimeStatusText.Foreground = new SolidColorBrush(
             isError
                 ? System.Windows.Media.Color.FromRgb(255, 213, 174)
-                : System.Windows.Media.Color.FromRgb(189, 236, 202));
+                : System.Windows.Media.Color.FromRgb(131, 255, 170));
     }
 
     private void CopyDiagnosticsButton_Click(object sender, RoutedEventArgs e)
@@ -468,6 +462,7 @@ public partial class SettingsWindow : Window
         if (!TrySaveActivePreset(updated))
             return;
         SettingsApplied?.Invoke(updated);
+        _playlistFileVersion = _playlistStore.FileVersion();
         _source = updated.Copy();
         _draftSettings = updated.Copy();
         AppSettings appliedDisplay = SelectedMonitorSettings(_draftSettings);
@@ -1002,6 +997,7 @@ public partial class SettingsWindow : Window
         {
             IsEditable = true,
             IsTextSearchEnabled = false,
+            StaysOpenOnEdit = true,
             Width = width,
             Height = 23,
             Padding = new Thickness(2, 0, 2, 0),
@@ -1402,7 +1398,7 @@ public partial class SettingsWindow : Window
         _virtualMonitorDragging = true;
         _topologyAutoFit = false;
         _virtualMonitorDragStart =
-            e.GetPosition(MonitorTopologyCanvas);
+            e.GetPosition(MonitorTopologyScrollViewer);
         _virtualMonitorDragLeft =
             Canvas.GetLeft(_virtualMonitorVisual);
         _virtualMonitorDragTop =
@@ -1427,11 +1423,13 @@ public partial class SettingsWindow : Window
         }
 
         System.Windows.Point current =
-            e.GetPosition(MonitorTopologyCanvas);
+            e.GetPosition(MonitorTopologyScrollViewer);
         double left = _virtualMonitorDragLeft
-            + current.X - _virtualMonitorDragStart.X;
+            + (current.X - _virtualMonitorDragStart.X)
+            / _topologyZoom;
         double top = _virtualMonitorDragTop
-            + current.Y - _virtualMonitorDragStart.Y;
+            + (current.Y - _virtualMonitorDragStart.Y)
+            / _topologyZoom;
         ExpandMonitorTopologyForDrag(ref left, ref top);
         Canvas.SetLeft(_virtualMonitorVisual, left);
         Canvas.SetTop(_virtualMonitorVisual, top);
@@ -1558,10 +1556,29 @@ public partial class SettingsWindow : Window
 
     private void VirtualResolutionCombo_LostKeyboardFocus(
         object sender,
-        KeyboardFocusChangedEventArgs e) =>
-        CommitVirtualResolution(
-            sender as ComboBox,
-            preferSelectedItem: false);
+        KeyboardFocusChangedEventArgs e)
+    {
+        if (sender is not ComboBox input)
+            return;
+
+        // Opening the popup temporarily moves keyboard focus outside the
+        // editable ComboBox. Rebuilding the monitor canvas at that moment
+        // destroys the popup before an item can be chosen. Wait until routed
+        // focus has settled and only commit a genuine departure from the field.
+        Dispatcher.BeginInvoke(
+            DispatcherPriority.Input,
+            () =>
+            {
+                if (!_loading
+                    && !input.IsKeyboardFocusWithin
+                    && !input.IsDropDownOpen)
+                {
+                    CommitVirtualResolution(
+                        input,
+                        preferSelectedItem: false);
+                }
+            });
+    }
 
     private void VirtualResolutionCombo_DropDownClosed(
         object? sender,
@@ -2501,6 +2518,7 @@ public partial class SettingsWindow : Window
         AppSettings liveDraft = ReadSettingsFromControls();
         _draftSettings = liveDraft.Copy();
         PlaylistsSaved?.Invoke(liveDraft);
+        _playlistFileVersion = _playlistStore.FileVersion();
         UpdateDraftStatus();
         QueuePreview();
         StatusText.Text = _hasPendingChanges
@@ -2527,6 +2545,88 @@ public partial class SettingsWindow : Window
         RefreshPlaylistEditor();
         QueuePreview();
         e.Handled = true;
+    }
+
+    private void PlaylistCombo_DropDownOpened(
+        object? sender,
+        EventArgs e)
+    {
+        if (!ReloadPlaylistsFromStorage())
+            return;
+
+        Dispatcher.BeginInvoke(
+            DispatcherPriority.Input,
+            () => PlaylistCombo.IsDropDownOpen = true);
+    }
+
+    private void ImageModeCheck_Click(
+        object sender,
+        RoutedEventArgs e) =>
+        ReloadPlaylistsFromStorage();
+
+    private bool ReloadPlaylistsFromStorage()
+    {
+        if (_loading)
+            return false;
+
+        string fileVersion = _playlistStore.FileVersion();
+        if (string.Equals(
+                fileVersion,
+                "unavailable",
+                StringComparison.Ordinal))
+        {
+            return false;
+        }
+        if (string.Equals(
+                fileVersion,
+                _playlistFileVersion,
+                StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        AppSettings reloaded = ReadSettingsFromControls();
+        _playlistStore.LoadInto(reloaded);
+        CopyPlaylistState(_source, reloaded);
+        _draftSettings = reloaded.Copy();
+
+        AppSettings display = SelectedMonitorSettings(_draftSettings);
+        _playlists = display.ImagePlaylists
+            .Select(playlist => playlist.Copy())
+            .ToList();
+        _activePlaylistId = display.ActiveImagePlaylistId;
+        RefreshPlaylistUi();
+        _playlistFileVersion = _playlistStore.FileVersion();
+        PlaylistsReloaded?.Invoke(reloaded);
+        UpdateDraftStatus();
+        StatusText.Text =
+            "ФАЙЛ ПЛЕЙЛИСТОВ ПЕРЕЧИТАН // БАЗА ДАННЫХ СИНХРОНИЗИРОВАНА";
+        return true;
+    }
+
+    private static void CopyPlaylistState(
+        AppSettings target,
+        AppSettings source)
+    {
+        target.ImagePlaylists = source.ImagePlaylists
+            .Select(playlist => playlist.Copy())
+            .ToList();
+        target.ActiveImagePlaylistId = source.ActiveImagePlaylistId;
+        foreach (MonitorProfile sourceProfile in source.MonitorProfiles)
+        {
+            MonitorProfile? targetProfile = MonitorTopology.Find(
+                target.MonitorProfiles,
+                sourceProfile.MonitorId);
+            if (targetProfile is null)
+                continue;
+            targetProfile.Settings.ImagePlaylists =
+                sourceProfile.Settings.ImagePlaylists
+                    .Select(playlist => playlist.Copy())
+                    .ToList();
+            targetProfile.Settings.ActiveImagePlaylistId =
+                sourceProfile.Settings.ActiveImagePlaylistId;
+        }
+        target.Normalize();
     }
 
     private void PlaylistNameTextBox_TextChanged(object sender, TextChangedEventArgs e)
