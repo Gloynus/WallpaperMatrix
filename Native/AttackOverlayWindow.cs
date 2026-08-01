@@ -21,6 +21,8 @@ internal sealed class AttackOverlayWindow : IDisposable
     private MatrixScenePresentation[] _presentations;
     private readonly double _transitionSeconds;
     private readonly long _existingStreamCutoff;
+    private readonly int _capturedWindowCount;
+    private AttackInterfaceFrame? _interfaceFrame;
     private readonly Thread _thread;
     private readonly CancellationTokenSource _cancellation = new();
     private readonly ManualResetEventSlim _started = new(false);
@@ -38,6 +40,7 @@ internal sealed class AttackOverlayWindow : IDisposable
     public AttackOverlayWindow(
         DrawingRectangle bounds,
         AttackFrameSnapshot frame,
+        AttackInterfaceFrame? interfaceFrame,
         double transitionSeconds)
     {
         _bounds = bounds;
@@ -48,6 +51,8 @@ internal sealed class AttackOverlayWindow : IDisposable
             AppSettings.MinimumAttackTransitionSeconds,
             AppSettings.MaximumAttackTransitionSeconds);
         _existingStreamCutoff = frame.LatestStreamId;
+        _interfaceFrame = interfaceFrame;
+        _capturedWindowCount = interfaceFrame?.WindowCount ?? 0;
         _thread = new Thread(RenderThreadMain)
         {
             IsBackground = true,
@@ -115,7 +120,17 @@ internal sealed class AttackOverlayWindow : IDisposable
                 _bounds.Height,
                 _scene,
                 transparentSurface: true);
-            presenter.SetTransitionState(1, 1);
+            presenter.SetAttackInterfaceFrame(_interfaceFrame);
+            if (_interfaceFrame is not null)
+            {
+                Array.Clear(_interfaceFrame.Samples);
+                _interfaceFrame = null;
+            }
+            presenter.SetAttackTransitionState(
+                revealProgress: 0,
+                veilOpacity: 1,
+                glyphOpacity: 1,
+                captureStrength: 1);
             presenter.SetAttackGlyphState(
                 _existingStreamCutoff,
                 haloFactor: 1);
@@ -130,7 +145,8 @@ internal sealed class AttackOverlayWindow : IDisposable
             Stopwatch attackClock = Stopwatch.StartNew();
             Stopwatch? exitClock = null;
             double nextTopmostCheckSeconds = 0.5;
-            double exitStartDesktopOpacity = 0;
+            double exitStartRevealProgress = 0;
+            double exitStartCaptureStrength = 0;
             started = true;
             _started.Set();
             DiagnosticLog.Write(
@@ -138,6 +154,7 @@ internal sealed class AttackOverlayWindow : IDisposable
                 + $"renderer=0x{_window.ToInt64():X}; "
                 + $"surface={_bounds.Width}x{_bounds.Height}; "
                 + $"viewports={_presentations.Length}; "
+                + $"interfaceWindows={_capturedWindowCount}; "
                 + $"streamCutoff={_existingStreamCutoff}; "
                 + $"transition={_transitionSeconds:0.##}s.");
 
@@ -179,15 +196,20 @@ internal sealed class AttackOverlayWindow : IDisposable
                     break;
                 }
 
-                double desktopOpacity;
+                double revealProgress;
+                double veilOpacity;
                 double glyphOpacity;
+                double captureStrength;
                 if (exiting)
                 {
                     if (exitClock is null)
                     {
                         exitClock = Stopwatch.StartNew();
-                        exitStartDesktopOpacity =
-                            AttackDesktopOpacity(attackClock.Elapsed.TotalSeconds);
+                        exitStartRevealProgress =
+                            AttackRevealProgress(
+                                attackClock.Elapsed.TotalSeconds);
+                        exitStartCaptureStrength =
+                            AttackCaptureStrength(exitStartRevealProgress);
                         try
                         {
                             ExitStarted?.Invoke();
@@ -203,22 +225,29 @@ internal sealed class AttackOverlayWindow : IDisposable
                         0,
                         1);
                     double eased = SmoothStep(progress);
-                    desktopOpacity = exitStartDesktopOpacity
-                        + (1.0 - exitStartDesktopOpacity) * eased;
+                    revealProgress = exitStartRevealProgress;
+                    veilOpacity = 1.0 - eased;
                     glyphOpacity = 1.0 - eased;
+                    captureStrength = exitStartCaptureStrength
+                        * (1.0 - eased);
                     if (progress >= 1)
                         break;
                 }
                 else
                 {
-                    desktopOpacity =
-                        AttackDesktopOpacity(attackClock.Elapsed.TotalSeconds);
+                    revealProgress = AttackRevealProgress(
+                        attackClock.Elapsed.TotalSeconds);
+                    veilOpacity = 1;
                     glyphOpacity = 1;
+                    captureStrength =
+                        AttackCaptureStrength(revealProgress);
                 }
 
-                presenter.SetTransitionState(
-                    desktopOpacity,
-                    glyphOpacity);
+                presenter.SetAttackTransitionState(
+                    revealProgress,
+                    veilOpacity,
+                    glyphOpacity,
+                    captureStrength);
                 presenter.SetAttackGlyphState(
                     _existingStreamCutoff,
                     haloFactor: 1);
@@ -271,21 +300,26 @@ internal sealed class AttackOverlayWindow : IDisposable
         }
     }
 
-    private double AttackDesktopOpacity(double elapsedSeconds)
+    private double AttackRevealProgress(double elapsedSeconds)
     {
-        const double revealDelay = 0.35;
-        double fadeSeconds = Math.Max(
-            0.001,
-            _transitionSeconds - revealDelay);
-        double progress = Math.Clamp(
-            (elapsedSeconds - revealDelay) / fadeSeconds,
+        // The operator value is the exact time from a completely transparent
+        // veil to a completely occupied virtual desktop.
+        return Math.Clamp(
+            elapsedSeconds / Math.Max(0.001, _transitionSeconds),
             0,
             1);
-        // This timer controls only the uniform desktop veil. Stream generation,
-        // motion, image deposits and cell fading continue on their own clocks.
-        // A linear alpha makes the operator value the literal time during which
-        // the interface remains visibly in transition.
-        return 1.0 - progress;
+    }
+
+    private static double AttackCaptureStrength(double revealProgress)
+    {
+        // Keep the photographed interface readable during the first part of
+        // the takeover, then hand new streams back to the live database image
+        // before the last row reaches the attack background.
+        double fade = Math.Clamp(
+            (revealProgress - 0.34) / 0.66,
+            0,
+            1);
+        return 1.0 - SmoothStep(fade);
     }
 
     private static double SmoothStep(double value) =>

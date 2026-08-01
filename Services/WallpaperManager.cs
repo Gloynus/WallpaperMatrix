@@ -1220,10 +1220,29 @@ public sealed class WallpaperManager : IDisposable
 
             System.Drawing.Rectangle bounds =
                 System.Windows.Forms.SystemInformation.VirtualScreen;
+            AttackInterfaceFrame? interfaceFrame = null;
+            try
+            {
+                interfaceFrame =
+                    AttackInterfaceCaptureService.Capture(bounds);
+                DiagnosticLog.Write(
+                    $"Карта интерфейса АТАКИ подготовлена: "
+                    + $"{interfaceFrame.Width}x{interfaceFrame.Height}; "
+                    + $"окон={interfaceFrame.WindowCount}.");
+            }
+            catch (Exception captureException)
+            {
+                // A protected video surface or a restrictive remote session
+                // must not disable the ordinary attack transition.
+                DiagnosticLog.Write(
+                    "Интерфейс не удалось снять; АТАКА продолжена без отпечатка.",
+                    captureException);
+            }
             AttackOverlayWindow overlay = new(
                 bounds,
                 frame,
-                _settings.AttackTransitionSeconds);
+                interfaceFrame,
+                settings.AttackTransitionSeconds);
             overlay.Closed += OnAttackOverlayClosed;
             overlay.ExitStarted += OnAttackExitStarted;
             _attackOverlay = overlay;

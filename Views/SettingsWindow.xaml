@@ -373,8 +373,8 @@
                BasedOn="{StaticResource CompactActionButton}">
             <Setter Property="HorizontalAlignment" Value="Stretch"/>
             <Setter Property="Margin" Value="0,0,0,5"/>
-            <Setter Property="Padding" Value="7,6"/>
-            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="Padding" Value="7,8"/>
+            <Setter Property="FontSize" Value="12"/>
         </Style>
         <Style x:Key="MonitorContextHostItem"
                TargetType="MenuItem">
@@ -2331,12 +2331,12 @@
                                         <StackPanel Grid.Column="1" Orientation="Horizontal">
                                             <TextBox x:Name="DurationInput" Tag="Duration"
                                                      Style="{StaticResource NumericInput}"
-                                                     ToolTip="Ползунок: 3–600 с. Ручной ввод: 0,1–600 с."/>
+                                                     ToolTip="Ползунок: 3–300 с. Ручной ввод: 0,1–600 с."/>
                                             <TextBlock Text="с" Margin="4,3,0,0"
                                                        FontFamily="Consolas" Foreground="#83FFAA"/>
                                         </StackPanel>
                                     </Grid>
-                                    <Slider x:Name="DurationSlider" Minimum="3" Maximum="600"
+                                    <Slider x:Name="DurationSlider" Minimum="3" Maximum="300"
                                             TickFrequency="1" ValueChanged="AnySlider_ValueChanged"/>
                                 </StackPanel>
                             </Grid>
@@ -2716,13 +2716,13 @@
                                                 <TextBox x:Name="AttackTransitionSecondsInput"
                                                          Tag="AttackTransitionSeconds"
                                                          Style="{StaticResource NumericInput}"
-                                                         ToolTip="Длительность равномерного затемнения интерфейса: 1–600 с. Поток продолжает двигаться с обычной скоростью."/>
+                                                         ToolTip="Градиентный захват сверху вниз. Ползунок: 1–60 с. Ручной ввод: 1–600 с. Поток продолжает двигаться с обычной скоростью."/>
                                                 <TextBlock Text="с" Margin="4,3,0,0"
                                                            FontFamily="Consolas" Foreground="#83FFAA"/>
                                             </StackPanel>
                                         </Grid>
                                         <Slider x:Name="AttackTransitionSecondsSlider"
-                                                Minimum="1" Maximum="600"
+                                                Minimum="1" Maximum="60"
                                                 TickFrequency="1"
                                                 ValueChanged="AnySlider_ValueChanged"/>
                                     </StackPanel>
@@ -2773,7 +2773,7 @@
                             </StackPanel>
                             <StackPanel Orientation="Horizontal">
                                 <CheckBox x:Name="PauseDuringFullscreenAppsCheck"
-                                          Content="Пауза в играх"/>
+                                          Content="Останавливать в полноэкранных приложениях"/>
                                 <Button Style="{StaticResource HelpButton}" VerticalAlignment="Center"
                                         ToolTip="Плавно останавливает поток при полноэкранном приложении и возвращает его установленную скорость после выхода."/>
                             </StackPanel>

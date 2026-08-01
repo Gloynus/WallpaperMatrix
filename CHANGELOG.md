@@ -5,6 +5,7 @@
 
 ## 3.x
 
+- [3.7.3](docs/releases/3.7.3.md)
 - [3.7.2](docs/releases/3.7.2.md)
 - [3.7.1](docs/releases/3.7.1.md)
 - [3.7.0](docs/releases/3.7.0.md)

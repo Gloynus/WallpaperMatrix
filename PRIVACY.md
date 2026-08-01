@@ -17,10 +17,14 @@ The application reads only local information required for its functions:
 - foreground and full-screen application state for the optional game pause;
 - keyboard and mouse idle time for the optional “АТАКА СИСТЕМЫ” mode.
 
-“АТАКА СИСТЕМЫ” does not capture, save or analyse the visual contents of the
-desktop. It presents the already-running Matrix scene on a transparent
-top-level surface and gradually replaces uncovered areas with the configured
-background.
+When “АТАКА СИСТЕМЫ” starts, the application takes one composited screenshot
+of the current virtual desktop. It keeps only a reduced luminance map of
+visible top-level window regions; Explorer wallpaper surfaces and Wallpaper
+Matrix output windows are excluded. The full-colour pixels are cleared from
+memory immediately after this map is created. Neither the screenshot nor the
+map is written to disk, added to diagnostics, retained after the attack, or
+sent over a network. The map is used only to let newly arriving glyphs briefly
+describe the visible interface before returning to the current playlist image.
 
 Settings, playlists, presets and diagnostics are stored locally in the
 `OperatorData` folder next to the executable. Source images are never modified.

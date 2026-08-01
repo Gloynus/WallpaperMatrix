@@ -68,13 +68,19 @@ internal sealed class Direct3D11Presenter : IDisposable
     private readonly Dictionary<SharedMatrixScene, SceneGpuResources>
         _sceneResources =
             new(ReferenceEqualityComparer.Instance);
-    private float _desktopOpacity;
     private float _glyphOpacity = 1;
     private float _surfaceBackgroundOpacity = 1;
     private float _surfaceGlyphOpacity = 1;
+    private float _attackRevealProgress;
+    private float _attackVeilOpacity = 1;
+    private float _attackCaptureStrength;
     private float _attackStreamCutoff;
     private float _attackModeEnabled;
     private float _attackHaloFactor = 1;
+    private int _currentTargetWidth = 1;
+    private int _currentTargetHeight = 1;
+    private ID3D11Texture2D? _attackInterfaceTexture;
+    private ID3D11ShaderResourceView? _attackInterfaceView;
     private long _lastSlowPresentReportTimestamp;
     private bool _disposed;
 
@@ -308,12 +314,71 @@ internal sealed class Direct3D11Presenter : IDisposable
             ShaderFlags.OptimizationLevel3);
     }
 
-    public void SetTransitionState(
-        double desktopOpacity,
-        double glyphOpacity)
+    public void SetAttackTransitionState(
+        double revealProgress,
+        double veilOpacity,
+        double glyphOpacity,
+        double captureStrength)
     {
-        _desktopOpacity = (float)Math.Clamp(desktopOpacity, 0.0, 1.0);
+        _attackRevealProgress =
+            (float)Math.Clamp(revealProgress, 0.0, 1.0);
+        _attackVeilOpacity =
+            (float)Math.Clamp(veilOpacity, 0.0, 1.0);
         _glyphOpacity = (float)Math.Clamp(glyphOpacity, 0.0, 1.0);
+        _attackCaptureStrength =
+            (float)Math.Clamp(captureStrength, 0.0, 1.0);
+    }
+
+    public void SetAttackInterfaceFrame(AttackInterfaceFrame? frame)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        _context.PSSetShaderResource(
+            1,
+            (ID3D11ShaderResourceView)null!);
+        _attackInterfaceView?.Dispose();
+        _attackInterfaceTexture?.Dispose();
+        _attackInterfaceView = null;
+        _attackInterfaceTexture = null;
+        if (frame is null)
+            return;
+        if (frame.Width <= 0
+            || frame.Height <= 0
+            || frame.Samples.Length
+                != checked(frame.Width * frame.Height * 2))
+        {
+            throw new ArgumentException(
+                "Карта интерфейса АТАКИ имеет неверный размер.",
+                nameof(frame));
+        }
+
+        Texture2DDescription description = new(
+            Format.R8G8_UNorm,
+            (uint)frame.Width,
+            (uint)frame.Height,
+            arraySize: 1,
+            mipLevels: 1,
+            BindFlags.ShaderResource,
+            ResourceUsage.Immutable);
+        GCHandle samples = GCHandle.Alloc(
+            frame.Samples,
+            GCHandleType.Pinned);
+        try
+        {
+            uint rowPitch = checked((uint)(frame.Width * 2));
+            SubresourceData initialData = new(
+                samples.AddrOfPinnedObject(),
+                rowPitch,
+                checked(rowPitch * (uint)frame.Height));
+            _attackInterfaceTexture = _device.CreateTexture2D(
+                description,
+                initialData);
+            _attackInterfaceView = _device.CreateShaderResourceView(
+                _attackInterfaceTexture);
+        }
+        finally
+        {
+            samples.Free();
+        }
     }
 
     public void SetSurfaceReveal(
@@ -576,6 +641,8 @@ internal sealed class Direct3D11Presenter : IDisposable
         int targetHeight,
         IReadOnlyList<SceneDrawState> states)
     {
+        _currentTargetWidth = Math.Max(1, targetWidth);
+        _currentTargetHeight = Math.Max(1, targetHeight);
         _context.OMSetRenderTargets(_renderTargetView);
         _context.OMSetBlendState(_blendState);
         _context.ClearRenderTargetView(
@@ -595,12 +662,14 @@ internal sealed class Direct3D11Presenter : IDisposable
 
             if (_attackModeEnabled > 0.5f)
             {
-                // The attack surface starts fully transparent. The real
-                // desktop remains visible below it while this veil grows.
+                // The front of the veil moves from the top edge to the
+                // bottom. At progress 0 every pixel is transparent; at 1 the
+                // complete virtual desktop has reached the attack colour.
                 DrawBackground(
                     state.Presentation.TargetBounds,
                     state.Parameters,
-                    1.0f - _desktopOpacity);
+                    _attackVeilOpacity,
+                    _attackRevealProgress);
             }
             else
             {
@@ -624,24 +693,32 @@ internal sealed class Direct3D11Presenter : IDisposable
                 // Near the end, only ordinary glyphs from the old wallpaper
                 // join them to preserve continuity; already developed image
                 // cells never rise as a finished picture over the interface.
-                float takeoverProgress = 1.0f - _desktopOpacity;
+                float takeoverProgress = _attackRevealProgress;
                 float inheritedFlow = Math.Clamp(
                     (takeoverProgress - 0.58f) / 0.42f,
                     0.0f,
                     1.0f);
                 inheritedFlow = inheritedFlow * inheritedFlow
                     * (3.0f - 2.0f * inheritedFlow);
+                float solidBody = 1.0f - Math.Clamp(
+                    (takeoverProgress - 0.76f) / 0.24f,
+                    0.0f,
+                    1.0f);
+                solidBody = solidBody * solidBody
+                    * (3.0f - 2.0f * solidBody);
                 DrawGlyphPass(
                     state,
                     streamFilterMode: 3,
-                    solidBody: _desktopOpacity,
+                    solidBody: solidBody,
                     haloFactor: _attackHaloFactor,
-                    opacityFactor: inheritedFlow);
+                    opacityFactor: inheritedFlow,
+                    captureFactor: 0);
                 DrawGlyphPass(
                     state,
                     streamFilterMode: 1,
-                    solidBody: _desktopOpacity,
-                    haloFactor: _attackHaloFactor);
+                    solidBody: solidBody,
+                    haloFactor: _attackHaloFactor,
+                    captureFactor: _attackCaptureStrength);
             }
             else
             {
@@ -649,7 +726,8 @@ internal sealed class Direct3D11Presenter : IDisposable
                     state,
                     streamFilterMode: 0,
                     solidBody: 1.0f - startupGlyphBlend,
-                    haloFactor: startupGlyphBlend);
+                    haloFactor: startupGlyphBlend,
+                    captureFactor: 0);
             }
         }
     }
@@ -659,7 +737,8 @@ internal sealed class Direct3D11Presenter : IDisposable
         float streamFilterMode,
         float solidBody,
         float haloFactor,
-        float opacityFactor = 1)
+        float opacityFactor = 1,
+        float captureFactor = 0)
     {
         if (state.Resources.InstanceBuffer is null
             || state.InstanceCount <= 0
@@ -682,6 +761,10 @@ internal sealed class Direct3D11Presenter : IDisposable
         _context.PSSetShaderResource(
             0,
             state.Resources.AtlasView);
+        _context.PSSetShaderResource(
+            1,
+            _attackInterfaceView
+                ?? (ID3D11ShaderResourceView)null!);
         _context.PSSetSampler(0, _sampler);
         DrawingRectangle viewport = state.Presentation.TargetBounds;
         DrawingRectangle source = state.Presentation.SourceBounds;
@@ -720,7 +803,14 @@ internal sealed class Direct3D11Presenter : IDisposable
             source.Left,
             source.Top,
             source.Width,
-            source.Height);
+            source.Height,
+            viewport.Left,
+            viewport.Top,
+            viewport.Width,
+            viewport.Height,
+            _currentTargetWidth,
+            _currentTargetHeight,
+            _attackInterfaceView is null ? 0 : captureFactor);
         UpdateConstantBuffer(constants);
         _context.DrawInstanced(
             4,
@@ -731,12 +821,16 @@ internal sealed class Direct3D11Presenter : IDisposable
         _context.PSSetShaderResource(
             0,
             (ID3D11ShaderResourceView)null!);
+        _context.PSSetShaderResource(
+            1,
+            (ID3D11ShaderResourceView)null!);
     }
 
     private void DrawBackground(
         DrawingRectangle target,
         MatrixRenderParameters parameters,
-        float opacity)
+        float opacity,
+        float topDownProgress = -1)
     {
         if (opacity <= 0.0001f
             || target.Width <= 0
@@ -760,7 +854,11 @@ internal sealed class Direct3D11Presenter : IDisposable
         _context.PSSetShader(_transitionPixelShader);
         _context.PSSetConstantBuffer(0, _transitionConstantBuffer);
         UpdateTransitionConstantBuffer(
-            new TransitionShaderConstants(parameters, opacity));
+            new TransitionShaderConstants(
+                parameters,
+                opacity,
+                topDownProgress,
+                _currentTargetHeight));
         _context.Draw(4, 0);
     }
 
@@ -824,6 +922,8 @@ internal sealed class Direct3D11Presenter : IDisposable
         foreach (SceneGpuResources resources in _sceneResources.Values)
             resources.Dispose();
         _sceneResources.Clear();
+        _attackInterfaceView?.Dispose();
+        _attackInterfaceTexture?.Dispose();
         _blendState.Dispose();
         _sampler.Dispose();
         _transitionConstantBuffer.Dispose();
@@ -902,6 +1002,11 @@ internal sealed class Direct3D11Presenter : IDisposable
         private readonly float _padding1;
         public readonly Vector3 BackgroundColor;
         private readonly float _padding2;
+        public readonly Vector2 TargetSurfaceSize;
+        public readonly Vector2 TargetViewportOrigin;
+        public readonly Vector2 TargetViewportSize;
+        public readonly float CaptureEnabled;
+        public readonly float CaptureStrength;
 
         public ShaderConstants(
             MatrixRenderParameters parameters,
@@ -916,7 +1021,14 @@ internal sealed class Direct3D11Presenter : IDisposable
             float sourceLeft,
             float sourceTop,
             float sourceWidth,
-            float sourceHeight)
+            float sourceHeight,
+            float viewportLeft,
+            float viewportTop,
+            float viewportWidth,
+            float viewportHeight,
+            float targetWidth,
+            float targetHeight,
+            float captureStrength)
         {
             SourceSize = new(
                 parameters.SourceWidth,
@@ -946,6 +1058,11 @@ internal sealed class Direct3D11Presenter : IDisposable
                 (float)parameters.BackgroundGreen,
                 (float)parameters.BackgroundBlue);
             _padding2 = 0;
+            TargetSurfaceSize = new(targetWidth, targetHeight);
+            TargetViewportOrigin = new(viewportLeft, viewportTop);
+            TargetViewportSize = new(viewportWidth, viewportHeight);
+            CaptureEnabled = captureStrength > 0.0001f ? 1 : 0;
+            CaptureStrength = captureStrength;
         }
     }
 
@@ -954,16 +1071,26 @@ internal sealed class Direct3D11Presenter : IDisposable
     {
         public readonly Vector3 BackgroundColor;
         public readonly float DesktopOpacity;
+        public readonly float GradientProgress;
+        public readonly float GradientEnabled;
+        public readonly float TargetSurfaceHeight;
+        private readonly float _padding;
 
         public TransitionShaderConstants(
             MatrixRenderParameters parameters,
-            float desktopOpacity)
+            float desktopOpacity,
+            float topDownProgress,
+            float targetSurfaceHeight)
         {
             BackgroundColor = new(
                 (float)parameters.BackgroundRed,
                 (float)parameters.BackgroundGreen,
                 (float)parameters.BackgroundBlue);
             DesktopOpacity = desktopOpacity;
+            GradientProgress = Math.Clamp(topDownProgress, 0, 1);
+            GradientEnabled = topDownProgress >= 0 ? 1 : 0;
+            TargetSurfaceHeight = Math.Max(1, targetSurfaceHeight);
+            _padding = 0;
         }
     }
 
@@ -988,9 +1115,15 @@ internal sealed class Direct3D11Presenter : IDisposable
             float Padding1;
             float3 BackgroundColor;
             float Padding2;
+            float2 TargetSurfaceSize;
+            float2 TargetViewportOrigin;
+            float2 TargetViewportSize;
+            float CaptureEnabled;
+            float CaptureStrength;
         };
 
         Texture2D<float> Atlas : register(t0);
+        Texture2D<float2> AttackInterface : register(t1);
         SamplerState AtlasSampler : register(s0);
 
         struct VertexInput
@@ -1010,6 +1143,7 @@ internal sealed class Direct3D11Presenter : IDisposable
             float Emphasis : TEXCOORD4;
             float Glow : TEXCOORD5;
             nointerpolation float StreamId : TEXCOORD6;
+            nointerpolation float2 CaptureUv : TEXCOORD7;
         };
 
         PixelInput VSMain(VertexInput input)
@@ -1047,6 +1181,20 @@ internal sealed class Direct3D11Presenter : IDisposable
             output.Emphasis = input.Detail.y;
             output.Glow = input.Detail.z;
             output.StreamId = input.Detail.w;
+            float2 cellCenter =
+                (input.CellGlyphLevel.xy + 0.5) * CellSize;
+            float2 localCenter = cellCenter - SourceOrigin;
+            float2 centerClip = float2(
+                localCenter.x / SourceViewportSize.x * 2.0 - 1.0,
+                1.0 - localCenter.y / SourceViewportSize.y * 2.0)
+                * AspectScale;
+            float2 viewportPosition = float2(
+                centerClip.x * 0.5 + 0.5,
+                0.5 - centerClip.y * 0.5);
+            output.CaptureUv = (
+                TargetViewportOrigin
+                + viewportPosition * TargetViewportSize)
+                / max(TargetSurfaceSize, float2(1.0, 1.0));
             return output;
         }
 
@@ -1147,6 +1295,16 @@ internal sealed class Direct3D11Presenter : IDisposable
             wideLight *= 0.25;
 
             float level = input.Level;
+            if (CaptureEnabled > 0.5)
+            {
+                float2 captured = AttackInterface.Sample(
+                    AtlasSampler,
+                    saturate(input.CaptureUv));
+                level = lerp(
+                    level,
+                    captured.r,
+                    captured.g * CaptureStrength);
+            }
 
             float isImage = step(2.5, input.Style);
             float softLight = nearLight * 0.68 + wideLight * 0.32;
@@ -1207,6 +1365,10 @@ internal sealed class Direct3D11Presenter : IDisposable
         {
             float3 BackgroundColor;
             float DesktopOpacity;
+            float GradientProgress;
+            float GradientEnabled;
+            float TargetSurfaceHeight;
+            float Padding;
         };
 
         struct VertexInput
@@ -1217,6 +1379,7 @@ internal sealed class Direct3D11Presenter : IDisposable
         struct PixelInput
         {
             float4 Position : SV_POSITION;
+            float2 TexturePosition : TEXCOORD0;
         };
 
         PixelInput VSMain(VertexInput input)
@@ -1227,12 +1390,26 @@ internal sealed class Direct3D11Presenter : IDisposable
                 1.0 - input.Corner.y * 2.0,
                 0.0,
                 1.0);
+            output.TexturePosition = input.Corner;
             return output;
         }
 
         float4 PSMain(PixelInput input) : SV_TARGET
         {
-            return float4(BackgroundColor, DesktopOpacity);
+            float alpha = DesktopOpacity;
+            if (GradientEnabled > 0.5)
+            {
+                const float feather = 0.12;
+                float front = lerp(
+                    -feather,
+                    1.0 + feather,
+                    GradientProgress);
+                alpha *= 1.0 - smoothstep(
+                    front - feather,
+                    front + feather,
+                    input.Position.y / max(TargetSurfaceHeight, 1.0));
+            }
+            return float4(BackgroundColor, alpha);
         }
         """;
 }

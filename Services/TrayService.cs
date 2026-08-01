@@ -9,24 +9,30 @@ public sealed class TrayService : IDisposable
     private readonly System.Windows.Forms.NotifyIcon _notifyIcon;
     private readonly System.Windows.Forms.ToolStripMenuItem _pauseItem;
     private readonly System.Windows.Forms.ToolStripMenuItem _imageModeItem;
+    private readonly System.Windows.Forms.ToolStripMenuItem _playlistsItem;
+    private readonly Action<string> _selectPlaylist;
     private readonly Icon _icon;
 
     public TrayService(
         Action showSettings,
         Action togglePaused,
         Action toggleImageMode,
+        Action<string> selectPlaylist,
         Action nextImage,
         Action refreshDesktop,
         Action exit)
     {
+        _selectPlaylist = selectPlaylist;
         _icon = CreateIcon();
         System.Windows.Forms.ContextMenuStrip menu = new();
         menu.Items.Add("Открыть операторскую консоль", null, (_, _) => RunOnUi(showSettings));
         menu.Items.Add(new System.Windows.Forms.ToolStripSeparator());
         _pauseItem = new System.Windows.Forms.ToolStripMenuItem("Остановить и скрыть поток", null, (_, _) => RunOnUi(togglePaused));
         _imageModeItem = new System.Windows.Forms.ToolStripMenuItem("Проявлять изображения", null, (_, _) => RunOnUi(toggleImageMode));
+        _playlistsItem = new System.Windows.Forms.ToolStripMenuItem("Плейлист");
         menu.Items.Add(_pauseItem);
         menu.Items.Add(_imageModeItem);
+        menu.Items.Add(_playlistsItem);
         menu.Items.Add("Следующее изображение", null, (_, _) => RunOnUi(nextImage));
         menu.Items.Add(new System.Windows.Forms.ToolStripSeparator());
         menu.Items.Add("Переподключить к рабочему столу", null, (_, _) => RunOnUi(refreshDesktop));
@@ -55,6 +61,44 @@ public sealed class TrayService : IDisposable
                 ? "Возобновить поток"
                 : "Остановить и скрыть поток";
         _imageModeItem.Checked = settings.ImageMode;
+        RebuildPlaylistMenu(settings);
+    }
+
+    private void RebuildPlaylistMenu(AppSettings settings)
+    {
+        _playlistsItem.DropDownItems.Clear();
+        IReadOnlyList<ImagePlaylist> playlists = settings.ImagePlaylists
+            .OrderBy(
+                playlist => playlist.Name,
+                StringComparer.CurrentCultureIgnoreCase)
+            .ToArray();
+        if (playlists.Count == 0)
+        {
+            _playlistsItem.DropDownItems.Add(new System.Windows.Forms.ToolStripMenuItem(
+                "Плейлисты отсутствуют")
+            {
+                Enabled = false
+            });
+            _playlistsItem.Enabled = false;
+            return;
+        }
+
+        _playlistsItem.Enabled = true;
+        foreach (ImagePlaylist playlist in playlists)
+        {
+            string playlistId = playlist.Id;
+            System.Windows.Forms.ToolStripMenuItem item = new(playlist.Name)
+            {
+                Checked = string.Equals(
+                    playlist.Id,
+                    settings.ActiveImagePlaylistId,
+                    StringComparison.OrdinalIgnoreCase),
+                ToolTipText = $"Изображений: {playlist.Entries.Count}"
+            };
+            item.Click += (_, _) => RunOnUi(
+                () => _selectPlaylist(playlistId));
+            _playlistsItem.DropDownItems.Add(item);
+        }
     }
 
     public void ShowError(string message)

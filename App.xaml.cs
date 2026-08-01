@@ -188,6 +188,7 @@ public partial class App : System.Windows.Application
             showSettings: ShowSettings,
             togglePaused: TogglePaused,
             toggleImageMode: ToggleImageMode,
+            selectPlaylist: SelectPlaylistFromTray,
             nextImage: () => _wallpaperManager?.NextImage(),
             refreshDesktop: () => _wallpaperManager?.RefreshWindows(),
             exit: ExitApplication);
@@ -551,6 +552,7 @@ public partial class App : System.Windows.Application
         _settings.Normalize();
         _playlistStore?.Save(_settings);
         _wallpaperManager?.ApplySettings(liveDraft);
+        UpdateTrayState();
     }
 
     private void ReloadPlaylists(AppSettings liveDraft)
@@ -558,6 +560,7 @@ public partial class App : System.Windows.Application
         CopyPlaylistState(_settings, liveDraft);
         _settings.Normalize();
         _wallpaperManager?.ApplySettings(liveDraft);
+        UpdateTrayState();
     }
 
     private static void CopyPlaylistState(
@@ -628,6 +631,55 @@ public partial class App : System.Windows.Application
             _wallpaperManager?.IsManuallyPaused ?? false,
             _wallpaperManager?.IsPausedByFullscreenApp ?? false);
         _settingsWindow?.LoadSettings(_settings);
+    }
+
+    private void SelectPlaylistFromTray(string playlistId)
+    {
+        ImagePlaylist? selected = _settings.ImagePlaylists
+            .FirstOrDefault(playlist => string.Equals(
+                playlist.Id,
+                playlistId,
+                StringComparison.OrdinalIgnoreCase));
+        if (selected is null)
+            return;
+
+        _settings.ActiveImagePlaylistId = selected.Id;
+        _settings.OperatorPlaylistId = selected.Id;
+        _settings.OperatorPlaylistName = selected.Name;
+        foreach (MonitorProfile profile in _settings.MonitorProfiles)
+        {
+            ImagePlaylist? profilePlaylist = profile.Settings.ImagePlaylists
+                .FirstOrDefault(playlist => string.Equals(
+                    playlist.Id,
+                    selected.Id,
+                    StringComparison.OrdinalIgnoreCase))
+                ?? profile.Settings.ImagePlaylists.FirstOrDefault(playlist =>
+                    string.Equals(
+                        playlist.Name,
+                        selected.Name,
+                        StringComparison.CurrentCultureIgnoreCase));
+            if (profilePlaylist is null)
+                continue;
+            profile.Settings.ActiveImagePlaylistId = profilePlaylist.Id;
+            profile.Settings.OperatorPlaylistId = profilePlaylist.Id;
+            profile.Settings.OperatorPlaylistName = profilePlaylist.Name;
+        }
+
+        _settings.Normalize();
+        _settingsStore?.Save(_settings);
+        _playlistStore?.Save(_settings);
+        _wallpaperManager?.ApplySettings(_settings);
+        UpdateTrayState();
+        DiagnosticLog.Write(
+            $"Плейлист переключён из области уведомлений: {selected.Name}.");
+    }
+
+    private void UpdateTrayState()
+    {
+        _tray?.Update(
+            _settings,
+            _wallpaperManager?.IsManuallyPaused ?? false,
+            _wallpaperManager?.IsPausedByFullscreenApp ?? false);
     }
 
     private void OnWallpaperPauseStateChanged()

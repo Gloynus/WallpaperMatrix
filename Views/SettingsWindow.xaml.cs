@@ -113,6 +113,8 @@ public partial class SettingsWindow : Window
     private bool _topologyAutoFit = true;
     private bool _topologyFitQueued;
     private bool _topologyPanning;
+    private bool _topologyPanCandidate;
+    private MouseButton _topologyPanButton;
     private System.Windows.Point _topologyPanStart;
     private double _topologyPanHorizontalOffset;
     private double _topologyPanVerticalOffset;
@@ -1380,23 +1382,57 @@ public partial class SettingsWindow : Window
         if (e.ChangedButton is not (MouseButton.Right or MouseButton.Middle))
             return;
 
-        _topologyPanning = true;
-        _topologyAutoFit = false;
+        _topologyPanCandidate = true;
+        _topologyPanButton = e.ChangedButton;
         _topologyPanStart =
             e.GetPosition(MonitorTopologyScrollViewer);
         _topologyPanHorizontalOffset =
             MonitorTopologyScrollViewer.HorizontalOffset;
         _topologyPanVerticalOffset =
             MonitorTopologyScrollViewer.VerticalOffset;
-        MonitorTopologyScrollViewer.Cursor = WpfCursors.ScrollAll;
-        MonitorTopologyScrollViewer.CaptureMouse();
-        e.Handled = true;
+        if (e.ChangedButton == MouseButton.Middle)
+        {
+            BeginMonitorTopologyPan();
+            e.Handled = true;
+        }
     }
 
     private void MonitorTopologyScrollViewer_PreviewMouseMove(
         object sender,
         System.Windows.Input.MouseEventArgs e)
     {
+        if (_topologyPanCandidate && !_topologyPanning)
+        {
+            bool buttonPressed = _topologyPanButton switch
+            {
+                MouseButton.Right =>
+                    e.RightButton == MouseButtonState.Pressed,
+                MouseButton.Middle =>
+                    e.MiddleButton == MouseButtonState.Pressed,
+                _ => false
+            };
+            if (!buttonPressed)
+            {
+                _topologyPanCandidate = false;
+                return;
+            }
+
+            System.Windows.Point candidatePosition =
+                e.GetPosition(MonitorTopologyScrollViewer);
+            double horizontalDistance = Math.Abs(
+                candidatePosition.X - _topologyPanStart.X);
+            double verticalDistance = Math.Abs(
+                candidatePosition.Y - _topologyPanStart.Y);
+            if (horizontalDistance
+                    < SystemParameters.MinimumHorizontalDragDistance
+                && verticalDistance
+                    < SystemParameters.MinimumVerticalDragDistance)
+            {
+                return;
+            }
+            BeginMonitorTopologyPan();
+        }
+
         if (!_topologyPanning)
             return;
         if (e.RightButton != MouseButtonState.Pressed
@@ -1421,12 +1457,18 @@ public partial class SettingsWindow : Window
         object sender,
         MouseButtonEventArgs e)
     {
-        if (!_topologyPanning
-            || e.ChangedButton
-                is not (MouseButton.Right or MouseButton.Middle))
+        if (e.ChangedButton
+            is not (MouseButton.Right or MouseButton.Middle))
         {
             return;
         }
+        if (_topologyPanCandidate && !_topologyPanning)
+        {
+            _topologyPanCandidate = false;
+            return;
+        }
+        if (!_topologyPanning)
+            return;
         EndMonitorTopologyPan();
         e.Handled = true;
     }
@@ -1435,6 +1477,12 @@ public partial class SettingsWindow : Window
         object sender,
         System.Windows.Input.MouseEventArgs e)
     {
+        if (_topologyPanCandidate
+            && e.RightButton != MouseButtonState.Pressed
+            && e.MiddleButton != MouseButtonState.Pressed)
+        {
+            _topologyPanCandidate = false;
+        }
         if (_topologyPanning
             && e.RightButton != MouseButtonState.Pressed
             && e.MiddleButton != MouseButtonState.Pressed)
@@ -1445,9 +1493,19 @@ public partial class SettingsWindow : Window
 
     private void EndMonitorTopologyPan()
     {
+        _topologyPanCandidate = false;
         _topologyPanning = false;
         MonitorTopologyScrollViewer.ReleaseMouseCapture();
         MonitorTopologyScrollViewer.Cursor = WpfCursors.Arrow;
+    }
+
+    private void BeginMonitorTopologyPan()
+    {
+        _topologyPanCandidate = false;
+        _topologyPanning = true;
+        _topologyAutoFit = false;
+        MonitorTopologyScrollViewer.Cursor = WpfCursors.ScrollAll;
+        MonitorTopologyScrollViewer.CaptureMouse();
     }
 
     private void FitMonitorTopologyButton_Click(
@@ -2279,21 +2337,26 @@ public partial class SettingsWindow : Window
             _presets = _presetStore.LoadAll().ToList();
             PresetCombo.Items.Clear();
             PresetChoice operatorChoice = new();
-            PresetCombo.Items.Add(operatorChoice);
-            foreach (BuiltInPreset builtIn in BuiltInPresetCatalog.Items)
-            {
-                PresetCombo.Items.Add(new PresetChoice
-                {
-                    Label = builtIn.Name,
-                    BuiltInPreset = builtIn
-                });
-            }
-            foreach (OperatorPreset preset in _presets)
+            foreach (OperatorPreset preset in _presets.OrderBy(
+                         preset => preset.Name,
+                         StringComparer.CurrentCultureIgnoreCase))
             {
                 PresetCombo.Items.Add(new PresetChoice
                 {
                     Label = preset.Name,
                     Preset = preset
+                });
+            }
+            PresetCombo.Items.Add(operatorChoice);
+            foreach (BuiltInPreset builtIn in BuiltInPresetCatalog.Items
+                         .OrderBy(
+                             preset => preset.Name,
+                             StringComparer.CurrentCultureIgnoreCase))
+            {
+                PresetCombo.Items.Add(new PresetChoice
+                {
+                    Label = builtIn.Name,
+                    BuiltInPreset = builtIn
                 });
             }
 
