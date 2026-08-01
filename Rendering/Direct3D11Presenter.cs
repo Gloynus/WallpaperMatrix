@@ -69,12 +69,13 @@ internal sealed class Direct3D11Presenter : IDisposable
         _sceneResources =
             new(ReferenceEqualityComparer.Instance);
     private float _glyphOpacity = 1;
-    private float _surfaceBackgroundOpacity = 1;
+    private float _surfaceRevealProgress = 1;
     private float _surfaceGlyphOpacity = 1;
     private float _attackRevealProgress;
     private float _attackVeilOpacity = 1;
     private float _attackCaptureStrength;
     private float _attackStreamCutoff;
+    private float _attackCaptureStreamCutoff = float.MaxValue;
     private float _attackModeEnabled;
     private float _attackHaloFactor = 1;
     private int _currentTargetWidth = 1;
@@ -382,20 +383,24 @@ internal sealed class Direct3D11Presenter : IDisposable
     }
 
     public void SetSurfaceReveal(
-        double backgroundOpacity,
+        double revealProgress,
         double glyphOpacity)
     {
-        _surfaceBackgroundOpacity =
-            (float)Math.Clamp(backgroundOpacity, 0.0, 1.0);
+        _surfaceRevealProgress =
+            (float)Math.Clamp(revealProgress, 0.0, 1.0);
         _surfaceGlyphOpacity =
             (float)Math.Clamp(glyphOpacity, 0.0, 1.0);
     }
 
     public void SetAttackGlyphState(
         long existingStreamCutoff,
+        long captureStreamCutoff,
         double haloFactor)
     {
         _attackStreamCutoff = existingStreamCutoff;
+        _attackCaptureStreamCutoff = captureStreamCutoff == long.MaxValue
+            ? float.MaxValue
+            : captureStreamCutoff;
         _attackModeEnabled = 1;
         _attackHaloFactor =
             (float)Math.Clamp(haloFactor, 0.0, 1.0);
@@ -676,7 +681,8 @@ internal sealed class Direct3D11Presenter : IDisposable
                 DrawBackground(
                     state.Presentation.TargetBounds,
                     state.Parameters,
-                    _surfaceBackgroundOpacity);
+                    opacity: 1,
+                    topDownProgress: _surfaceRevealProgress);
             }
             // While the real wallpaper is still visible below our
             // alpha-capable startup surface, keep glyph bodies honest and
@@ -684,7 +690,7 @@ internal sealed class Direct3D11Presenter : IDisposable
             // only during the final opaque quarter of the background reveal,
             // so desktop colours cannot tint portrait or scaled viewports.
             float startupGlyphBlend = Math.Clamp(
-                (_surfaceBackgroundOpacity - 0.75f) * 4.0f,
+                (_surfaceRevealProgress - 0.75f) * 4.0f,
                 0.0f,
                 1.0f);
             if (_attackModeEnabled > 0.5f)
@@ -810,7 +816,8 @@ internal sealed class Direct3D11Presenter : IDisposable
             viewport.Height,
             _currentTargetWidth,
             _currentTargetHeight,
-            _attackInterfaceView is null ? 0 : captureFactor);
+            _attackInterfaceView is null ? 0 : captureFactor,
+            _attackCaptureStreamCutoff);
         UpdateConstantBuffer(constants);
         _context.DrawInstanced(
             4,
@@ -1007,6 +1014,8 @@ internal sealed class Direct3D11Presenter : IDisposable
         public readonly Vector2 TargetViewportSize;
         public readonly float CaptureEnabled;
         public readonly float CaptureStrength;
+        public readonly float CaptureStreamCutoff;
+        private readonly Vector3 _paddingCapture;
 
         public ShaderConstants(
             MatrixRenderParameters parameters,
@@ -1028,7 +1037,8 @@ internal sealed class Direct3D11Presenter : IDisposable
             float viewportHeight,
             float targetWidth,
             float targetHeight,
-            float captureStrength)
+            float captureStrength,
+            float captureStreamCutoff)
         {
             SourceSize = new(
                 parameters.SourceWidth,
@@ -1063,6 +1073,8 @@ internal sealed class Direct3D11Presenter : IDisposable
             TargetViewportSize = new(viewportWidth, viewportHeight);
             CaptureEnabled = captureStrength > 0.0001f ? 1 : 0;
             CaptureStrength = captureStrength;
+            CaptureStreamCutoff = captureStreamCutoff;
+            _paddingCapture = Vector3.Zero;
         }
     }
 
@@ -1120,6 +1132,8 @@ internal sealed class Direct3D11Presenter : IDisposable
             float2 TargetViewportSize;
             float CaptureEnabled;
             float CaptureStrength;
+            float CaptureStreamCutoff;
+            float3 PaddingCapture;
         };
 
         Texture2D<float> Atlas : register(t0);
@@ -1303,7 +1317,11 @@ internal sealed class Direct3D11Presenter : IDisposable
                 level = lerp(
                     level,
                     captured.r,
-                    captured.g * CaptureStrength);
+                    captured.g
+                        * CaptureStrength
+                        * (1.0 - step(
+                            CaptureStreamCutoff + 0.5,
+                            input.StreamId)));
             }
 
             float isImage = step(2.5, input.Style);

@@ -1008,6 +1008,7 @@ public partial class SettingsWindow : Window
     {
         ContextMenu context = new()
         {
+            Style = TryFindResource("MonitorContextMenu") as Style,
             Background = BrushFromRgb(0x02, 0x08, 0x06),
             BorderBrush = BrushFromRgb(0x23, 0x8A, 0x4B),
             BorderThickness = new Thickness(1),
@@ -2264,6 +2265,7 @@ public partial class SettingsWindow : Window
         CurveCanvasBorder.Visibility = Visibility.Collapsed;
         TerminalSettingsPanel.Visibility = Visibility.Collapsed;
         CurveEditingHint.Visibility = Visibility.Collapsed;
+        TerminalEditingHint.Visibility = Visibility.Collapsed;
         bool disabled = profile.FlowMode == MonitorLinkMode.Disabled;
         MonitorDescriptor? source = _monitors.FirstOrDefault(monitor =>
             string.Equals(
@@ -4899,10 +4901,14 @@ public partial class SettingsWindow : Window
         CurveCanvasBorder.Visibility = terminal
             ? Visibility.Collapsed
             : Visibility.Visible;
-        CurveEditingHint.Visibility = Visibility.Visible;
-        CurveEditingHint.Text = terminal
-            ? "Статичный фрагмент показывает шрифт, геометрию, толщину, спектр и яркость символов и фактический фон."
-            : "Крайние точки закреплены. ЛКМ создаёт или перемещает внутреннюю точку; ПКМ либо Delete удаляет её.";
+        CurveEditingHint.Visibility = terminal
+            ? Visibility.Collapsed
+            : Visibility.Visible;
+        TerminalEditingHint.Visibility = terminal
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        CurveEditingHint.Text =
+            "Крайние точки закреплены. ЛКМ создаёт или перемещает внутреннюю точку; ПКМ либо Delete удаляет её.";
         UpdateCalibratorParameterPanels(kind);
 
         bool wasLoading = _loading;

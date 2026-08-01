@@ -1242,7 +1242,8 @@ public sealed class WallpaperManager : IDisposable
                 bounds,
                 frame,
                 interfaceFrame,
-                settings.AttackTransitionSeconds);
+                settings.AttackTransitionSeconds,
+                settings.ImageDurationSeconds);
             overlay.Closed += OnAttackOverlayClosed;
             overlay.ExitStarted += OnAttackExitStarted;
             _attackOverlay = overlay;

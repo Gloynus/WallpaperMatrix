@@ -20,6 +20,7 @@ internal sealed class AttackOverlayWindow : IDisposable
     private readonly SharedMatrixScene _scene;
     private MatrixScenePresentation[] _presentations;
     private readonly double _transitionSeconds;
+    private readonly double _interfaceHoldSeconds;
     private readonly long _existingStreamCutoff;
     private readonly int _capturedWindowCount;
     private AttackInterfaceFrame? _interfaceFrame;
@@ -41,7 +42,8 @@ internal sealed class AttackOverlayWindow : IDisposable
         DrawingRectangle bounds,
         AttackFrameSnapshot frame,
         AttackInterfaceFrame? interfaceFrame,
-        double transitionSeconds)
+        double transitionSeconds,
+        double imageDurationSeconds)
     {
         _bounds = bounds;
         _scene = frame.PrimaryScene;
@@ -50,6 +52,10 @@ internal sealed class AttackOverlayWindow : IDisposable
             transitionSeconds,
             AppSettings.MinimumAttackTransitionSeconds,
             AppSettings.MaximumAttackTransitionSeconds);
+        _interfaceHoldSeconds = _transitionSeconds + Math.Clamp(
+            imageDurationSeconds,
+            AppSettings.MinimumImageDurationSeconds,
+            AppSettings.MaximumImageDurationSeconds);
         _existingStreamCutoff = frame.LatestStreamId;
         _interfaceFrame = interfaceFrame;
         _capturedWindowCount = interfaceFrame?.WindowCount ?? 0;
@@ -133,6 +139,7 @@ internal sealed class AttackOverlayWindow : IDisposable
                 captureStrength: 1);
             presenter.SetAttackGlyphState(
                 _existingStreamCutoff,
+                long.MaxValue,
                 haloFactor: 1);
             presenter.Present(
                 _bounds.Width,
@@ -147,6 +154,8 @@ internal sealed class AttackOverlayWindow : IDisposable
             double nextTopmostCheckSeconds = 0.5;
             double exitStartRevealProgress = 0;
             double exitStartCaptureStrength = 0;
+            long captureStreamCutoff = long.MaxValue;
+            bool captureGenerationFrozen = _capturedWindowCount <= 0;
             started = true;
             _started.Set();
             DiagnosticLog.Write(
@@ -156,7 +165,8 @@ internal sealed class AttackOverlayWindow : IDisposable
                 + $"viewports={_presentations.Length}; "
                 + $"interfaceWindows={_capturedWindowCount}; "
                 + $"streamCutoff={_existingStreamCutoff}; "
-                + $"transition={_transitionSeconds:0.##}s.");
+                + $"transition={_transitionSeconds:0.##}s; "
+                + $"interfaceHold={_interfaceHoldSeconds:0.##}s.");
 
             while (!_cancellation.IsCancellationRequested)
             {
@@ -209,7 +219,7 @@ internal sealed class AttackOverlayWindow : IDisposable
                             AttackRevealProgress(
                                 attackClock.Elapsed.TotalSeconds);
                         exitStartCaptureStrength =
-                            AttackCaptureStrength(exitStartRevealProgress);
+                            AttackCaptureStrength();
                         try
                         {
                             ExitStarted?.Invoke();
@@ -240,7 +250,17 @@ internal sealed class AttackOverlayWindow : IDisposable
                     veilOpacity = 1;
                     glyphOpacity = 1;
                     captureStrength =
-                        AttackCaptureStrength(revealProgress);
+                        AttackCaptureStrength();
+                    if (!captureGenerationFrozen
+                        && elapsedSeconds >= _interfaceHoldSeconds)
+                    {
+                        captureStreamCutoff = _scene.LatestStreamId;
+                        captureGenerationFrozen = true;
+                        DiagnosticLog.Write(
+                            "АТАКА СИСТЕМЫ завершила построение интерфейса; "
+                            + "следующие струи переданы текущему образу: "
+                            + $"streamCutoff={captureStreamCutoff}.");
+                    }
                 }
 
                 presenter.SetAttackTransitionState(
@@ -250,6 +270,7 @@ internal sealed class AttackOverlayWindow : IDisposable
                     captureStrength);
                 presenter.SetAttackGlyphState(
                     _existingStreamCutoff,
+                    captureStreamCutoff,
                     haloFactor: 1);
                 presenter.Present(
                     _bounds.Width,
@@ -310,16 +331,12 @@ internal sealed class AttackOverlayWindow : IDisposable
             1);
     }
 
-    private static double AttackCaptureStrength(double revealProgress)
+    private double AttackCaptureStrength()
     {
-        // Keep the photographed interface readable during the first part of
-        // the takeover, then hand new streams back to the live database image
-        // before the last row reaches the attack background.
-        double fade = Math.Clamp(
-            (revealProgress - 0.34) / 0.66,
-            0,
-            1);
-        return 1.0 - SmoothStep(fade);
+        // Capture remains a property of the streams born during the interface
+        // phase. The generation boundary is frozen later, so already printed
+        // glyphs never switch to a playlist image in place.
+        return _capturedWindowCount > 0 ? 1.0 : 0.0;
     }
 
     private static double SmoothStep(double value) =>

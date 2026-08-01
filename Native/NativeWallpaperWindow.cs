@@ -13,8 +13,6 @@ namespace WallpaperMatrix.Native;
 /// </summary>
 internal sealed class NativeWallpaperWindow : IDisposable
 {
-    private const double StartupRevealDelaySeconds = 0.25;
-    private const double StartupRevealDurationSeconds = 2.75;
     private readonly DrawingRectangle _bounds;
     private readonly Thread _thread;
     private readonly CancellationTokenSource _cancellation = new();
@@ -284,6 +282,10 @@ internal sealed class NativeWallpaperWindow : IDisposable
             Stopwatch sharedClock = Stopwatch.StartNew();
             MonitorOutputPlan activePlan = _currentPlan;
             bool startupRevealCompleted = !_animateStartupReveal;
+            double startupRevealDurationSeconds = Math.Clamp(
+                _initialSettings.ImageDurationSeconds,
+                AppSettings.MinimumImageDurationSeconds,
+                AppSettings.MaximumImageDurationSeconds);
 
             while (!_cancellation.IsCancellationRequested)
             {
@@ -342,13 +344,12 @@ internal sealed class NativeWallpaperWindow : IDisposable
                 if (!startupRevealCompleted)
                 {
                     double progress = Math.Clamp(
-                        (sharedClock.Elapsed.TotalSeconds
-                            - StartupRevealDelaySeconds)
-                        / StartupRevealDurationSeconds,
+                        sharedClock.Elapsed.TotalSeconds
+                            / startupRevealDurationSeconds,
                         0,
                         1);
                     _direct3DPresenter?.SetSurfaceReveal(
-                        SmoothStep(progress),
+                        progress,
                         1);
                     presentedVersion = long.MinValue;
                     startupRevealCompleted = progress >= 1;
@@ -356,7 +357,8 @@ internal sealed class NativeWallpaperWindow : IDisposable
                     {
                         DiagnosticLog.Write(
                             "Запуск обоев завершил плавное растворение "
-                            + "системного фона в поток.");
+                            + "системного фона в поток: "
+                            + $"{startupRevealDurationSeconds:0.##} с.");
                     }
                 }
                 PresentLatestFrame(
@@ -794,9 +796,6 @@ internal sealed class NativeWallpaperWindow : IDisposable
 
     private int TotalInstanceCount() =>
         _sceneRuntimes.Sum(runtime => runtime.Scene.InstanceCount);
-
-    private static double SmoothStep(double value) =>
-        value * value * (3.0 - 2.0 * value);
 
     private void ReportFailure(string context, Exception exception, bool fatal)
     {

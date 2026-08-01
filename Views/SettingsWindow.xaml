@@ -376,6 +376,25 @@
             <Setter Property="Padding" Value="7,8"/>
             <Setter Property="FontSize" Value="12"/>
         </Style>
+        <Style x:Key="MonitorContextMenu" TargetType="ContextMenu">
+            <Setter Property="Background" Value="#020806"/>
+            <Setter Property="BorderBrush" Value="#238A4B"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="4"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ContextMenu">
+                        <Border Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                Padding="{TemplateBinding Padding}"
+                                CornerRadius="4">
+                            <ItemsPresenter/>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
         <Style x:Key="MonitorContextHostItem"
                TargetType="MenuItem">
             <Setter Property="Padding" Value="0"/>
@@ -461,7 +480,7 @@
                         <Setter Property="Padding" Value="6,7"/>
                         <Setter Property="HorizontalContentAlignment" Value="Center"/>
                         <Setter Property="FontFamily" Value="Consolas"/>
-                        <Setter Property="FontSize" Value="10"/>
+                        <Setter Property="FontSize" Value="11"/>
                         <Setter Property="Focusable" Value="True"/>
                         <Setter Property="Template">
                             <Setter.Value>
@@ -540,6 +559,7 @@
                     BorderBrush="#103A22" BorderThickness="1,0,0,0">
                 <Track x:Name="PART_Track" IsDirectionReversed="True"
                        Orientation="Vertical"
+                       Margin="0,0,0,1"
                        Maximum="{TemplateBinding Maximum}"
                        Minimum="{TemplateBinding Minimum}"
                        Value="{TemplateBinding Value}"
@@ -1741,7 +1761,7 @@
                                     </Grid.ColumnDefinitions>
                                     <StackPanel Orientation="Horizontal">
                                         <TextBlock Text="ШРИФТ КОДА" FontFamily="Consolas"
-                                                   FontSize="10" FontWeight="Bold"
+                                                   FontSize="12" FontWeight="Bold"
                                                    Foreground="#83FFAA"/>
                                         <Button Style="{StaticResource HelpButton}"
                                                 ToolTip="Выбирает системный шрифт потока с подстановкой отсутствующих знаков."/>
@@ -1749,7 +1769,7 @@
                                     <StackPanel Grid.Column="1" Orientation="Horizontal"
                                                 Margin="10,0,0,0">
                                         <TextBlock Text="РАЗМЕР" FontFamily="Consolas"
-                                                   FontSize="10" FontWeight="Bold"
+                                                   FontSize="12" FontWeight="Bold"
                                                    Foreground="#83FFAA"/>
                                         <Button Style="{StaticResource HelpButton}"
                                                 ToolTip="Размер знака: 1 px выводится как точка, 48 px — как крупный символ."/>
@@ -1757,7 +1777,7 @@
                                     <StackPanel Grid.Column="2" Orientation="Horizontal"
                                                 Margin="10,0,0,0">
                                         <TextBlock Text="ВЫСОТА" FontFamily="Consolas"
-                                                   FontSize="10" FontWeight="Bold"
+                                                   FontSize="12" FontWeight="Bold"
                                                    Foreground="#83FFAA"/>
                                         <Button Style="{StaticResource HelpButton}"
                                                 ToolTip="Меняет вертикальные пропорции. 0 — исходная высота; −99 — однопиксельная полоса; 200 — двойная высота."/>
@@ -1765,7 +1785,7 @@
                                     <StackPanel Grid.Column="3" Orientation="Horizontal"
                                                 Margin="10,0,0,0">
                                         <TextBlock Text="ЖИРНОСТЬ" FontFamily="Consolas"
-                                                   FontSize="10" FontWeight="Bold"
+                                                   FontSize="12" FontWeight="Bold"
                                                    Foreground="#83FFAA"/>
                                         <Button Style="{StaticResource HelpButton}"
                                                 ToolTip="Толщина всех знаков: 0 — исходное начертание шрифта; отрицательные значения утончают его; 100% максимально усиливает жирность."/>
@@ -1997,6 +2017,12 @@
                                 </Grid>
                               </Grid>
                             </Border>
+                            <TextBlock x:Name="TerminalEditingHint"
+                                       Text="Статичный фрагмент показывает шрифт, геометрию, толщину, спектр и яркость символов и фактический фон."
+                                       Foreground="{StaticResource MutedBrush}"
+                                       TextWrapping="Wrap"
+                                       Margin="0,7,0,0"
+                                       Visibility="Collapsed"/>
                         </StackPanel>
                     </Border>
 
@@ -2324,9 +2350,9 @@
                                             <ColumnDefinition Width="Auto"/>
                                         </Grid.ColumnDefinitions>
                                         <StackPanel Orientation="Horizontal">
-                                            <TextBlock Text="Цикл образа"/>
+                                            <TextBlock Text="Время фиксации"/>
                                             <Button Style="{StaticResource HelpButton}"
-                                                    ToolTip="Задаёт время показа образа до перехода к следующему."/>
+                                                    ToolTip="Задаёт время удержания образа до перехода к следующему."/>
                                         </StackPanel>
                                         <StackPanel Grid.Column="1" Orientation="Horizontal">
                                             <TextBox x:Name="DurationInput" Tag="Duration"
