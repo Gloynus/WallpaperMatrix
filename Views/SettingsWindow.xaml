@@ -1,6 +1,7 @@
 <Window x:Class="WallpaperMatrix.Views.SettingsWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:sys="clr-namespace:System;assembly=System.Runtime"
         xmlns:local="clr-namespace:WallpaperMatrix.Views"
         Title="Wallpaper Matrix — Operator Console"
         Icon="/Assets/WallpaperMatrix.ico"
@@ -16,10 +17,19 @@
         <SolidColorBrush x:Key="TextBrush" Color="#D8FFE5"/>
         <SolidColorBrush x:Key="MutedBrush" Color="#79A888"/>
         <SolidColorBrush x:Key="GreenBrush" Color="#00E667"/>
+        <!-- Track derives its minimum thumb slot from half of these values. -->
+        <sys:Double x:Key="{x:Static SystemParameters.VerticalScrollBarButtonHeightKey}">44</sys:Double>
+        <sys:Double x:Key="{x:Static SystemParameters.HorizontalScrollBarButtonWidthKey}">44</sys:Double>
 
         <Style TargetType="TextBlock">
             <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
             <Setter Property="FontFamily" Value="Segoe UI"/>
+        </Style>
+        <Style x:Key="SectionHeaderText" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="#00E667"/>
+            <Setter Property="FontFamily" Value="Consolas"/>
+            <Setter Property="FontSize" Value="15"/>
+            <Setter Property="FontWeight" Value="Bold"/>
         </Style>
         <Style TargetType="CheckBox">
             <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
@@ -83,6 +93,14 @@
                     </ControlTemplate>
                 </Setter.Value>
             </Setter>
+        </Style>
+        <Style x:Key="SectionHeaderToggle"
+               TargetType="CheckBox"
+               BasedOn="{StaticResource {x:Type CheckBox}}">
+            <Setter Property="Foreground" Value="#00E667"/>
+            <Setter Property="FontFamily" Value="Consolas"/>
+            <Setter Property="FontSize" Value="15"/>
+            <Setter Property="FontWeight" Value="Bold"/>
         </Style>
         <Style TargetType="Slider">
             <Setter Property="Foreground" Value="{StaticResource GreenBrush}"/>
@@ -482,7 +500,7 @@
                         <Setter Property="Padding" Value="6,7"/>
                         <Setter Property="HorizontalContentAlignment" Value="Center"/>
                         <Setter Property="FontFamily" Value="Consolas"/>
-                        <Setter Property="FontSize" Value="13"/>
+                        <Setter Property="FontSize" Value="12"/>
                         <Setter Property="Focusable" Value="True"/>
                         <Setter Property="Template">
                             <Setter.Value>
@@ -574,7 +592,7 @@
         </Style>
         <Style x:Key="SectionBookmarkLabel" TargetType="TextBlock">
             <Setter Property="FontFamily" Value="Consolas"/>
-            <Setter Property="FontSize" Value="10"/>
+            <Setter Property="FontSize" Value="11"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
             <Setter Property="TextAlignment" Value="Center"/>
             <Setter Property="Foreground"
@@ -905,9 +923,7 @@
                             <StackPanel Orientation="Horizontal"
                                         Margin="0,0,0,10">
                                 <TextBlock Text="УСТРОЙСТВА ВЫВОДА"
-                                           FontFamily="Consolas"
-                                           FontWeight="Bold"
-                                           Foreground="#00E667"/>
+                                           Style="{StaticResource SectionHeaderText}"/>
                                 <Button Style="{StaticResource HelpButton}"
                                         VerticalAlignment="Center"
                                         ToolTip="Колесо масштабирует карту в точку курсора. Правая кнопка или колесо перемещает холст. Виртуальный экран включается режимом Потока и перемещается за захват."/>
@@ -1228,8 +1244,8 @@
                                     <ColumnDefinition Width="Auto"/>
                                 </Grid.ColumnDefinitions>
                                 <StackPanel Orientation="Horizontal">
-                                    <TextBlock Text="КАЛИБРАТОР ПОТОКА" FontFamily="Consolas"
-                                               FontWeight="Bold" Foreground="#00E667"/>
+                                    <TextBlock Text="КАЛИБРАТОР ПОТОКА"
+                                               Style="{StaticResource SectionHeaderText}"/>
                                     <Button Style="{StaticResource HelpButton}" VerticalAlignment="Top"
                                             ToolTip="Настраивает оформление терминала и характеристики струй."/>
                                 </StackPanel>
@@ -2053,9 +2069,8 @@
                                 </Grid.ColumnDefinitions>
                                 <StackPanel Orientation="Horizontal">
                                     <CheckBox x:Name="ImageModeCheck" Content="БАЗА ДАННЫХ"
-                                              Click="ImageModeCheck_Click"
-                                              FontFamily="Consolas" FontWeight="Bold"
-                                              Foreground="#00E667"/>
+                                              Style="{StaticResource SectionHeaderToggle}"
+                                              Click="ImageModeCheck_Click"/>
                                     <Button Style="{StaticResource HelpButton}" VerticalAlignment="Center"
                                             ToolTip="Включает проявление образов символами текущего потока."/>
                                 </StackPanel>
@@ -2100,8 +2115,8 @@
                             <StackPanel x:Name="DatabaseContentPanel">
                             <Border Style="{StaticResource SubsectionBorder}">
                             <StackPanel>
-                            <TextBlock Text="ИСТОЧНИКИ" FontFamily="Consolas"
-                                       FontWeight="Bold" Foreground="#00E667"
+                            <TextBlock Text="ИСТОЧНИКИ"
+                                       Style="{StaticResource SectionHeaderText}"
                                        Margin="0,0,0,7"/>
                             <TextBlock Text="Фотографии не рисуются поверх обоев: свет и контуры собираются только из зелёных символов."
                                        Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" Margin="0,2,0,12"/>
@@ -2394,8 +2409,8 @@
                                     <ColumnDefinition/>
                                     <ColumnDefinition Width="Auto"/>
                                 </Grid.ColumnDefinitions>
-                                <TextBlock Text="АНАЛИЗ" FontFamily="Consolas"
-                                           FontWeight="Bold" Foreground="#00E667"
+                                <TextBlock Text="АНАЛИЗ"
+                                           Style="{StaticResource SectionHeaderText}"
                                            VerticalAlignment="Center"/>
                                 <Button Grid.Column="1"
                                         Style="{StaticResource ResetParameterButton}"
@@ -2574,8 +2589,8 @@
                                     <ColumnDefinition/>
                                     <ColumnDefinition Width="Auto"/>
                                 </Grid.ColumnDefinitions>
-                                <TextBlock Text="ВЫВОД" FontFamily="Consolas"
-                                           FontWeight="Bold" Foreground="#00E667"
+                                <TextBlock Text="ВЫВОД"
+                                           Style="{StaticResource SectionHeaderText}"
                                            VerticalAlignment="Center"/>
                                 <Button Grid.Column="1"
                                         Style="{StaticResource ResetParameterButton}"
@@ -2700,9 +2715,7 @@
                                 <StackPanel Orientation="Horizontal">
                                     <CheckBox x:Name="AttackSystemEnabledCheck"
                                               Content="АТАКА СИСТЕМЫ"
-                                              FontFamily="Consolas"
-                                              FontWeight="Bold"
-                                              Foreground="#00E667"/>
+                                              Style="{StaticResource SectionHeaderToggle}"/>
                                     <Button Style="{StaticResource HelpButton}"
                                             VerticalAlignment="Center"
                                             ToolTip="После заданного бездействия поток захватывает интерфейс системы. Любой ввод быстро возвращает рабочий стол."/>
@@ -2806,8 +2819,8 @@
                                     <ColumnDefinition/>
                                     <ColumnDefinition Width="Auto"/>
                                 </Grid.ColumnDefinitions>
-                                <TextBlock Text="СИСТЕМА" FontFamily="Consolas"
-                                           FontWeight="Bold" Foreground="#00E667"
+                                <TextBlock Text="СИСТЕМА"
+                                           Style="{StaticResource SectionHeaderText}"
                                            VerticalAlignment="Center"/>
                                 <Button Grid.Column="1"
                                         Style="{StaticResource ResetParameterButton}"
