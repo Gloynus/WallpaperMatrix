@@ -456,6 +456,43 @@ public partial class SettingsWindow : Window
         }
     }
 
+    private void OpenPowerSettingsLink_Click(
+        object sender,
+        RoutedEventArgs e) =>
+        OpenSystemSettings(
+            new ProcessStartInfo("ms-settings:powersleep")
+            {
+                UseShellExecute = true
+            },
+            "ОТКРЫТЫ ПАРАМЕТРЫ ОТКЛЮЧЕНИЯ ЭКРАНА");
+
+    private void OpenScreenSaverSettingsLink_Click(
+        object sender,
+        RoutedEventArgs e) =>
+        OpenSystemSettings(
+            new ProcessStartInfo("control.exe")
+            {
+                Arguments = "desk.cpl,,@screensaver",
+                UseShellExecute = true
+            },
+            "ОТКРЫТЫ ПАРАМЕТРЫ СИСТЕМНОЙ ЗАСТАВКИ");
+
+    private void OpenSystemSettings(
+        ProcessStartInfo startInfo,
+        string successStatus)
+    {
+        try
+        {
+            Process.Start(startInfo);
+            StatusText.Text = successStatus;
+        }
+        catch (Exception exception)
+        {
+            StatusText.Text =
+                $"НЕ УДАЛОСЬ ОТКРЫТЬ ПАРАМЕТРЫ WINDOWS // {exception.Message}";
+        }
+    }
+
     protected override void OnClosing(CancelEventArgs e)
     {
         if (!_allowClose)
@@ -1031,6 +1068,14 @@ public partial class SettingsWindow : Window
         {
             Margin = new Thickness(3)
         };
+        columns.RowDefinitions.Add(new RowDefinition
+        {
+            Height = GridLength.Auto
+        });
+        columns.RowDefinitions.Add(new RowDefinition
+        {
+            Height = GridLength.Auto
+        });
         columns.ColumnDefinitions.Add(new ColumnDefinition
         {
             Width = new GridLength(224)
@@ -1044,16 +1089,39 @@ public partial class SettingsWindow : Window
             Width = new GridLength(224)
         });
 
-        columns.Children.Add(CreateMonitorRouteColumn(
+        Border title = new()
+        {
+            Margin = new Thickness(0, 0, 0, 5),
+            Padding = new Thickness(10, 8, 10, 8),
+            Background = BrushFromRgb(0x06, 0x1A, 0x0F),
+            BorderBrush = BrushFromRgb(0x16, 0x4B, 0x2C),
+            BorderThickness = new Thickness(0, 0, 0, 1),
+            Child = new TextBlock
+            {
+                Text = monitor.Label.ToUpperInvariant(),
+                FontFamily = new FontFamily("Consolas"),
+                FontSize = 12,
+                FontWeight = FontWeights.Bold,
+                Foreground = BrushFromRgb(0x9D, 0xFF, 0xBD),
+                TextTrimming = TextTrimming.CharacterEllipsis
+            }
+        };
+        Grid.SetColumnSpan(title, 3);
+        columns.Children.Add(title);
+
+        FrameworkElement flowColumn = CreateMonitorRouteColumn(
             context,
             monitor,
             profile,
-            MonitorRouteDomain.Flow));
+            MonitorRouteDomain.Flow);
+        Grid.SetRow(flowColumn, 1);
+        columns.Children.Add(flowColumn);
         Border separator = new()
         {
             Background = BrushFromRgb(0x16, 0x4B, 0x2C),
             Margin = new Thickness(7, 0, 7, 0)
         };
+        Grid.SetRow(separator, 1);
         Grid.SetColumn(separator, 1);
         columns.Children.Add(separator);
         FrameworkElement databaseColumn = CreateMonitorRouteColumn(
@@ -1061,6 +1129,7 @@ public partial class SettingsWindow : Window
             monitor,
             profile,
             MonitorRouteDomain.Database);
+        Grid.SetRow(databaseColumn, 1);
         Grid.SetColumn(databaseColumn, 2);
         columns.Children.Add(databaseColumn);
 
@@ -2985,7 +3054,10 @@ public partial class SettingsWindow : Window
         ToggleButton active = forcedBookmark ?? targets[0].Bookmark;
         if (forcedBookmark is null)
         {
-            double anchor = MainScrollViewer.VerticalOffset + 64;
+            double viewportTop = MainScrollViewer.VerticalOffset;
+            double viewportBottom = viewportTop
+                + MainScrollViewer.ViewportHeight;
+            double largestVisibleArea = double.NegativeInfinity;
             foreach ((FrameworkElement section, ToggleButton bookmark) in targets)
             {
                 System.Windows.Point visiblePosition = section.TranslatePoint(
@@ -2993,15 +3065,16 @@ public partial class SettingsWindow : Window
                     MainScrollViewer);
                 double documentTop = MainScrollViewer.VerticalOffset
                     + visiblePosition.Y;
-                if (documentTop <= anchor)
+                double documentBottom = documentTop + section.ActualHeight;
+                double visibleArea = Math.Max(
+                    0,
+                    Math.Min(documentBottom, viewportBottom)
+                    - Math.Max(documentTop, viewportTop));
+                if (visibleArea > largestVisibleArea)
+                {
+                    largestVisibleArea = visibleArea;
                     active = bookmark;
-                else
-                    break;
-            }
-            if (MainScrollViewer.VerticalOffset
-                >= MainScrollViewer.ScrollableHeight - 1)
-            {
-                active = targets[^1].Bookmark;
+                }
             }
         }
 

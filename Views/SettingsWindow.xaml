@@ -6,7 +6,8 @@
         Icon="/Assets/WallpaperMatrix.ico"
         Width="740" Height="780" MinWidth="660" MinHeight="620"
         WindowStartupLocation="CenterScreen" WindowStyle="None"
-        ResizeMode="CanResizeWithGrip" Background="#020806"
+        ResizeMode="CanResizeWithGrip" SizeToContent="Manual"
+        Background="#020806"
         UseLayoutRounding="True" SnapsToDevicePixels="True"
         PreviewMouseWheel="SettingsWindow_PreviewMouseWheel">
     <Window.Resources>
@@ -526,7 +527,7 @@
         </Style>
         <Style x:Key="SectionBookmarkButton" TargetType="ToggleButton">
             <Setter Property="Width" Value="38"/>
-            <Setter Property="Height" Value="34"/>
+            <Setter Property="Height" Value="84"/>
             <Setter Property="Margin" Value="0,2,0,2"/>
             <Setter Property="Padding" Value="0"/>
             <Setter Property="HorizontalAlignment" Value="Left"/>
@@ -548,7 +549,7 @@
                                 BorderThickness="{TemplateBinding BorderThickness}"
                                 CornerRadius="0,4,4,0"
                                 ClipToBounds="True">
-                            <ContentPresenter HorizontalAlignment="Left"
+                            <ContentPresenter HorizontalAlignment="Center"
                                               VerticalAlignment="Center"/>
                         </Border>
                         <ControlTemplate.Triggers>
@@ -570,32 +571,19 @@
                     </ControlTemplate>
                 </Setter.Value>
             </Setter>
-            <Style.Triggers>
-                <EventTrigger RoutedEvent="MouseEnter">
-                    <BeginStoryboard>
-                        <Storyboard>
-                            <DoubleAnimation Storyboard.TargetProperty="Width"
-                                             To="158" Duration="0:0:0.16">
-                                <DoubleAnimation.EasingFunction>
-                                    <CubicEase EasingMode="EaseOut"/>
-                                </DoubleAnimation.EasingFunction>
-                            </DoubleAnimation>
-                        </Storyboard>
-                    </BeginStoryboard>
-                </EventTrigger>
-                <EventTrigger RoutedEvent="MouseLeave">
-                    <BeginStoryboard>
-                        <Storyboard>
-                            <DoubleAnimation Storyboard.TargetProperty="Width"
-                                             To="38" Duration="0:0:0.14">
-                                <DoubleAnimation.EasingFunction>
-                                    <CubicEase EasingMode="EaseOut"/>
-                                </DoubleAnimation.EasingFunction>
-                            </DoubleAnimation>
-                        </Storyboard>
-                    </BeginStoryboard>
-                </EventTrigger>
-            </Style.Triggers>
+        </Style>
+        <Style x:Key="SectionBookmarkLabel" TargetType="TextBlock">
+            <Setter Property="FontFamily" Value="Consolas"/>
+            <Setter Property="FontSize" Value="10"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="TextAlignment" Value="Center"/>
+            <Setter Property="Foreground"
+                    Value="{Binding Foreground, RelativeSource={RelativeSource AncestorType=ToggleButton}}"/>
+            <Setter Property="LayoutTransform">
+                <Setter.Value>
+                    <RotateTransform Angle="-90"/>
+                </Setter.Value>
+            </Setter>
         </Style>
         <Style x:Key="MatrixScrollPageButton" TargetType="RepeatButton">
             <Setter Property="Focusable" Value="False"/>
@@ -610,13 +598,12 @@
                 </Setter.Value>
             </Setter>
         </Style>
-        <Style x:Key="MatrixScrollThumb" TargetType="Thumb">
-            <Setter Property="MinWidth" Value="6"/>
+        <Style x:Key="MatrixVerticalScrollThumb" TargetType="Thumb">
             <Setter Property="MinHeight" Value="22"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Thumb">
-                        <Border x:Name="ThumbBody" Margin="1,1,1,3"
+                        <Border x:Name="ThumbBody"
                                 Background="#176B38" BorderBrush="#2DBD63"
                                 BorderThickness="1" CornerRadius="3"
                                 SnapsToDevicePixels="True"/>
@@ -634,13 +621,22 @@
                 </Setter.Value>
             </Setter>
         </Style>
+        <Style x:Key="MatrixHorizontalScrollThumb"
+               TargetType="Thumb"
+               BasedOn="{StaticResource MatrixVerticalScrollThumb}">
+            <Setter Property="MinHeight" Value="0"/>
+            <Setter Property="MinWidth" Value="22"/>
+        </Style>
         <ControlTemplate x:Key="MatrixVerticalScrollBarTemplate"
                          TargetType="ScrollBar">
-            <Border Background="{TemplateBinding Background}"
-                    BorderBrush="#103A22" BorderThickness="1,0,0,0">
+            <Grid Background="{TemplateBinding Background}"
+                  SnapsToDevicePixels="True">
+                <Border BorderBrush="#103A22"
+                        BorderThickness="1,0,0,0"
+                        IsHitTestVisible="False"/>
                 <Track x:Name="PART_Track" IsDirectionReversed="True"
                        Orientation="Vertical"
-                       Margin="0,0,0,2"
+                       Margin="1"
                        Maximum="{TemplateBinding Maximum}"
                        Minimum="{TemplateBinding Minimum}"
                        Value="{TemplateBinding Value}"
@@ -650,21 +646,25 @@
                                       Style="{StaticResource MatrixScrollPageButton}"/>
                     </Track.DecreaseRepeatButton>
                     <Track.Thumb>
-                        <Thumb Style="{StaticResource MatrixScrollThumb}"/>
+                        <Thumb Style="{StaticResource MatrixVerticalScrollThumb}"/>
                     </Track.Thumb>
                     <Track.IncreaseRepeatButton>
                         <RepeatButton Command="{x:Static ScrollBar.PageDownCommand}"
                                       Style="{StaticResource MatrixScrollPageButton}"/>
                     </Track.IncreaseRepeatButton>
                 </Track>
-            </Border>
+            </Grid>
         </ControlTemplate>
         <ControlTemplate x:Key="MatrixHorizontalScrollBarTemplate"
                          TargetType="ScrollBar">
-            <Border Background="{TemplateBinding Background}"
-                    BorderBrush="#103A22" BorderThickness="0,1,0,0">
+            <Grid Background="{TemplateBinding Background}"
+                  SnapsToDevicePixels="True">
+                <Border BorderBrush="#103A22"
+                        BorderThickness="0,1,0,0"
+                        IsHitTestVisible="False"/>
                 <Track x:Name="PART_Track" IsDirectionReversed="False"
                        Orientation="Horizontal"
+                       Margin="1"
                        Maximum="{TemplateBinding Maximum}"
                        Minimum="{TemplateBinding Minimum}"
                        Value="{TemplateBinding Value}"
@@ -674,23 +674,23 @@
                                       Style="{StaticResource MatrixScrollPageButton}"/>
                     </Track.DecreaseRepeatButton>
                     <Track.Thumb>
-                        <Thumb Style="{StaticResource MatrixScrollThumb}"/>
+                        <Thumb Style="{StaticResource MatrixHorizontalScrollThumb}"/>
                     </Track.Thumb>
                     <Track.IncreaseRepeatButton>
                         <RepeatButton Command="{x:Static ScrollBar.PageRightCommand}"
                                       Style="{StaticResource MatrixScrollPageButton}"/>
                     </Track.IncreaseRepeatButton>
                 </Track>
-            </Border>
+            </Grid>
         </ControlTemplate>
         <Style TargetType="ScrollBar">
-            <Setter Property="Width" Value="9"/>
+            <Setter Property="Width" Value="10"/>
             <Setter Property="Background" Value="#031009"/>
             <Setter Property="Template"
                     Value="{StaticResource MatrixVerticalScrollBarTemplate}"/>
             <Style.Triggers>
                 <Trigger Property="Orientation" Value="Horizontal">
-                    <Setter Property="Height" Value="9"/>
+                    <Setter Property="Height" Value="10"/>
                     <Setter Property="Width" Value="Auto"/>
                     <Setter Property="Template"
                             Value="{StaticResource MatrixHorizontalScrollBarTemplate}"/>
@@ -966,74 +966,6 @@
                                                   PreviewMouseUp="MonitorTopologyScrollViewer_PreviewMouseUp"
                                                   MouseLeave="MonitorTopologyScrollViewer_MouseLeave"
                                                   SizeChanged="MonitorTopologyScrollViewer_SizeChanged">
-                                        <ScrollViewer.Resources>
-                                            <Style x:Key="MatrixTopologyThumb"
-                                                   TargetType="{x:Type Thumb}">
-                                                <Setter Property="Template">
-                                                    <Setter.Value>
-                                                        <ControlTemplate TargetType="{x:Type Thumb}">
-                                                            <Border Background="#16713D"
-                                                                    BorderBrush="#22B75C"
-                                                                    BorderThickness="1"
-                                                                    CornerRadius="3"/>
-                                                        </ControlTemplate>
-                                                    </Setter.Value>
-                                                </Setter>
-                                            </Style>
-                                            <Style TargetType="{x:Type ScrollBar}">
-                                                <Setter Property="Background" Value="#020806"/>
-                                                <Setter Property="Foreground" Value="#16713D"/>
-                                                <Setter Property="Width" Value="9"/>
-                                                <Setter Property="Height" Value="Auto"/>
-                                                <Setter Property="Template">
-                                                    <Setter.Value>
-                                                        <ControlTemplate TargetType="{x:Type ScrollBar}">
-                                                            <Grid Background="{TemplateBinding Background}">
-                                                                <Track x:Name="PART_Track"
-                                                                       IsDirectionReversed="True">
-                                                                    <Track.DecreaseRepeatButton>
-                                                                        <RepeatButton x:Name="DecreaseButton"
-                                                                                      Command="{x:Static ScrollBar.PageUpCommand}"
-                                                                                      Background="Transparent"
-                                                                                      BorderThickness="0"
-                                                                                      Opacity="0"/>
-                                                                    </Track.DecreaseRepeatButton>
-                                                                    <Track.Thumb>
-                                                                         <Thumb Style="{StaticResource MatrixTopologyThumb}"
-                                                                                Margin="1,1,1,3"/>
-                                                                    </Track.Thumb>
-                                                                    <Track.IncreaseRepeatButton>
-                                                                        <RepeatButton x:Name="IncreaseButton"
-                                                                                      Command="{x:Static ScrollBar.PageDownCommand}"
-                                                                                      Background="Transparent"
-                                                                                      BorderThickness="0"
-                                                                                      Opacity="0"/>
-                                                                    </Track.IncreaseRepeatButton>
-                                                                </Track>
-                                                            </Grid>
-                                                            <ControlTemplate.Triggers>
-                                                                <Trigger Property="Orientation" Value="Horizontal">
-                                                                    <Setter Property="Width" Value="Auto"/>
-                                                                    <Setter Property="Height" Value="9"/>
-                                                                    <Setter TargetName="PART_Track"
-                                                                            Property="Orientation"
-                                                                            Value="Horizontal"/>
-                                                                    <Setter TargetName="PART_Track"
-                                                                            Property="IsDirectionReversed"
-                                                                            Value="False"/>
-                                                                    <Setter TargetName="DecreaseButton"
-                                                                            Property="Command"
-                                                                            Value="{x:Static ScrollBar.PageLeftCommand}"/>
-                                                                    <Setter TargetName="IncreaseButton"
-                                                                            Property="Command"
-                                                                            Value="{x:Static ScrollBar.PageRightCommand}"/>
-                                                                </Trigger>
-                                                            </ControlTemplate.Triggers>
-                                                        </ControlTemplate>
-                                                    </Setter.Value>
-                                                </Setter>
-                                            </Style>
-                                        </ScrollViewer.Resources>
                                         <Canvas x:Name="MonitorTopologyCanvas"
                                                 Width="640"
                                                 Height="310"
@@ -2840,6 +2772,19 @@
                                                 ValueChanged="AnySlider_ValueChanged"/>
                                     </StackPanel>
                                 </Grid>
+                                <TextBlock Margin="0,10,0,0"
+                                           Foreground="{StaticResource MutedBrush}"
+                                           FontSize="12"
+                                           TextWrapping="Wrap">
+                                    <Run Text="Чтобы не пропустить Атаку системы, задайте Бездействие короче времени "/>
+                                    <Hyperlink Foreground="#62FF8F"
+                                               Cursor="Hand"
+                                               Click="OpenPowerSettingsLink_Click">отключения экрана</Hyperlink>
+                                    <Run Text=" и запуска "/>
+                                    <Hyperlink Foreground="#62FF8F"
+                                               Cursor="Hand"
+                                               Click="OpenScreenSaverSettingsLink_Click">системной заставки</Hyperlink><Run Text="."/>
+                                </TextBlock>
                                 <Button Height="29"
                                         Margin="0,10,0,0"
                                         HorizontalAlignment="Right"
@@ -2920,80 +2865,40 @@
                                   Tag="OutputDevicesSection"
                                   Click="SectionBookmark_Click"
                                   ToolTip="Устройства вывода">
-                        <Grid Width="154">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="36"/>
-                                <ColumnDefinition/>
-                            </Grid.ColumnDefinitions>
-                            <TextBlock Text="01" HorizontalAlignment="Center"
-                                       FontFamily="Consolas"/>
-                            <TextBlock Grid.Column="1" Text="УСТРОЙСТВА"
-                                       Margin="8,0,8,0" FontFamily="Consolas"/>
-                        </Grid>
+                        <TextBlock Text="УСТРОЙСТВА"
+                                   Style="{StaticResource SectionBookmarkLabel}"/>
                     </ToggleButton>
                     <ToggleButton x:Name="FlowCalibratorBookmark"
                                   Style="{StaticResource SectionBookmarkButton}"
                                   Tag="FlowCalibratorSection"
                                   Click="SectionBookmark_Click"
                                   ToolTip="Калибратор потока">
-                        <Grid Width="154">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="36"/>
-                                <ColumnDefinition/>
-                            </Grid.ColumnDefinitions>
-                            <TextBlock Text="02" HorizontalAlignment="Center"
-                                       FontFamily="Consolas"/>
-                            <TextBlock Grid.Column="1" Text="КАЛИБРАТОР"
-                                       Margin="8,0,8,0" FontFamily="Consolas"/>
-                        </Grid>
+                        <TextBlock Text="КАЛИБРАТОР"
+                                   Style="{StaticResource SectionBookmarkLabel}"/>
                     </ToggleButton>
                     <ToggleButton x:Name="DatabaseBookmark"
                                   Style="{StaticResource SectionBookmarkButton}"
                                   Tag="DatabaseSection"
                                   Click="SectionBookmark_Click"
                                   ToolTip="База данных">
-                        <Grid Width="154">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="36"/>
-                                <ColumnDefinition/>
-                            </Grid.ColumnDefinitions>
-                            <TextBlock Text="03" HorizontalAlignment="Center"
-                                       FontFamily="Consolas"/>
-                            <TextBlock Grid.Column="1" Text="БАЗА ДАННЫХ"
-                                       Margin="8,0,8,0" FontFamily="Consolas"/>
-                        </Grid>
+                        <TextBlock Text="БАЗА ДАННЫХ"
+                                   Style="{StaticResource SectionBookmarkLabel}"/>
                     </ToggleButton>
                     <ToggleButton x:Name="AttackBookmark"
                                   Style="{StaticResource SectionBookmarkButton}"
                                   Tag="AttackSection"
                                   Click="SectionBookmark_Click"
                                   ToolTip="Атака системы">
-                        <Grid Width="154">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="36"/>
-                                <ColumnDefinition/>
-                            </Grid.ColumnDefinitions>
-                            <TextBlock Text="04" HorizontalAlignment="Center"
-                                       FontFamily="Consolas"/>
-                            <TextBlock Grid.Column="1" Text="АТАКА"
-                                       Margin="8,0,8,0" FontFamily="Consolas"/>
-                        </Grid>
+                        <TextBlock Text="АТАКА"
+                                   Style="{StaticResource SectionBookmarkLabel}"/>
                     </ToggleButton>
                     <ToggleButton x:Name="SystemBookmark"
                                   Style="{StaticResource SectionBookmarkButton}"
                                   Tag="SystemSection"
                                   Click="SectionBookmark_Click"
                                   ToolTip="Система">
-                        <Grid Width="154">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="36"/>
-                                <ColumnDefinition/>
-                            </Grid.ColumnDefinitions>
-                            <TextBlock Text="05" HorizontalAlignment="Center"
-                                       FontFamily="Consolas"/>
-                            <TextBlock Grid.Column="1" Text="СИСТЕМА"
-                                       Margin="8,0,8,0" FontFamily="Consolas"/>
-                        </Grid>
+                        <TextBlock Text="СИСТЕМА"
+                                   Style="{StaticResource SectionBookmarkLabel}"/>
                     </ToggleButton>
                 </StackPanel>
             </Grid>
