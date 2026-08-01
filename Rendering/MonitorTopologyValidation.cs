@@ -157,6 +157,29 @@ internal static class MonitorTopologyValidation
             MonitorRouteDomain.Flow,
             primary.Id,
             MonitorLinkMode.Relay,
+            upper.Id);
+        MonitorTopology.SetRoute(
+            settings.MonitorProfiles,
+            monitors,
+            MonitorRouteDomain.Database,
+            primary.Id,
+            MonitorLinkMode.Relay,
+            upper.Id);
+        MonitorProfile primaryAfterDisabledSource = MonitorTopology.Find(
+            settings.MonitorProfiles,
+            primary.Id)!;
+        Require(
+            primaryAfterDisabledSource.FlowMode == MonitorLinkMode.Isolated
+            && primaryAfterDisabledSource.DatabaseMode
+                == MonitorLinkMode.Isolated,
+            "Отключённый монитор был принят источником маршрута.");
+
+        MonitorTopology.SetRoute(
+            settings.MonitorProfiles,
+            monitors,
+            MonitorRouteDomain.Flow,
+            primary.Id,
+            MonitorLinkMode.Relay,
             right.Id);
         IReadOnlyList<MonitorRoute> routes = MonitorTopology.Resolve(
             settings.MonitorProfiles,

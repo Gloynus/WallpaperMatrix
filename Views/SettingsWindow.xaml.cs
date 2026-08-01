@@ -67,6 +67,11 @@ public partial class SettingsWindow : Window
     private readonly DispatcherTimer _fontPreviewTimer;
     private readonly DispatcherTimer _colorPreviewTimer;
     private readonly DispatcherTimer _virtualResolutionTimer;
+    private readonly DispatcherTimer _sectionNavigationTimer;
+    private readonly Stopwatch _sectionNavigationClock = new();
+    private double _sectionNavigationStartOffset;
+    private double _sectionNavigationTargetOffset;
+    private bool _updatingSectionNavigation;
     private double _livePreviewFontSize = 24;
     private double _livePreviewGlyphStretch;
     private double _livePreviewGlyphWeight;
@@ -175,6 +180,12 @@ public partial class SettingsWindow : Window
         };
         _virtualResolutionTimer.Tick +=
             VirtualResolutionTimer_Tick;
+        _sectionNavigationTimer = new DispatcherTimer(
+            DispatcherPriority.Render)
+        {
+            Interval = TimeSpan.FromMilliseconds(16)
+        };
+        _sectionNavigationTimer.Tick += SectionNavigationTimer_Tick;
         AddHandler(
             TextBox.TextChangedEvent,
             new TextChangedEventHandler(AnyTextBox_TextChanged));
@@ -197,6 +208,7 @@ public partial class SettingsWindow : Window
         UpdateCollapsibleSections();
         RefreshLabels(force: true);
         _loading = false;
+        Loaded += (_, _) => UpdateSectionNavigationSelection();
     }
 
     public void LoadSettings(AppSettings settings)
@@ -353,6 +365,7 @@ public partial class SettingsWindow : Window
         _fontPreviewTimer.Stop();
         _colorPreviewTimer.Stop();
         _virtualResolutionTimer.Stop();
+        _sectionNavigationTimer.Stop();
         _allowClose = true;
         Close();
     }
@@ -2113,11 +2126,8 @@ public partial class SettingsWindow : Window
         MonitorProfile? profile = MonitorTopology.Find(
             _draftSettings.MonitorProfiles,
             monitorId);
-        if (profile is null)
-            return false;
-        return domain == MonitorRouteDomain.Flow
-            ? profile.FlowMode != MonitorLinkMode.Disabled
-            : profile.DatabaseMode != MonitorLinkMode.Disabled;
+        return profile is not null
+            && MonitorTopology.CanBeRouteSource(profile, domain);
     }
 
     private static MonitorRouteChoice? MatchRouteChoice(
@@ -2891,6 +2901,122 @@ public partial class SettingsWindow : Window
             AddPathsToPlaylist([dialog.SelectedPath]);
     }
 
+    private (FrameworkElement Section, ToggleButton Bookmark)[]
+        SectionNavigationTargets() =>
+        [
+            (OutputDevicesSection, OutputDevicesBookmark),
+            (FlowCalibratorSection, FlowCalibratorBookmark),
+            (DatabaseSection, DatabaseBookmark),
+            (AttackSection, AttackBookmark),
+            (SystemSection, SystemBookmark)
+        ];
+
+    private static bool IsSectionBookmark(ToggleButton toggle) =>
+        toggle.Tag is string target
+        && target is "OutputDevicesSection"
+            or "FlowCalibratorSection"
+            or "DatabaseSection"
+            or "AttackSection"
+            or "SystemSection";
+
+    private void SectionBookmark_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not ToggleButton bookmark)
+            return;
+
+        (FrameworkElement Section, ToggleButton Bookmark)? destination =
+            SectionNavigationTargets()
+                .FirstOrDefault(item => ReferenceEquals(item.Bookmark, bookmark));
+        if (destination is null)
+            return;
+
+        System.Windows.Point visiblePosition =
+            destination.Value.Section.TranslatePoint(
+            new System.Windows.Point(0, 0),
+            MainScrollViewer);
+        _sectionNavigationStartOffset = MainScrollViewer.VerticalOffset;
+        _sectionNavigationTargetOffset = Math.Clamp(
+            _sectionNavigationStartOffset + visiblePosition.Y - 18,
+            0,
+            MainScrollViewer.ScrollableHeight);
+        _sectionNavigationClock.Restart();
+        _sectionNavigationTimer.Start();
+        UpdateSectionNavigationSelection(bookmark);
+        e.Handled = true;
+    }
+
+    private void SectionNavigationTimer_Tick(object? sender, EventArgs e)
+    {
+        const double durationSeconds = 0.28;
+        double progress = Math.Clamp(
+            _sectionNavigationClock.Elapsed.TotalSeconds / durationSeconds,
+            0,
+            1);
+        double eased = 1 - Math.Pow(1 - progress, 3);
+        MainScrollViewer.ScrollToVerticalOffset(
+            _sectionNavigationStartOffset
+            + ((_sectionNavigationTargetOffset
+                - _sectionNavigationStartOffset) * eased));
+        if (progress < 1)
+            return;
+
+        _sectionNavigationTimer.Stop();
+        MainScrollViewer.ScrollToVerticalOffset(
+            _sectionNavigationTargetOffset);
+        UpdateSectionNavigationSelection();
+    }
+
+    private void MainScrollViewer_ScrollChanged(
+        object sender,
+        ScrollChangedEventArgs e)
+    {
+        if (!_updatingSectionNavigation)
+            UpdateSectionNavigationSelection();
+    }
+
+    private void UpdateSectionNavigationSelection(
+        ToggleButton? forcedBookmark = null)
+    {
+        if (!IsLoaded || MainScrollViewer is null)
+            return;
+
+        (FrameworkElement Section, ToggleButton Bookmark)[] targets =
+            SectionNavigationTargets();
+        ToggleButton active = forcedBookmark ?? targets[0].Bookmark;
+        if (forcedBookmark is null)
+        {
+            double anchor = MainScrollViewer.VerticalOffset + 64;
+            foreach ((FrameworkElement section, ToggleButton bookmark) in targets)
+            {
+                System.Windows.Point visiblePosition = section.TranslatePoint(
+                    new System.Windows.Point(0, 0),
+                    MainScrollViewer);
+                double documentTop = MainScrollViewer.VerticalOffset
+                    + visiblePosition.Y;
+                if (documentTop <= anchor)
+                    active = bookmark;
+                else
+                    break;
+            }
+            if (MainScrollViewer.VerticalOffset
+                >= MainScrollViewer.ScrollableHeight - 1)
+            {
+                active = targets[^1].Bookmark;
+            }
+        }
+
+        _updatingSectionNavigation = true;
+        try
+        {
+            foreach ((_, ToggleButton bookmark) in targets)
+                bookmark.IsChecked = ReferenceEquals(bookmark, active);
+        }
+        finally
+        {
+            _updatingSectionNavigation = false;
+        }
+    }
+
     private void SettingsWindow_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
     {
         if (PlaylistList is null
@@ -2901,6 +3027,8 @@ public partial class SettingsWindow : Window
         {
             return;
         }
+
+        _sectionNavigationTimer.Stop();
 
         bool overPlaylist = IsDescendantOf(origin, PlaylistList);
         bool overTopology = IsDescendantOf(
@@ -4053,6 +4181,11 @@ public partial class SettingsWindow : Window
 
     private void AnyToggle_Changed(object sender, RoutedEventArgs e)
     {
+        if (e.Source is ToggleButton toggle
+            && IsSectionBookmark(toggle))
+        {
+            return;
+        }
         UpdateCollapsibleSections();
         if (!_loading)
             QueuePreview();

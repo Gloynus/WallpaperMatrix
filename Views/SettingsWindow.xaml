@@ -7,6 +7,7 @@
         Width="740" Height="780" MinWidth="660" MinHeight="620"
         WindowStartupLocation="CenterScreen" WindowStyle="None"
         ResizeMode="CanResizeWithGrip" Background="#020806"
+        UseLayoutRounding="True" SnapsToDevicePixels="True"
         PreviewMouseWheel="SettingsWindow_PreviewMouseWheel">
     <Window.Resources>
         <SolidColorBrush x:Key="PanelBrush" Color="#07140D"/>
@@ -480,7 +481,7 @@
                         <Setter Property="Padding" Value="6,7"/>
                         <Setter Property="HorizontalContentAlignment" Value="Center"/>
                         <Setter Property="FontFamily" Value="Consolas"/>
-                        <Setter Property="FontSize" Value="11"/>
+                        <Setter Property="FontSize" Value="13"/>
                         <Setter Property="Focusable" Value="True"/>
                         <Setter Property="Template">
                             <Setter.Value>
@@ -517,6 +518,85 @@
                 </Setter.Value>
             </Setter>
         </Style>
+        <Style x:Key="CalibrationAxisUnit" TargetType="TextBlock">
+            <Setter Property="Width" Value="32"/>
+            <Setter Property="Margin" Value="3,3,0,0"/>
+            <Setter Property="FontFamily" Value="Consolas"/>
+            <Setter Property="Foreground" Value="#83FFAA"/>
+        </Style>
+        <Style x:Key="SectionBookmarkButton" TargetType="ToggleButton">
+            <Setter Property="Width" Value="38"/>
+            <Setter Property="Height" Value="34"/>
+            <Setter Property="Margin" Value="0,2,0,2"/>
+            <Setter Property="Padding" Value="0"/>
+            <Setter Property="HorizontalAlignment" Value="Left"/>
+            <Setter Property="HorizontalContentAlignment" Value="Left"/>
+            <Setter Property="Background" Value="#061C0F"/>
+            <Setter Property="Foreground" Value="#83FFAA"/>
+            <Setter Property="BorderBrush" Value="#1B6C3A"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+            <Setter Property="Focusable" Value="False"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Panel.ZIndex" Value="20"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ToggleButton">
+                        <Border x:Name="BookmarkBody"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="0,4,4,0"
+                                ClipToBounds="True">
+                            <ContentPresenter HorizontalAlignment="Left"
+                                              VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="BookmarkBody"
+                                        Property="Background" Value="#0B321C"/>
+                                <Setter TargetName="BookmarkBody"
+                                        Property="BorderBrush" Value="#35D96F"/>
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="BookmarkBody"
+                                        Property="Background" Value="#00C95B"/>
+                                <Setter TargetName="BookmarkBody"
+                                        Property="BorderBrush" Value="#9DFFBD"/>
+                                <Setter Property="Foreground" Value="#020806"/>
+                                <Setter Property="FontWeight" Value="Bold"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+                <EventTrigger RoutedEvent="MouseEnter">
+                    <BeginStoryboard>
+                        <Storyboard>
+                            <DoubleAnimation Storyboard.TargetProperty="Width"
+                                             To="158" Duration="0:0:0.16">
+                                <DoubleAnimation.EasingFunction>
+                                    <CubicEase EasingMode="EaseOut"/>
+                                </DoubleAnimation.EasingFunction>
+                            </DoubleAnimation>
+                        </Storyboard>
+                    </BeginStoryboard>
+                </EventTrigger>
+                <EventTrigger RoutedEvent="MouseLeave">
+                    <BeginStoryboard>
+                        <Storyboard>
+                            <DoubleAnimation Storyboard.TargetProperty="Width"
+                                             To="38" Duration="0:0:0.14">
+                                <DoubleAnimation.EasingFunction>
+                                    <CubicEase EasingMode="EaseOut"/>
+                                </DoubleAnimation.EasingFunction>
+                            </DoubleAnimation>
+                        </Storyboard>
+                    </BeginStoryboard>
+                </EventTrigger>
+            </Style.Triggers>
+        </Style>
         <Style x:Key="MatrixScrollPageButton" TargetType="RepeatButton">
             <Setter Property="Focusable" Value="False"/>
             <Setter Property="IsTabStop" Value="False"/>
@@ -536,9 +616,10 @@
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Thumb">
-                        <Border x:Name="ThumbBody" Margin="1"
+                        <Border x:Name="ThumbBody" Margin="1,1,1,3"
                                 Background="#176B38" BorderBrush="#2DBD63"
-                                BorderThickness="1" CornerRadius="3"/>
+                                BorderThickness="1" CornerRadius="3"
+                                SnapsToDevicePixels="True"/>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
                                 <Setter TargetName="ThumbBody" Property="Background" Value="#00A84C"/>
@@ -559,7 +640,7 @@
                     BorderBrush="#103A22" BorderThickness="1,0,0,0">
                 <Track x:Name="PART_Track" IsDirectionReversed="True"
                        Orientation="Vertical"
-                       Margin="0,0,0,1"
+                       Margin="0,0,0,2"
                        Maximum="{TemplateBinding Maximum}"
                        Minimum="{TemplateBinding Minimum}"
                        Value="{TemplateBinding Value}"
@@ -814,9 +895,12 @@
             </Border>
 
             <ScrollViewer x:Name="MainScrollViewer" Grid.Row="1"
-                          VerticalScrollBarVisibility="Auto" Padding="20,18">
+                          VerticalScrollBarVisibility="Auto"
+                          ScrollChanged="MainScrollViewer_ScrollChanged"
+                          Padding="58,18,20,18">
                 <StackPanel>
-                    <Border Style="{StaticResource SectionBorder}">
+                    <Border x:Name="OutputDevicesSection"
+                            Style="{StaticResource SectionBorder}">
                         <StackPanel>
                             <StackPanel Orientation="Horizontal"
                                         Margin="0,0,0,10">
@@ -915,8 +999,8 @@
                                                                                       Opacity="0"/>
                                                                     </Track.DecreaseRepeatButton>
                                                                     <Track.Thumb>
-                                                                        <Thumb Style="{StaticResource MatrixTopologyThumb}"
-                                                                               Margin="1"/>
+                                                                         <Thumb Style="{StaticResource MatrixTopologyThumb}"
+                                                                                Margin="1,1,1,3"/>
                                                                     </Track.Thumb>
                                                                     <Track.IncreaseRepeatButton>
                                                                         <RepeatButton x:Name="IncreaseButton"
@@ -1203,7 +1287,8 @@
                         </StackPanel>
                     </Border>
 
-                    <Border Style="{StaticResource SectionBorder}">
+                    <Border x:Name="FlowCalibratorSection"
+                            Style="{StaticResource SectionBorder}">
                         <StackPanel>
                             <Grid Margin="0,0,0,8">
                                 <Grid.ColumnDefinitions>
@@ -1504,7 +1589,7 @@
 
                                     <Grid Grid.Row="1">
                                         <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="166"/>
+                                            <ColumnDefinition Width="184"/>
                                             <ColumnDefinition/>
                                         </Grid.ColumnDefinitions>
 
@@ -1523,8 +1608,8 @@
                                                             ToolTip="Максимальный Объём новой струи: 0% — без обычного шлейфа; 100% — одна высота экрана."/>
                                                     <TextBox x:Name="CalibrationTrailMaxInput" Tag="TrailMax"
                                                              Margin="5,0,0,0" Style="{StaticResource NumericInput}"/>
-                                                    <TextBlock Text="%" Margin="3,3,0,0"
-                                                               FontFamily="Consolas" Foreground="#83FFAA"/>
+                                                    <TextBlock Text="%"
+                                                               Style="{StaticResource CalibrationAxisUnit}"/>
                                                 </StackPanel>
                                                 <StackPanel Orientation="Horizontal"
                                                             HorizontalAlignment="Right"
@@ -1536,8 +1621,8 @@
                                                             ToolTip="Минимальный Объём новой струи в процентах высоты экрана."/>
                                                     <TextBox x:Name="CalibrationTrailMinInput" Tag="TrailMin"
                                                              Margin="5,0,0,0" Style="{StaticResource NumericInput}"/>
-                                                    <TextBlock Text="%" Margin="3,3,0,0"
-                                                               FontFamily="Consolas" Foreground="#83FFAA"/>
+                                                    <TextBlock Text="%"
+                                                               Style="{StaticResource CalibrationAxisUnit}"/>
                                                 </StackPanel>
                                             </Grid>
 
@@ -1553,8 +1638,8 @@
                                                     <TextBox x:Name="CalibrationSignalMaxInput"
                                                              Tag="SignalMax" Margin="5,0,0,0"
                                                              Style="{StaticResource NumericInput}"/>
-                                                    <TextBlock Text="/16" Margin="3,3,0,0"
-                                                               FontFamily="Consolas" Foreground="#83FFAA"/>
+                                                    <TextBlock Text="/16"
+                                                               Style="{StaticResource CalibrationAxisUnit}"/>
                                                 </StackPanel>
                                                 <StackPanel Orientation="Horizontal"
                                                             HorizontalAlignment="Right"
@@ -1567,8 +1652,8 @@
                                                     <TextBox x:Name="CalibrationSignalMinInput"
                                                              Tag="SignalMin" Margin="5,0,0,0"
                                                              Style="{StaticResource NumericInput}"/>
-                                                    <TextBlock Text="/16" Margin="3,3,0,0"
-                                                               FontFamily="Consolas" Foreground="#83FFAA"/>
+                                                    <TextBlock Text="/16"
+                                                               Style="{StaticResource CalibrationAxisUnit}"/>
                                                 </StackPanel>
                                             </Grid>
 
@@ -1585,8 +1670,8 @@
                                                              Margin="5,0,0,0"
                                                              Style="{StaticResource NumericInput}"
                                                              ToolTip="Ползунок и колесо: 1–100%/с. Ручной ввод: до 1000%/с."/>
-                                                    <TextBlock Text="%/с" Margin="3,3,0,0"
-                                                               FontFamily="Consolas" Foreground="#83FFAA"/>
+                                                    <TextBlock Text="%/с"
+                                                               Style="{StaticResource CalibrationAxisUnit}"/>
                                                 </StackPanel>
                                                 <StackPanel Orientation="Horizontal"
                                                             HorizontalAlignment="Right"
@@ -1600,8 +1685,8 @@
                                                              Margin="5,0,0,0"
                                                              Style="{StaticResource NumericInput}"
                                                              ToolTip="Ползунок и колесо: 1–100%/с. Ручной ввод: до 1000%/с."/>
-                                                    <TextBlock Text="%/с" Margin="3,3,0,0"
-                                                               FontFamily="Consolas" Foreground="#83FFAA"/>
+                                                    <TextBlock Text="%/с"
+                                                               Style="{StaticResource CalibrationAxisUnit}"/>
                                                 </StackPanel>
                                             </Grid>
 
@@ -1617,8 +1702,8 @@
                                                     <TextBox x:Name="CalibrationStreamLifetimeMinInput"
                                                              Tag="StreamLifetimeMin" Margin="5,0,0,0"
                                                              Style="{StaticResource NumericInput}"/>
-                                                    <TextBlock Text="%" Margin="3,3,0,0"
-                                                               FontFamily="Consolas" Foreground="#83FFAA"/>
+                                                    <TextBlock Text="%"
+                                                               Style="{StaticResource CalibrationAxisUnit}"/>
                                                 </StackPanel>
                                                 <StackPanel Orientation="Horizontal"
                                                             HorizontalAlignment="Right"
@@ -1631,8 +1716,8 @@
                                                     <TextBox x:Name="CalibrationStreamLifetimeMaxInput"
                                                              Tag="StreamLifetimeMax" Margin="5,0,0,0"
                                                              Style="{StaticResource NumericInput}"/>
-                                                    <TextBlock Text="%" Margin="3,3,0,0"
-                                                               FontFamily="Consolas" Foreground="#83FFAA"/>
+                                                    <TextBlock Text="%"
+                                                               Style="{StaticResource CalibrationAxisUnit}"/>
                                                 </StackPanel>
                                             </Grid>
 
@@ -1648,8 +1733,8 @@
                                                     <TextBox x:Name="CalibrationMemoryMaxInput"
                                                              Tag="MemoryMax" Margin="5,0,0,0"
                                                              Style="{StaticResource NumericInput}"/>
-                                                    <TextBlock Text="%" Margin="3,3,0,0"
-                                                               FontFamily="Consolas" Foreground="#83FFAA"/>
+                                                    <TextBlock Text="%"
+                                                               Style="{StaticResource CalibrationAxisUnit}"/>
                                                 </StackPanel>
                                                 <StackPanel Orientation="Horizontal"
                                                             HorizontalAlignment="Right"
@@ -1662,8 +1747,8 @@
                                                     <TextBox x:Name="CalibrationMemoryMinInput"
                                                              Tag="MemoryMin" Margin="5,0,0,0"
                                                              Style="{StaticResource NumericInput}"/>
-                                                    <TextBlock Text="%" Margin="3,3,0,0"
-                                                               FontFamily="Consolas" Foreground="#83FFAA"/>
+                                                    <TextBlock Text="%"
+                                                               Style="{StaticResource CalibrationAxisUnit}"/>
                                                 </StackPanel>
                                             </Grid>
 
@@ -2026,7 +2111,8 @@
                         </StackPanel>
                     </Border>
 
-                    <Border Style="{StaticResource SectionBorder}">
+                    <Border x:Name="DatabaseSection"
+                            Style="{StaticResource SectionBorder}">
                         <StackPanel>
                             <Grid x:Name="DatabaseHeaderPanel">
                                 <Grid.ColumnDefinitions>
@@ -2671,7 +2757,8 @@
                         </StackPanel>
                     </Border>
 
-                    <Border Style="{StaticResource SectionBorder}">
+                    <Border x:Name="AttackSection"
+                            Style="{StaticResource SectionBorder}">
                         <StackPanel>
                             <Grid>
                                 <Grid.ColumnDefinitions>
@@ -2766,7 +2853,8 @@
                         </StackPanel>
                     </Border>
 
-                    <Border Style="{StaticResource SectionBorder}">
+                    <Border x:Name="SystemSection"
+                            Style="{StaticResource SectionBorder}">
                         <StackPanel>
                             <Grid Margin="0,0,0,7">
                                 <Grid.ColumnDefinitions>
@@ -2814,6 +2902,101 @@
                     </Border>
                 </StackPanel>
             </ScrollViewer>
+
+            <Grid Grid.Row="1"
+                  HorizontalAlignment="Left"
+                  VerticalAlignment="Center"
+                  Margin="0,0,0,0"
+                  Panel.ZIndex="30">
+                <Border Width="39"
+                        HorizontalAlignment="Left"
+                        Background="#E6020806"
+                        BorderBrush="#164B2C"
+                        BorderThickness="0,1,1,1"
+                        CornerRadius="0,5,5,0"/>
+                <StackPanel Margin="0,5">
+                    <ToggleButton x:Name="OutputDevicesBookmark"
+                                  Style="{StaticResource SectionBookmarkButton}"
+                                  Tag="OutputDevicesSection"
+                                  Click="SectionBookmark_Click"
+                                  ToolTip="Устройства вывода">
+                        <Grid Width="154">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="36"/>
+                                <ColumnDefinition/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="01" HorizontalAlignment="Center"
+                                       FontFamily="Consolas"/>
+                            <TextBlock Grid.Column="1" Text="УСТРОЙСТВА"
+                                       Margin="8,0,8,0" FontFamily="Consolas"/>
+                        </Grid>
+                    </ToggleButton>
+                    <ToggleButton x:Name="FlowCalibratorBookmark"
+                                  Style="{StaticResource SectionBookmarkButton}"
+                                  Tag="FlowCalibratorSection"
+                                  Click="SectionBookmark_Click"
+                                  ToolTip="Калибратор потока">
+                        <Grid Width="154">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="36"/>
+                                <ColumnDefinition/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="02" HorizontalAlignment="Center"
+                                       FontFamily="Consolas"/>
+                            <TextBlock Grid.Column="1" Text="КАЛИБРАТОР"
+                                       Margin="8,0,8,0" FontFamily="Consolas"/>
+                        </Grid>
+                    </ToggleButton>
+                    <ToggleButton x:Name="DatabaseBookmark"
+                                  Style="{StaticResource SectionBookmarkButton}"
+                                  Tag="DatabaseSection"
+                                  Click="SectionBookmark_Click"
+                                  ToolTip="База данных">
+                        <Grid Width="154">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="36"/>
+                                <ColumnDefinition/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="03" HorizontalAlignment="Center"
+                                       FontFamily="Consolas"/>
+                            <TextBlock Grid.Column="1" Text="БАЗА ДАННЫХ"
+                                       Margin="8,0,8,0" FontFamily="Consolas"/>
+                        </Grid>
+                    </ToggleButton>
+                    <ToggleButton x:Name="AttackBookmark"
+                                  Style="{StaticResource SectionBookmarkButton}"
+                                  Tag="AttackSection"
+                                  Click="SectionBookmark_Click"
+                                  ToolTip="Атака системы">
+                        <Grid Width="154">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="36"/>
+                                <ColumnDefinition/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="04" HorizontalAlignment="Center"
+                                       FontFamily="Consolas"/>
+                            <TextBlock Grid.Column="1" Text="АТАКА"
+                                       Margin="8,0,8,0" FontFamily="Consolas"/>
+                        </Grid>
+                    </ToggleButton>
+                    <ToggleButton x:Name="SystemBookmark"
+                                  Style="{StaticResource SectionBookmarkButton}"
+                                  Tag="SystemSection"
+                                  Click="SectionBookmark_Click"
+                                  ToolTip="Система">
+                        <Grid Width="154">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="36"/>
+                                <ColumnDefinition/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="05" HorizontalAlignment="Center"
+                                       FontFamily="Consolas"/>
+                            <TextBlock Grid.Column="1" Text="СИСТЕМА"
+                                       Margin="8,0,8,0" FontFamily="Consolas"/>
+                        </Grid>
+                    </ToggleButton>
+                </StackPanel>
+            </Grid>
 
             <Border Grid.Row="2" Background="#06140C" BorderBrush="#164B2C" BorderThickness="0,1,0,0">
                 <Grid Margin="20,8">

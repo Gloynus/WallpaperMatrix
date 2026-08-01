@@ -165,6 +165,7 @@ public static class MonitorTopology
 
         MonitorProfile? requestedSource = Find(profiles, sourceMonitorId);
         if (requestedSource is null
+            || !CanBeRouteSource(requestedSource, domain)
             || string.Equals(
                 requestedSource.MonitorId,
                 selected.MonitorId,
@@ -329,6 +330,13 @@ public static class MonitorTopology
             monitorId,
             StringComparison.OrdinalIgnoreCase));
 
+    public static bool CanBeRouteSource(
+        MonitorProfile profile,
+        MonitorRouteDomain domain) =>
+        profile.FlowMode != MonitorLinkMode.Disabled
+        && (domain == MonitorRouteDomain.Flow
+            || profile.DatabaseMode != MonitorLinkMode.Disabled);
+
     private static void Normalize(
         IList<MonitorProfile> profiles,
         IReadOnlyList<MonitorDescriptor> monitors,
@@ -361,7 +369,8 @@ public static class MonitorTopology
                 continue;
             }
             if (string.IsNullOrWhiteSpace(source)
-                || !byId.ContainsKey(source)
+                || !byId.TryGetValue(source, out MonitorProfile? sourceProfile)
+                || !CanBeRouteSource(sourceProfile, domain)
                 || string.Equals(
                     source,
                     profile.MonitorId,
@@ -420,7 +429,7 @@ public static class MonitorTopology
             string root = ResolveRoot(byId.Values, profile.MonitorId, domain);
             MonitorProfile? rootProfile = Find(byId.Values, root);
             if (rootProfile is null
-                || GetMode(rootProfile, domain) == MonitorLinkMode.Disabled)
+                || !CanBeRouteSource(rootProfile, domain))
             {
                 SetMode(profile, domain, MonitorLinkMode.Isolated);
                 SetSource(profile, domain, "");
