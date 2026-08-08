@@ -457,6 +457,9 @@ internal static class MonitorSettingsComposer
         target.ImagePlaylists =
             source.ImagePlaylists.Select(playlist => playlist.Copy()).ToList();
         target.ActiveImagePlaylistId = source.ActiveImagePlaylistId;
+        target.PlaylistPresentations = source.PlaylistPresentations
+            .Select(presentation => presentation.Copy())
+            .ToList();
         target.OperatorPlaylistId = source.OperatorPlaylistId;
         target.OperatorPlaylistName = source.OperatorPlaylistName;
         target.ImageDurationSeconds = source.ImageDurationSeconds;

@@ -127,10 +127,12 @@ public sealed class PresetStore
         preset.Settings = portableSettings;
         preset.Settings.ImagePlaylists = [];
         preset.Settings.ActiveImagePlaylistId = "";
+        preset.Settings.PlaylistPresentations = [];
         foreach (MonitorProfile profile in preset.Settings.MonitorProfiles)
         {
             profile.Settings.ImagePlaylists = [];
             profile.Settings.ActiveImagePlaylistId = "";
+            profile.Settings.PlaylistPresentations = [];
         }
         preset.Settings.ActivePresetId = "";
         preset.FilePath = destination;

@@ -197,6 +197,7 @@ internal static class MonitorTopologyValidation
             "Обратная ссылка не была сведена к новому корню.");
 
         ValidateIndependentImageProjection(primary, right);
+        ValidateIndependentPlaylistPresentation(primary, right);
         ValidateVirtualDeviceRouting(primary, right);
         ValidatePortablePresets(primary, right, upper);
     }
@@ -231,6 +232,82 @@ internal static class MonitorTopologyValidation
                 scaleX,
                 scaleY) - 4.0) < 0.0001,
             "Заполнение обеих осей не покрывает область потока.");
+    }
+
+    private static void ValidateIndependentPlaylistPresentation(
+        MonitorDescriptor primary,
+        MonitorDescriptor target)
+    {
+        MonitorDescriptor[] monitors = [primary, target];
+        AppSettings applied = new();
+        applied.Normalize();
+        MonitorTopology.EnsureProfiles(applied, monitors);
+        MonitorTopology.SetRoute(
+            applied.MonitorProfiles,
+            monitors,
+            MonitorRouteDomain.Database,
+            target.Id,
+            MonitorLinkMode.Isolated,
+            "");
+        applied.Normalize();
+
+        string playlistId = applied.ImagePlaylists[0].Id;
+        MonitorProfile primaryProfile = MonitorTopology.Find(
+            applied.MonitorProfiles,
+            primary.Id)!;
+        MonitorProfile targetProfile = MonitorTopology.Find(
+            applied.MonitorProfiles,
+            target.Id)!;
+        primaryProfile.Settings.SetImagePlacement(
+            playlistId,
+            new ImagePlacement
+            {
+                FillHorizontal = true,
+                FillVertical = false
+            });
+        targetProfile.Settings.SetImagePlacement(
+            playlistId,
+            new ImagePlacement
+            {
+                FillHorizontal = false,
+                FillVertical = true
+            });
+        applied.Normalize();
+
+        ImagePlacement primaryPlacement = primaryProfile.Settings
+            .ResolveImagePlacement(playlistId);
+        ImagePlacement targetPlacement = targetProfile.Settings
+            .ResolveImagePlacement(playlistId);
+        Require(
+            primaryPlacement.FillHorizontal
+            && !primaryPlacement.FillVertical
+            && !targetPlacement.FillHorizontal
+            && targetPlacement.FillVertical,
+            "Один плейлист не сохранил раздельное размещение изолированных баз данных.");
+
+        AppSettings draft = applied.Copy();
+        Require(
+            AppSettingsComparer.Equivalent(applied, draft),
+            "Неизменённая копия размещения ошибочно отмечена как черновик.");
+        MonitorProfile draftTarget = MonitorTopology.Find(
+            draft.MonitorProfiles,
+            target.Id)!;
+        draftTarget.Settings.SetImagePlacement(
+            playlistId,
+            new ImagePlacement
+            {
+                FillHorizontal = true,
+                FillVertical = true
+            });
+        Require(
+            !AppSettingsComparer.Equivalent(applied, draft),
+            "Изменение размещения не было замечено интерфейсом.");
+        draftTarget.Settings.SetImagePlacement(
+            playlistId,
+            targetPlacement);
+        Require(
+            AppSettingsComparer.Equivalent(applied, draft),
+            "Возврат размещения к применённому состоянию не очистил черновик.");
     }
 
     private static void ValidateVirtualDeviceRouting(

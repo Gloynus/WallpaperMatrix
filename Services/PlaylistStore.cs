@@ -10,9 +10,10 @@ public sealed class PlaylistStore
 {
     private sealed class PlaylistDocument
     {
-        public int FormatVersion { get; set; } = 4;
+        public int FormatVersion { get; set; } = 5;
         public string ActivePlaylistId { get; set; } = "";
         public List<ImagePlaylist> Playlists { get; set; } = [];
+        public List<PlaylistPresentation> Presentations { get; set; } = [];
         // Read only: version 2 stored a full catalog for every monitor.
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public List<MonitorPlaylistDocument>? MonitorPlaylists { get; set; }
@@ -30,6 +31,7 @@ public sealed class PlaylistStore
     {
         public string MonitorId { get; set; } = "";
         public string ActivePlaylistId { get; set; } = "";
+        public List<PlaylistPresentation> Presentations { get; set; } = [];
     }
 
     private readonly string _playlistsPath;
@@ -90,10 +92,15 @@ public sealed class PlaylistStore
                 (document.MonitorPlaylists ?? [])
                     .SelectMany(monitor => monitor.Playlists ?? []));
             settings.ActiveImagePlaylistId = document.ActivePlaylistId;
+            settings.PlaylistPresentations = (document.Presentations ?? [])
+                .Select(presentation => presentation.Copy())
+                .ToList();
+            IReadOnlyList<MonitorPlaylistSelectionDocument> selections =
+                document.MonitorSelections ?? [];
             foreach (MonitorProfile profile in settings.MonitorProfiles)
             {
                 string monitorId = profile.MonitorId;
-                string activeId = document.MonitorSelections
+                string activeId = selections
                     .FirstOrDefault(selection => string.Equals(
                         selection.MonitorId,
                         monitorId,
@@ -107,6 +114,16 @@ public sealed class PlaylistStore
                         ?.ActivePlaylistId
                     ?? settings.ActiveImagePlaylistId;
                 profile.Settings.ActiveImagePlaylistId = activeId;
+                MonitorPlaylistSelectionDocument? selection =
+                    selections
+                        .FirstOrDefault(candidate => string.Equals(
+                            candidate.MonitorId,
+                            monitorId,
+                            StringComparison.OrdinalIgnoreCase));
+                profile.Settings.PlaylistPresentations =
+                    (selection?.Presentations ?? [])
+                        .Select(presentation => presentation.Copy())
+                        .ToList();
             }
             settings.Normalize();
         }
@@ -134,11 +151,17 @@ public sealed class PlaylistStore
                 Playlists = normalized.ImagePlaylists
                     .Select(playlist => playlist.Copy())
                     .ToList(),
+                Presentations = normalized.PlaylistPresentations
+                    .Select(presentation => presentation.Copy())
+                    .ToList(),
                 MonitorSelections = normalized.MonitorProfiles
                     .Select(profile => new MonitorPlaylistSelectionDocument
                     {
                         MonitorId = profile.MonitorId,
-                        ActivePlaylistId = profile.Settings.ActiveImagePlaylistId
+                        ActivePlaylistId = profile.Settings.ActiveImagePlaylistId,
+                        Presentations = profile.Settings.PlaylistPresentations
+                            .Select(presentation => presentation.Copy())
+                            .ToList()
                     })
                     .ToList()
             };

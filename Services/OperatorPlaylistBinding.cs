@@ -95,6 +95,10 @@ internal static class OperatorPlaylistBinding
 
         presetSettings.ImagePlaylists = available;
         presetSettings.ActiveImagePlaylistId = selected.Id;
+        presetSettings.PlaylistPresentations = currentSettings
+            .PlaylistPresentations
+            .Select(presentation => presentation.Copy())
+            .ToList();
         presetSettings.OperatorPlaylistId = selected.Id;
         presetSettings.OperatorPlaylistName = selected.Name.Trim();
     }

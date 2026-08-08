@@ -589,6 +589,9 @@ public partial class App : System.Windows.Application
             .Select(playlist => playlist.Copy())
             .ToList();
         target.ActiveImagePlaylistId = source.ActiveImagePlaylistId;
+        target.PlaylistPresentations = source.PlaylistPresentations
+            .Select(presentation => presentation.Copy())
+            .ToList();
         foreach (MonitorProfile sourceProfile in source.MonitorProfiles)
         {
             MonitorProfile? targetProfile = MonitorTopology.Find(
@@ -598,6 +601,10 @@ public partial class App : System.Windows.Application
                 continue;
             targetProfile.Settings.ActiveImagePlaylistId =
                 sourceProfile.Settings.ActiveImagePlaylistId;
+            targetProfile.Settings.PlaylistPresentations =
+                sourceProfile.Settings.PlaylistPresentations
+                    .Select(presentation => presentation.Copy())
+                    .ToList();
         }
         target.Normalize();
     }

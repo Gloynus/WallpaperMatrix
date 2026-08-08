@@ -39,6 +39,7 @@ internal static class SettingsFileCodec
             ?? [];
         result.Remove(nameof(AppSettings.ImagePlaylists));
         result.Remove(nameof(AppSettings.ActiveImagePlaylistId));
+        result.Remove(nameof(AppSettings.PlaylistPresentations));
         if (result[nameof(AppSettings.MonitorProfiles)]
             is JsonArray monitorProfiles)
         {
@@ -52,6 +53,7 @@ internal static class SettingsFileCodec
                 }
                 monitorSettings.Remove(nameof(AppSettings.ImagePlaylists));
                 monitorSettings.Remove(nameof(AppSettings.ActiveImagePlaylistId));
+                monitorSettings.Remove(nameof(AppSettings.PlaylistPresentations));
                 monitorSettings.Remove(nameof(AppSettings.MonitorProfiles));
                 monitorSettings.Remove(nameof(AppSettings.ActivePresetId));
                 monitorSettings.Remove(nameof(AppSettings.WelcomeShown));

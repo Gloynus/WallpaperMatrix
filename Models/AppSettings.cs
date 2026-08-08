@@ -69,6 +69,7 @@ public sealed class AppSettings
     public bool ImageMode { get; set; }
     public List<ImagePlaylist> ImagePlaylists { get; set; } = [new ImagePlaylist()];
     public string ActiveImagePlaylistId { get; set; } = "";
+    public List<PlaylistPresentation> PlaylistPresentations { get; set; } = [];
     public string OperatorPlaylistId { get; set; } = "";
     public string OperatorPlaylistName { get; set; } = "";
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
@@ -161,6 +162,9 @@ public sealed class AppSettings
         ImageMode = ImageMode,
         ImagePlaylists = ImagePlaylists.Select(playlist => playlist.Copy()).ToList(),
         ActiveImagePlaylistId = ActiveImagePlaylistId,
+        PlaylistPresentations = PlaylistPresentations
+            .Select(presentation => presentation.Copy())
+            .ToList(),
         OperatorPlaylistId = OperatorPlaylistId,
         OperatorPlaylistName = OperatorPlaylistName,
         ImageFolder = ImageFolder,
@@ -613,6 +617,21 @@ public sealed class AppSettings
         {
             ActiveImagePlaylistId = ImagePlaylists[0].Id;
         }
+        PlaylistPresentations ??= [];
+        HashSet<string> presentationIds =
+            new(StringComparer.OrdinalIgnoreCase);
+        PlaylistPresentations = PlaylistPresentations
+            .Where(presentation => presentation is not null)
+            .Select(presentation =>
+            {
+                presentation.Normalize();
+                return presentation.Copy();
+            })
+            .Where(presentation =>
+                !string.IsNullOrWhiteSpace(presentation.PlaylistId)
+                && presentationIds.Add(presentation.PlaylistId))
+            .Take(64)
+            .ToList();
         ImageFit = ImageFit is "Fill" or "Uniform" ? ImageFit : "Uniform";
         AttackIdleMinutes = Math.Clamp(AttackIdleMinutes, 1.0, 1440.0);
         AttackTransitionSeconds = Math.Clamp(
@@ -679,7 +698,59 @@ public sealed class AppSettings
         ?? ImagePlaylists[0];
 
     public ImagePlacement ActiveImagePlacement() =>
-        ActiveImagePlaylist().Placement;
+        ResolveImagePlacement(ActiveImagePlaylistId);
+
+    public ImagePlacement ResolveImagePlacement(string playlistId)
+    {
+        PlaylistPresentation? presentation = PlaylistPresentations
+            .FirstOrDefault(candidate => string.Equals(
+                candidate.PlaylistId,
+                playlistId,
+                StringComparison.OrdinalIgnoreCase));
+        if (presentation is not null)
+            return presentation.Placement;
+
+        ImagePlaylist? playlist = ImagePlaylists.FirstOrDefault(candidate =>
+            string.Equals(
+                candidate.Id,
+                playlistId,
+                StringComparison.OrdinalIgnoreCase));
+        return playlist?.Placement ?? new ImagePlacement();
+    }
+
+    public void SetImagePlacement(
+        string playlistId,
+        ImagePlacement placement)
+    {
+        ArgumentNullException.ThrowIfNull(placement);
+        PlaylistPresentation? presentation = PlaylistPresentations
+            .FirstOrDefault(candidate => string.Equals(
+                candidate.PlaylistId,
+                playlistId,
+                StringComparison.OrdinalIgnoreCase));
+        ImagePlaylist? playlist = ImagePlaylists.FirstOrDefault(candidate =>
+            string.Equals(
+                candidate.Id,
+                playlistId,
+                StringComparison.OrdinalIgnoreCase));
+        if (playlist is not null
+            && placement.Equivalent(playlist.Placement))
+        {
+            if (presentation is not null)
+                PlaylistPresentations.Remove(presentation);
+            return;
+        }
+        if (presentation is null)
+        {
+            PlaylistPresentations.Add(new PlaylistPresentation
+            {
+                PlaylistId = playlistId,
+                Placement = placement.Copy()
+            });
+            return;
+        }
+        presentation.Placement = placement.Copy();
+    }
 
     public string ImagePlaylistSignature()
     {

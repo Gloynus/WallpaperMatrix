@@ -80,6 +80,9 @@ internal static class AppSettingsComparer
         && left.ImageMode == right.ImageMode
         && left.ActiveImagePlaylistId == right.ActiveImagePlaylistId
         && PlaylistsEquivalent(left.ImagePlaylists, right.ImagePlaylists)
+        && PlaylistPresentationsEquivalent(
+            left.PlaylistPresentations,
+            right.PlaylistPresentations)
         && Near(left.ImageDurationSeconds, right.ImageDurationSeconds)
         && Near(left.ImageExpressiveness, right.ImageExpressiveness)
         && Near(left.ImageGlyphMatch, right.ImageGlyphMatch)
@@ -124,6 +127,8 @@ internal static class AppSettingsComparer
         AppSettings comparablePreset = preset.Copy();
         comparableSettings.ImagePlaylists = [];
         comparablePreset.ImagePlaylists = [];
+        comparableSettings.PlaylistPresentations = [];
+        comparablePreset.PlaylistPresentations = [];
         comparableSettings.ActivePresetId = "";
         comparablePreset.ActivePresetId = "";
         ClearMonitorPlaylists(comparableSettings);
@@ -186,6 +191,29 @@ internal static class AppSettingsComparer
         return true;
     }
 
+    private static bool PlaylistPresentationsEquivalent(
+        IReadOnlyList<PlaylistPresentation> left,
+        IReadOnlyList<PlaylistPresentation> right)
+    {
+        if (left.Count != right.Count)
+            return false;
+        foreach (PlaylistPresentation leftPresentation in left)
+        {
+            PlaylistPresentation? rightPresentation = right
+                .FirstOrDefault(candidate => string.Equals(
+                    candidate.PlaylistId,
+                    leftPresentation.PlaylistId,
+                    StringComparison.OrdinalIgnoreCase));
+            if (rightPresentation is null
+                || !leftPresentation.Placement.Equivalent(
+                    rightPresentation.Placement))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
     private static bool MonitorProfilesEquivalent(
         IReadOnlyList<MonitorProfile> left,
         IReadOnlyList<MonitorProfile> right)
@@ -238,6 +266,7 @@ internal static class AppSettingsComparer
         foreach (MonitorProfile profile in settings.MonitorProfiles)
         {
             profile.Settings.ImagePlaylists = [];
+            profile.Settings.PlaylistPresentations = [];
         }
     }
 

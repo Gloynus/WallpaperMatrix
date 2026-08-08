@@ -2830,13 +2830,12 @@ public partial class SettingsWindow : Window
             .Select(item => item.Copy())
             .ToList();
         RefreshPlaylistUi();
-        _source.ImagePlaylists = savedPlaylists
-            .Select(item => item.Copy())
-            .ToList();
-        AppSettings sourceDisplay = SelectedMonitorSettings(_source);
-        sourceDisplay.ActiveImagePlaylistId = _activePlaylistId;
-        SynchronizeLegacySettings(_source);
         AppSettings liveDraft = ReadSettingsFromControls();
+        // The catalog is shared, while active selections and presentation
+        // overrides belong to database channels. The diskette commits both
+        // parts atomically, including edits made on another monitor before
+        // returning to this playlist.
+        CopyPlaylistState(_source, liveDraft);
         _draftSettings = liveDraft.Copy();
         PlaylistsSaved?.Invoke(liveDraft);
         _playlistFileVersion = _playlistStore.FileVersion();
@@ -2875,11 +2874,16 @@ public partial class SettingsWindow : Window
         if (_loading)
             return;
 
-        ImagePlacement placement = CurrentPlaylist().Placement;
-        placement.FillHorizontal =
-            PlaylistFillHorizontalCheck.IsChecked == true;
-        placement.FillVertical =
-            PlaylistFillVerticalCheck.IsChecked == true;
+        AppSettings display = SelectedMonitorSettings(_draftSettings);
+        display.SetImagePlacement(
+            _activePlaylistId,
+            new ImagePlacement
+            {
+                FillHorizontal =
+                    PlaylistFillHorizontalCheck.IsChecked == true,
+                FillVertical =
+                    PlaylistFillVerticalCheck.IsChecked == true
+            });
         QueuePreview();
     }
 
@@ -2948,6 +2952,9 @@ public partial class SettingsWindow : Window
             .Select(playlist => playlist.Copy())
             .ToList();
         target.ActiveImagePlaylistId = source.ActiveImagePlaylistId;
+        target.PlaylistPresentations = source.PlaylistPresentations
+            .Select(presentation => presentation.Copy())
+            .ToList();
         foreach (MonitorProfile sourceProfile in source.MonitorProfiles)
         {
             MonitorProfile? targetProfile = MonitorTopology.Find(
@@ -2957,6 +2964,10 @@ public partial class SettingsWindow : Window
                 continue;
             targetProfile.Settings.ActiveImagePlaylistId =
                 sourceProfile.Settings.ActiveImagePlaylistId;
+            targetProfile.Settings.PlaylistPresentations =
+                sourceProfile.Settings.PlaylistPresentations
+                    .Select(presentation => presentation.Copy())
+                    .ToList();
         }
         target.Normalize();
     }
@@ -3534,10 +3545,12 @@ public partial class SettingsWindow : Window
         _loading = true;
         ImagePlaylist playlist = CurrentPlaylist();
         PlaylistNameTextBox.Text = playlist.Name;
+        ImagePlacement placement = SelectedMonitorSettings(_draftSettings)
+            .ResolveImagePlacement(playlist.Id);
         PlaylistFillHorizontalCheck.IsChecked =
-            playlist.Placement.FillHorizontal;
+            placement.FillHorizontal;
         PlaylistFillVerticalCheck.IsChecked =
-            playlist.Placement.FillVertical;
+            placement.FillVertical;
         RefreshPlaylistEntries();
         _loading = wasLoading;
     }
