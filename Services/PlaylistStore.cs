@@ -10,7 +10,7 @@ public sealed class PlaylistStore
 {
     private sealed class PlaylistDocument
     {
-        public int FormatVersion { get; set; } = 3;
+        public int FormatVersion { get; set; } = 4;
         public string ActivePlaylistId { get; set; } = "";
         public List<ImagePlaylist> Playlists { get; set; } = [];
         // Read only: version 2 stored a full catalog for every monitor.
@@ -74,6 +74,17 @@ public sealed class PlaylistStore
                     File.ReadAllText(_playlistsPath),
                     SettingsFileCodec.JsonOptions)
                 ?? new PlaylistDocument();
+            if (document.FormatVersion < 4)
+            {
+                ImagePlacement legacyPlacement =
+                    ImagePlacement.FromLegacy(settings.ImageFit);
+                foreach (ImagePlaylist playlist in document.Playlists
+                             .Concat((document.MonitorPlaylists ?? [])
+                                 .SelectMany(monitor => monitor.Playlists ?? [])))
+                {
+                    playlist.Placement = legacyPlacement.Copy();
+                }
+            }
             settings.ImagePlaylists = MergeCatalogs(
                 document.Playlists,
                 (document.MonitorPlaylists ?? [])

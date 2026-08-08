@@ -353,7 +353,6 @@ public partial class SettingsWindow : Window
         UpdateCollapsibleSections();
         EnsureFontOption(displaySettings.FontFamily);
         SelectByTag(FontCombo, displaySettings.FontFamily);
-        SelectByTag(ImageFitCombo, displaySettings.ImageFit);
         SelectByTag(ImagePreparationModeCombo, displaySettings.ImagePreparationMode);
         SelectByTag(ImageStructureModeCombo, displaySettings.ImageStructureMode);
         SelectByTag(FpsCombo, container.FramesPerSecond.ToString());
@@ -636,7 +635,6 @@ public partial class SettingsWindow : Window
             && virtualProfile.FlowMode != MonitorLinkMode.Disabled;
         updated.ActivePresetId = _selectedPresetId;
         display.FontFamily = SelectedTag(FontCombo, "MS Gothic");
-        display.ImageFit = SelectedTag(ImageFitCombo, "Uniform");
         updated.FramesPerSecond = int.TryParse(SelectedTag(FpsCombo, "24"), out int fps) ? fps : 24;
         display.Normalize(includeMonitorProfiles: false);
         SynchronizeLegacySettings(updated);
@@ -2870,6 +2868,21 @@ public partial class SettingsWindow : Window
         e.Handled = true;
     }
 
+    private void PlaylistPlacementCheck_Click(
+        object sender,
+        RoutedEventArgs e)
+    {
+        if (_loading)
+            return;
+
+        ImagePlacement placement = CurrentPlaylist().Placement;
+        placement.FillHorizontal =
+            PlaylistFillHorizontalCheck.IsChecked == true;
+        placement.FillVertical =
+            PlaylistFillVerticalCheck.IsChecked == true;
+        QueuePreview();
+    }
+
     private void PlaylistCombo_DropDownOpened(
         object? sender,
         EventArgs e)
@@ -3521,6 +3534,10 @@ public partial class SettingsWindow : Window
         _loading = true;
         ImagePlaylist playlist = CurrentPlaylist();
         PlaylistNameTextBox.Text = playlist.Name;
+        PlaylistFillHorizontalCheck.IsChecked =
+            playlist.Placement.FillHorizontal;
+        PlaylistFillVerticalCheck.IsChecked =
+            playlist.Placement.FillVertical;
         RefreshPlaylistEntries();
         _loading = wasLoading;
     }
@@ -3647,7 +3664,6 @@ public partial class SettingsWindow : Window
                 break;
             case "ImagePreparationMode": SelectByTag(ImagePreparationModeCombo, standard.ImagePreparationMode); break;
             case "ImageStructureMode": SelectByTag(ImageStructureModeCombo, standard.ImageStructureMode); break;
-            case "ImageFit": SelectByTag(ImageFitCombo, standard.ImageFit); break;
             case "FramesPerSecond": SelectByTag(FpsCombo, standard.FramesPerSecond.ToString()); break;
             case "ImageMode": ImageModeCheck.IsChecked = standard.ImageMode; break;
             case "StartWithWindows": AutostartCheck.IsChecked = standard.StartWithWindows; break;
@@ -3913,7 +3929,6 @@ public partial class SettingsWindow : Window
         ImageResistanceSlider.Value = standard.ImageResistance;
         ImageBrightnessSlider.Value = standard.ImageBrightness;
         ImageExpressivenessSlider.Value = standard.ImageExpressiveness;
-        SelectByTag(ImageFitCombo, standard.ImageFit);
     }
 
     private void ResetSystemBlock(AppSettings standard)

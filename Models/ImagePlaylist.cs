@@ -9,12 +9,14 @@ public sealed class ImagePlaylist
 {
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
     public string Name { get; set; } = "Основной плейлист";
+    public ImagePlacement Placement { get; set; } = new();
     public List<ImagePlaylistEntry> Entries { get; set; } = [];
 
     public ImagePlaylist Copy() => new()
     {
         Id = Id,
         Name = Name,
+        Placement = Placement?.Copy() ?? new ImagePlacement(),
         Entries = Entries.Select(entry => entry.Copy()).ToList()
     };
 
@@ -26,6 +28,7 @@ public sealed class ImagePlaylist
         Name = string.IsNullOrWhiteSpace(Name)
             ? "Плейлист без имени"
             : Name.Trim();
+        Placement ??= new ImagePlacement();
         Entries ??= [];
 
         HashSet<string> uniquePaths = new(StringComparer.OrdinalIgnoreCase);

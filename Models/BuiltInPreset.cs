@@ -265,7 +265,6 @@ public static class BuiltInPresetCatalog
         target.FramesPerSecond = source.FramesPerSecond;
         target.FontFamily = source.FontFamily;
         target.ImageMode = source.ImageMode;
-        target.ImageFit = source.ImageFit;
         target.ImageExpressiveness = source.ImageExpressiveness;
         target.ImageGlyphMatch = source.ImageGlyphMatch;
         target.ImageStability = source.ImageStability;

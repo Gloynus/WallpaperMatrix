@@ -140,7 +140,9 @@ internal sealed class MatrixSceneRenderer : IDisposable
             || Math.Abs(settings.GlyphWeight - _settings.GlyphWeight) > 0.001
             || Math.Abs(settings.HeadWeight - _settings.HeadWeight) > 0.01;
         bool gridChanged = gridGeometryChanged;
-        bool maskChanged = gridChanged || settings.ImageFit != _settings.ImageFit;
+        bool maskChanged = gridChanged
+            || !settings.ActiveImagePlacement().Equivalent(
+                _settings.ActiveImagePlacement());
         bool spawnCadenceChanged =
             Math.Abs(settings.InterceptionRate - _settings.InterceptionRate) > 0.001
             || Math.Abs(settings.Density - _settings.Density) > 0.001
@@ -1749,7 +1751,7 @@ internal sealed class MatrixSceneRenderer : IDisposable
             ProjectedImageMap projected = BuildProjectedImageMap(
                 _image,
                 _imageProjection,
-                _settings.ImageFit,
+                _settings.ActiveImagePlacement(),
                 columnStart: 0,
                 rowStart: 0,
                 _columns,
@@ -1767,7 +1769,7 @@ internal sealed class MatrixSceneRenderer : IDisposable
     private ProjectedImageMap BuildProjectedImageMap(
         PreparedImage image,
         MatrixImageProjection projection,
-        string imageFit,
+        ImagePlacement placement,
         int columnStart,
         int rowStart,
         int columnCount,
@@ -1781,9 +1783,7 @@ internal sealed class MatrixSceneRenderer : IDisposable
         System.Drawing.Rectangle destination = projection.DestinationBounds;
         double scaleX = canvasWidth / (double)sourceWidth;
         double scaleY = canvasHeight / (double)sourceHeight;
-        double scale = imageFit == "Fill"
-            ? Math.Max(scaleX, scaleY)
-            : Math.Min(scaleX, scaleY);
+        double scale = placement.ResolveScale(scaleX, scaleY);
         double drawnWidth = sourceWidth * scale;
         double drawnHeight = sourceHeight * scale;
         double offsetX = (canvasWidth - drawnWidth) * 0.5;
@@ -2111,10 +2111,8 @@ internal sealed class MatrixSceneRenderer : IDisposable
 
         public void UpdateSettings(AppSettings settings)
         {
-            bool maskChanged = !string.Equals(
-                settings.ImageFit,
-                _settings.ImageFit,
-                StringComparison.Ordinal);
+            bool maskChanged = !settings.ActiveImagePlacement().Equivalent(
+                _settings.ActiveImagePlacement());
             _settings = settings.Copy();
             if (maskChanged)
                 _maskDirty = true;
@@ -2239,7 +2237,7 @@ internal sealed class MatrixSceneRenderer : IDisposable
                     _source.BuildProjectedImageMap(
                         _image,
                         _projection,
-                        _settings.ImageFit,
+                        _settings.ActiveImagePlacement(),
                         _columnStart,
                         _rowStart,
                         _columnCount,

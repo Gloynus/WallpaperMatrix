@@ -94,7 +94,6 @@ internal static class AppSettingsComparer
         && Near(left.ImagePaletteAdaptation, right.ImagePaletteAdaptation)
         && Near(left.ImageToneCalmness, right.ImageToneCalmness)
         && left.ImageStructureMode == right.ImageStructureMode
-        && left.ImageFit == right.ImageFit
         && left.StartWithWindows == right.StartWithWindows
         && left.PauseDuringFullscreenApps == right.PauseDuringFullscreenApps
         && left.AttackSystemEnabled == right.AttackSystemEnabled
@@ -161,6 +160,8 @@ internal static class AppSettingsComparer
                     leftPlaylist.Name,
                     rightPlaylist.Name,
                     StringComparison.Ordinal)
+                || !leftPlaylist.Placement.Equivalent(
+                    rightPlaylist.Placement)
                 || leftPlaylist.Entries.Count != rightPlaylist.Entries.Count)
             {
                 return false;

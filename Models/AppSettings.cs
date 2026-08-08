@@ -76,6 +76,8 @@ public sealed class AppSettings
     public double ImageDurationSeconds { get; set; } = 30.0;
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public double ImageIntensity { get; set; }
+    // Retained only to migrate playlist documents created before placement
+    // became an intrinsic property of each playlist.
     public string ImageFit { get; set; } = "Fill";
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public bool AdaptiveImageGlyphs { get; set; }
@@ -675,6 +677,9 @@ public sealed class AppSettings
                 ActiveImagePlaylistId,
                 StringComparison.OrdinalIgnoreCase))
         ?? ImagePlaylists[0];
+
+    public ImagePlacement ActiveImagePlacement() =>
+        ActiveImagePlaylist().Placement;
 
     public string ImagePlaylistSignature()
     {

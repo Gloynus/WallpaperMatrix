@@ -2189,9 +2189,20 @@
                                             <ColumnDefinition/>
                                             <ColumnDefinition Width="Auto"/>
                                         </Grid.ColumnDefinitions>
-                                        <TextBlock Text="или перетащите файлы и папки в список"
-                                                   Foreground="{StaticResource MutedBrush}"
-                                                   VerticalAlignment="Center" Margin="2,0,8,0"/>
+                                        <StackPanel Orientation="Horizontal"
+                                                    VerticalAlignment="Center">
+                                            <TextBlock Text="Заполнить:"
+                                                       Foreground="{StaticResource MutedBrush}"
+                                                       VerticalAlignment="Center"/>
+                                            <CheckBox x:Name="PlaylistFillHorizontalCheck"
+                                                      Content="по горизонтали"
+                                                      Margin="10,0,0,0"
+                                                      Click="PlaylistPlacementCheck_Click"/>
+                                            <CheckBox x:Name="PlaylistFillVerticalCheck"
+                                                      Content="по вертикали"
+                                                      Margin="12,0,0,0"
+                                                      Click="PlaylistPlacementCheck_Click"/>
+                                        </StackPanel>
                                         <StackPanel Grid.Column="1" Orientation="Horizontal">
                                             <Button Content="＋ ▤" Style="{StaticResource QuickIconButton}"
                                                     FontFamily="Segoe UI Symbol" FontSize="13"
@@ -2686,21 +2697,6 @@
                                     </StackPanel>
                                 </StackPanel>
                             </Grid>
-                            <StackPanel Margin="0,6,0,0">
-                                <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
-                                    <TextBlock Text="Масштаб образа"/>
-                                    <Button Style="{StaticResource HelpButton}"
-                                            ToolTip="Определяет вписывание изображения целиком или заполнение экрана с обрезкой."/>
-                                </StackPanel>
-                                <Grid>
-                                    <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                                    <ComboBox x:Name="ImageFitCombo">
-                                        <ComboBoxItem Content="Вписать" Tag="Uniform"/>
-                                        <ComboBoxItem Content="Заполнить" Tag="Fill"/>
-                                    </ComboBox>
-                                    <Button Grid.Column="1" Style="{StaticResource ResetParameterButton}" Tag="ImageFit"/>
-                                </Grid>
-                            </StackPanel>
                         </StackPanel>
                     </Border>
                             </StackPanel>

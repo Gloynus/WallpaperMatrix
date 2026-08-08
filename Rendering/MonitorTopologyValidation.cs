@@ -8,6 +8,8 @@ internal static class MonitorTopologyValidation
 {
     public static void Validate()
     {
+        ValidateImagePlacement();
+
         MonitorDescriptor primary = new(
             "DISPLAY-A",
             @"\\.\DISPLAY1",
@@ -199,6 +201,38 @@ internal static class MonitorTopologyValidation
         ValidatePortablePresets(primary, right, upper);
     }
 
+    private static void ValidateImagePlacement()
+    {
+        const double scaleX = 4.0;
+        const double scaleY = 2.0;
+        Require(
+            Math.Abs(new ImagePlacement
+            {
+                FillHorizontal = false,
+                FillVertical = false
+            }.ResolveScale(scaleX, scaleY) - 2.0) < 0.0001,
+            "Режим вписывания изменил пропорции образа.");
+        Require(
+            Math.Abs(new ImagePlacement
+            {
+                FillHorizontal = true,
+                FillVertical = false
+            }.ResolveScale(scaleX, scaleY) - 4.0) < 0.0001,
+            "Горизонтальное заполнение не привязано к ширине.");
+        Require(
+            Math.Abs(new ImagePlacement
+            {
+                FillHorizontal = false,
+                FillVertical = true
+            }.ResolveScale(scaleX, scaleY) - 2.0) < 0.0001,
+            "Вертикальное заполнение не привязано к высоте.");
+        Require(
+            Math.Abs(new ImagePlacement().ResolveScale(
+                scaleX,
+                scaleY) - 4.0) < 0.0001,
+            "Заполнение обеих осей не покрывает область потока.");
+    }
+
     private static void ValidateVirtualDeviceRouting(
         MonitorDescriptor primary,
         MonitorDescriptor right)
@@ -338,11 +372,6 @@ internal static class MonitorTopologyValidation
             portrait.Id,
             MonitorLinkMode.Isolated,
             "");
-        MonitorProfile targetProfile = MonitorTopology.Find(
-            settings.MonitorProfiles,
-            portrait.Id)!;
-        targetProfile.Settings.ImageFit = "Uniform";
-
         MonitorOutputPlan plan =
             MonitorOutputPlan.Create(settings, monitors);
         MonitorScenePlan scene = plan.Scenes.Single(item =>

@@ -460,7 +460,6 @@ internal static class MonitorSettingsComposer
         target.OperatorPlaylistId = source.OperatorPlaylistId;
         target.OperatorPlaylistName = source.OperatorPlaylistName;
         target.ImageDurationSeconds = source.ImageDurationSeconds;
-        target.ImageFit = source.ImageFit;
         target.ImageExpressiveness = source.ImageExpressiveness;
         target.ImageGlyphMatch = source.ImageGlyphMatch;
         target.ImageStability = source.ImageStability;
