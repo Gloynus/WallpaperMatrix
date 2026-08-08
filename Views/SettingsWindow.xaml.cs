@@ -331,7 +331,7 @@ public partial class SettingsWindow : Window
         _curveAdjustments[FlowCurveProfiles.MemoryKind] =
             displaySettings.MemoryCurveAdjustment.Copy();
         ImageModeCheck.IsChecked = displaySettings.ImageMode;
-        _playlists = displaySettings.ImagePlaylists
+        _playlists = _draftSettings.ImagePlaylists
             .Select(playlist => playlist.Copy())
             .ToList();
         _activePlaylistId = displaySettings.ActiveImagePlaylistId;
@@ -613,7 +613,7 @@ public partial class SettingsWindow : Window
         display.ImageToneCalmness = ImageToneCalmnessSlider.Value;
         display.ImageStructureMode = SelectedTag(ImageStructureModeCombo, "Tonal");
         display.ImageMode = ImageModeCheck.IsChecked == true;
-        display.ImagePlaylists = _playlists
+        updated.ImagePlaylists = _playlists
             .Select(playlist => playlist.Copy())
             .ToList();
         display.ActiveImagePlaylistId = _activePlaylistId;
@@ -2832,10 +2832,10 @@ public partial class SettingsWindow : Window
             .Select(item => item.Copy())
             .ToList();
         RefreshPlaylistUi();
-        AppSettings sourceDisplay = SelectedMonitorSettings(_source);
-        sourceDisplay.ImagePlaylists = savedPlaylists
+        _source.ImagePlaylists = savedPlaylists
             .Select(item => item.Copy())
             .ToList();
+        AppSettings sourceDisplay = SelectedMonitorSettings(_source);
         sourceDisplay.ActiveImagePlaylistId = _activePlaylistId;
         SynchronizeLegacySettings(_source);
         AppSettings liveDraft = ReadSettingsFromControls();
@@ -2914,7 +2914,7 @@ public partial class SettingsWindow : Window
         _draftSettings = reloaded.Copy();
 
         AppSettings display = SelectedMonitorSettings(_draftSettings);
-        _playlists = display.ImagePlaylists
+        _playlists = _draftSettings.ImagePlaylists
             .Select(playlist => playlist.Copy())
             .ToList();
         _activePlaylistId = display.ActiveImagePlaylistId;
@@ -2942,10 +2942,6 @@ public partial class SettingsWindow : Window
                 sourceProfile.MonitorId);
             if (targetProfile is null)
                 continue;
-            targetProfile.Settings.ImagePlaylists =
-                sourceProfile.Settings.ImagePlaylists
-                    .Select(playlist => playlist.Copy())
-                    .ToList();
             targetProfile.Settings.ActiveImagePlaylistId =
                 sourceProfile.Settings.ActiveImagePlaylistId;
         }

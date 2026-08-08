@@ -662,6 +662,10 @@ public sealed class AppSettings
         {
             MonitorProfiles = [];
         }
+
+        // The rows themselves belong to the operator, not to an output
+        // device. Each profile keeps its own active playlist id only.
+        PlaylistCatalog.Synchronize(this);
     }
 
     public ImagePlaylist ActiveImagePlaylist() =>

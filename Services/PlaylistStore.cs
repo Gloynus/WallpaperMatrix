@@ -1,6 +1,7 @@
 using System.IO;
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using WallpaperMatrix.Models;
 
 namespace WallpaperMatrix.Services;
@@ -9,10 +10,13 @@ public sealed class PlaylistStore
 {
     private sealed class PlaylistDocument
     {
-        public int FormatVersion { get; set; } = 2;
+        public int FormatVersion { get; set; } = 3;
         public string ActivePlaylistId { get; set; } = "";
         public List<ImagePlaylist> Playlists { get; set; } = [];
-        public List<MonitorPlaylistDocument> MonitorPlaylists { get; set; } = [];
+        // Read only: version 2 stored a full catalog for every monitor.
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public List<MonitorPlaylistDocument>? MonitorPlaylists { get; set; }
+        public List<MonitorPlaylistSelectionDocument> MonitorSelections { get; set; } = [];
     }
 
     private sealed class MonitorPlaylistDocument
@@ -20,6 +24,12 @@ public sealed class PlaylistStore
         public string MonitorId { get; set; } = "";
         public string ActivePlaylistId { get; set; } = "";
         public List<ImagePlaylist> Playlists { get; set; } = [];
+    }
+
+    private sealed class MonitorPlaylistSelectionDocument
+    {
+        public string MonitorId { get; set; } = "";
+        public string ActivePlaylistId { get; set; } = "";
     }
 
     private readonly string _playlistsPath;
@@ -64,38 +74,28 @@ public sealed class PlaylistStore
                     File.ReadAllText(_playlistsPath),
                     SettingsFileCodec.JsonOptions)
                 ?? new PlaylistDocument();
-            settings.ImagePlaylists = document.Playlists
-                .Select(playlist => playlist.Copy())
-                .ToList();
+            settings.ImagePlaylists = MergeCatalogs(
+                document.Playlists,
+                (document.MonitorPlaylists ?? [])
+                    .SelectMany(monitor => monitor.Playlists ?? []));
             settings.ActiveImagePlaylistId = document.ActivePlaylistId;
-            if (document.MonitorPlaylists is null
-                || document.MonitorPlaylists.Count == 0)
+            foreach (MonitorProfile profile in settings.MonitorProfiles)
             {
-                foreach (MonitorProfile profile in settings.MonitorProfiles)
-                {
-                    profile.Settings.ImagePlaylists =
-                        settings.ImagePlaylists
-                            .Select(playlist => playlist.Copy())
-                            .ToList();
-                    profile.Settings.ActiveImagePlaylistId =
-                        settings.ActiveImagePlaylistId;
-                }
-            }
-            foreach (MonitorPlaylistDocument monitorDocument
-                     in document.MonitorPlaylists ?? [])
-            {
-                MonitorProfile? profile = MonitorTopology.Find(
-                    settings.MonitorProfiles,
-                    monitorDocument.MonitorId);
-                if (profile is null)
-                    continue;
-                profile.Settings.ImagePlaylists =
-                    (monitorDocument.Playlists ?? [])
-                        .Select(playlist => playlist.Copy())
-                        .ToList();
-                profile.Settings.ActiveImagePlaylistId =
-                    monitorDocument.ActivePlaylistId;
-                profile.Settings.Normalize(includeMonitorProfiles: false);
+                string monitorId = profile.MonitorId;
+                string activeId = document.MonitorSelections
+                    .FirstOrDefault(selection => string.Equals(
+                        selection.MonitorId,
+                        monitorId,
+                        StringComparison.OrdinalIgnoreCase))
+                    ?.ActivePlaylistId
+                    ?? (document.MonitorPlaylists ?? [])
+                        .FirstOrDefault(selection => string.Equals(
+                            selection.MonitorId,
+                            monitorId,
+                            StringComparison.OrdinalIgnoreCase))
+                        ?.ActivePlaylistId
+                    ?? settings.ActiveImagePlaylistId;
+                profile.Settings.ActiveImagePlaylistId = activeId;
             }
             settings.Normalize();
         }
@@ -123,15 +123,11 @@ public sealed class PlaylistStore
                 Playlists = normalized.ImagePlaylists
                     .Select(playlist => playlist.Copy())
                     .ToList(),
-                MonitorPlaylists = normalized.MonitorProfiles
-                    .Select(profile => new MonitorPlaylistDocument
+                MonitorSelections = normalized.MonitorProfiles
+                    .Select(profile => new MonitorPlaylistSelectionDocument
                     {
                         MonitorId = profile.MonitorId,
-                        ActivePlaylistId =
-                            profile.Settings.ActiveImagePlaylistId,
-                        Playlists = profile.Settings.ImagePlaylists
-                            .Select(playlist => playlist.Copy())
-                            .ToList()
+                        ActivePlaylistId = profile.Settings.ActiveImagePlaylistId
                     })
                     .ToList()
             };
@@ -147,5 +143,22 @@ public sealed class PlaylistStore
                 "Не удалось атомарно сохранить файл плейлистов.",
                 exception);
         }
+    }
+
+    private static List<ImagePlaylist> MergeCatalogs(
+        IEnumerable<ImagePlaylist> primary,
+        IEnumerable<ImagePlaylist> legacy)
+    {
+        HashSet<string> ids = new(StringComparer.OrdinalIgnoreCase);
+        return primary
+            .Concat(legacy)
+            .Where(playlist => playlist is not null)
+            .Select(playlist => playlist.Copy())
+            .Where(playlist =>
+            {
+                playlist.Normalize();
+                return ids.Add(playlist.Id);
+            })
+            .ToList();
     }
 }

@@ -596,13 +596,10 @@ public partial class App : System.Windows.Application
                 sourceProfile.MonitorId);
             if (targetProfile is null)
                 continue;
-            targetProfile.Settings.ImagePlaylists =
-                sourceProfile.Settings.ImagePlaylists
-                    .Select(playlist => playlist.Copy())
-                    .ToList();
             targetProfile.Settings.ActiveImagePlaylistId =
                 sourceProfile.Settings.ActiveImagePlaylistId;
         }
+        target.Normalize();
     }
 
     private void PreviewImage(
