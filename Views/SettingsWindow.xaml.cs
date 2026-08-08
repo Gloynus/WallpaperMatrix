@@ -670,8 +670,17 @@ public partial class SettingsWindow : Window
             ?? settings.MonitorProfiles.First();
     }
 
-    private AppSettings SelectedMonitorSettings(AppSettings settings) =>
-        SelectedMonitorProfile(settings).Settings;
+    private AppSettings SelectedMonitorSettings(AppSettings settings)
+    {
+        // XAML initializes playlist controls before the window receives the
+        // physical monitor snapshot. At that stage the root settings are the
+        // canonical primary projection and are the only valid editing source.
+        // Once LoadSettings captures the topology, all calls resolve to the
+        // selected monitor profile as usual.
+        return _monitors.Count == 0
+            ? settings
+            : SelectedMonitorProfile(settings).Settings;
+    }
 
     private void RefreshMonitorTopologyUi()
     {
