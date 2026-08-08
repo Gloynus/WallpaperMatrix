@@ -13,7 +13,14 @@ namespace WallpaperMatrix;
 
 public partial class App : System.Windows.Application
 {
+    private const string SingleInstanceMutexName =
+        "Local\\WallpaperMatrix.SingleInstance";
+    private const string ShowSettingsSignalName =
+        "Local\\WallpaperMatrix.ShowSettings";
+
     private Mutex? _singleInstanceMutex;
+    private EventWaitHandle? _showSettingsSignal;
+    private RegisteredWaitHandle? _showSettingsRegistration;
     private SettingsStore? _settingsStore;
     private PlaylistStore? _playlistStore;
     private AppSettings _settings = new();
@@ -125,14 +132,21 @@ public partial class App : System.Windows.Application
         startInBackground |= validateVirtualOutput;
         startInBackground |= validateRecovery;
 
-        _singleInstanceMutex = new Mutex(true, "Local\\WallpaperMatrix.SingleInstance", out bool isFirstInstance);
+        _showSettingsSignal = new EventWaitHandle(
+            false,
+            EventResetMode.AutoReset,
+            ShowSettingsSignalName);
+        _singleInstanceMutex = new Mutex(
+            true,
+            SingleInstanceMutexName,
+            out bool isFirstInstance);
         if (!isFirstInstance)
         {
-            System.Windows.MessageBox.Show(
-                "Wallpaper Matrix уже работает. Ищите зелёный значок в области уведомлений.",
-                "Wallpaper Matrix",
-                MessageBoxButton.OK,
-                MessageBoxImage.Information);
+            _showSettingsSignal.Set();
+            DiagnosticLog.Write(
+                "Повторный запуск передал работающему экземпляру команду открытия панели.");
+            _showSettingsSignal.Dispose();
+            _showSettingsSignal = null;
             Shutdown();
             return;
         }
@@ -206,6 +220,7 @@ public partial class App : System.Windows.Application
             _settings,
             _wallpaperManager.IsManuallyPaused,
             _wallpaperManager.IsPausedByFullscreenApp);
+        StartSingleInstanceCommandListener();
 
         TryApplyAutostart(
             _settings.StartWithWindows,
@@ -540,6 +555,33 @@ public partial class App : System.Windows.Application
         DiagnosticLog.Write("Панель оператора показана.");
     }
 
+    private void StartSingleInstanceCommandListener()
+    {
+        if (_showSettingsSignal is null
+            || _showSettingsRegistration is not null)
+        {
+            return;
+        }
+
+        _showSettingsRegistration = ThreadPool.RegisterWaitForSingleObject(
+            _showSettingsSignal,
+            static (state, timedOut) =>
+            {
+                if (timedOut || state is not App app)
+                    return;
+                app.Dispatcher.BeginInvoke(
+                    DispatcherPriority.Normal,
+                    () =>
+                    {
+                        if (!app._isExiting)
+                            app.ShowSettings();
+                    });
+            },
+            this,
+            Timeout.Infinite,
+            executeOnlyOnce: false);
+    }
+
     private void ApplySettings(AppSettings updated)
     {
         _settings = updated.Copy();
@@ -779,6 +821,10 @@ public partial class App : System.Windows.Application
         _featureValidationTimer?.Stop();
         _settingsWindow?.ForceClose();
         _tray?.Dispose();
+        _showSettingsRegistration?.Unregister(null);
+        _showSettingsRegistration = null;
+        _showSettingsSignal?.Dispose();
+        _showSettingsSignal = null;
         if (_wallpaperManager is not null)
         {
             _wallpaperManager.PauseStateChanged -= OnWallpaperPauseStateChanged;
