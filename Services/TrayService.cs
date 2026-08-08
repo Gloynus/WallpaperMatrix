@@ -9,15 +9,15 @@ public sealed class TrayService : IDisposable
     private readonly System.Windows.Forms.NotifyIcon _notifyIcon;
     private readonly System.Windows.Forms.ToolStripMenuItem _pauseItem;
     private readonly System.Windows.Forms.ToolStripMenuItem _imageModeItem;
-    private readonly System.Windows.Forms.ToolStripMenuItem _playlistsItem;
-    private readonly Action<string> _selectPlaylist;
+    private readonly System.Windows.Forms.ToolStripMenuItem _databasesItem;
+    private readonly Action<string, string> _selectPlaylist;
     private readonly Icon _icon;
 
     public TrayService(
         Action showSettings,
         Action togglePaused,
         Action toggleImageMode,
-        Action<string> selectPlaylist,
+        Action<string, string> selectPlaylist,
         Action nextImage,
         Action refreshDesktop,
         Action exit)
@@ -29,10 +29,10 @@ public sealed class TrayService : IDisposable
         menu.Items.Add(new System.Windows.Forms.ToolStripSeparator());
         _pauseItem = new System.Windows.Forms.ToolStripMenuItem("Остановить и скрыть поток", null, (_, _) => RunOnUi(togglePaused));
         _imageModeItem = new System.Windows.Forms.ToolStripMenuItem("Проявлять изображения", null, (_, _) => RunOnUi(toggleImageMode));
-        _playlistsItem = new System.Windows.Forms.ToolStripMenuItem("Плейлист");
+        _databasesItem = new System.Windows.Forms.ToolStripMenuItem("База данных");
         menu.Items.Add(_pauseItem);
         menu.Items.Add(_imageModeItem);
-        menu.Items.Add(_playlistsItem);
+        menu.Items.Add(_databasesItem);
         menu.Items.Add("Следующее изображение", null, (_, _) => RunOnUi(nextImage));
         menu.Items.Add(new System.Windows.Forms.ToolStripSeparator());
         menu.Items.Add("Переподключить к рабочему столу", null, (_, _) => RunOnUi(refreshDesktop));
@@ -61,43 +61,92 @@ public sealed class TrayService : IDisposable
                 ? "Возобновить поток"
                 : "Остановить и скрыть поток";
         _imageModeItem.Checked = settings.ImageMode;
-        RebuildPlaylistMenu(settings);
+        RebuildDatabaseMenu(settings);
     }
 
-    private void RebuildPlaylistMenu(AppSettings settings)
+    private void RebuildDatabaseMenu(AppSettings settings)
     {
-        _playlistsItem.DropDownItems.Clear();
-        IReadOnlyList<ImagePlaylist> playlists = settings.ImagePlaylists
-            .OrderBy(
-                playlist => playlist.Name,
-                StringComparer.CurrentCultureIgnoreCase)
+        _databasesItem.DropDownItems.Clear();
+        IReadOnlyList<MonitorDescriptor> monitors =
+            OutputDeviceCatalog.Capture(settings);
+        AppSettings topology = settings.Copy();
+        MonitorTopology.EnsureProfiles(topology, monitors);
+        IReadOnlyList<MonitorRoute> routes = MonitorTopology.Resolve(
+            topology.MonitorProfiles,
+            monitors,
+            MonitorRouteDomain.Database);
+        IReadOnlyList<string> databaseRoots = routes
+            .Where(route => route.Mode != MonitorLinkMode.Disabled)
+            .Select(route => route.RootMonitorId)
+            .Where(root => !string.IsNullOrWhiteSpace(root))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(root =>
+                monitors.FirstOrDefault(monitor => string.Equals(
+                    monitor.Id,
+                    root,
+                    StringComparison.OrdinalIgnoreCase))?.DisplayNumber
+                ?? int.MaxValue)
             .ToArray();
-        if (playlists.Count == 0)
+        if (databaseRoots.Count == 0)
         {
-            _playlistsItem.DropDownItems.Add(new System.Windows.Forms.ToolStripMenuItem(
-                "Плейлисты отсутствуют")
-            {
-                Enabled = false
-            });
-            _playlistsItem.Enabled = false;
+            _databasesItem.DropDownItems.Add(
+                new System.Windows.Forms.ToolStripMenuItem(
+                    "Базы данных отключены")
+                {
+                    Enabled = false
+                });
+            _databasesItem.Enabled = false;
             return;
         }
 
-        _playlistsItem.Enabled = true;
-        foreach (ImagePlaylist playlist in playlists)
+        _databasesItem.Enabled = true;
+        foreach (string rootId in databaseRoots)
         {
-            string playlistId = playlist.Id;
-            System.Windows.Forms.ToolStripMenuItem item = new(playlist.Name)
+            MonitorDescriptor? monitor = monitors.FirstOrDefault(candidate =>
+                string.Equals(
+                    candidate.Id,
+                    rootId,
+                    StringComparison.OrdinalIgnoreCase));
+            MonitorProfile? profile = MonitorTopology.Find(
+                topology.MonitorProfiles,
+                rootId);
+            AppSettings databaseSettings = profile?.Settings ?? topology;
+            System.Windows.Forms.ToolStripMenuItem databaseItem = new(
+                monitor is null
+                    ? rootId
+                    : monitor.IsVirtual
+                        ? monitor.FriendlyName
+                        : $"{monitor.FriendlyName} [{monitor.DisplayNumber}]");
+            IReadOnlyList<ImagePlaylist> playlists = databaseSettings.ImagePlaylists
+                .OrderBy(
+                    playlist => playlist.Name,
+                    StringComparer.CurrentCultureIgnoreCase)
+                .ToArray();
+            if (playlists.Count == 0)
             {
-                Checked = string.Equals(
-                    playlist.Id,
-                    settings.ActiveImagePlaylistId,
-                    StringComparison.OrdinalIgnoreCase),
-                ToolTipText = $"Изображений: {playlist.Entries.Count}"
-            };
-            item.Click += (_, _) => RunOnUi(
-                () => _selectPlaylist(playlistId));
-            _playlistsItem.DropDownItems.Add(item);
+                databaseItem.DropDownItems.Add(
+                    new System.Windows.Forms.ToolStripMenuItem(
+                        "Плейлисты отсутствуют")
+                    {
+                        Enabled = false
+                    });
+            }
+            foreach (ImagePlaylist playlist in playlists)
+            {
+                string playlistId = playlist.Id;
+                System.Windows.Forms.ToolStripMenuItem item = new(playlist.Name)
+                {
+                    Checked = string.Equals(
+                        playlist.Id,
+                        databaseSettings.ActiveImagePlaylistId,
+                        StringComparison.OrdinalIgnoreCase),
+                    ToolTipText = $"Изображений: {playlist.Entries.Count}"
+                };
+                item.Click += (_, _) => RunOnUi(
+                    () => _selectPlaylist(rootId, playlistId));
+                databaseItem.DropDownItems.Add(item);
+            }
+            _databasesItem.DropDownItems.Add(databaseItem);
         }
     }
 

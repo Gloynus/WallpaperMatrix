@@ -311,8 +311,9 @@ internal sealed class VirtualOutputWindow : IDisposable
             "WallpaperMatrix.VirtualOutput.1";
         private const uint WindowStyle =
             0x00C00000 | 0x00080000 | 0x00020000;
-        private const uint ExtendedStyle =
-            0x00040000 | 0x00200000;
+        // Keep the top-level window redirected by DWM so OBS Window Capture
+        // and Windows Graphics Capture can see the DirectComposition surface.
+        private const uint ExtendedStyle = 0x00040000;
         private const int ArrowCursor = 32512;
         private const int BlackBrush = 4;
         private const int ClassAlreadyExists = 1410;

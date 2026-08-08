@@ -24,7 +24,8 @@ internal sealed record MatrixScenePresentation(
 internal sealed record AttackFrameSnapshot(
     SharedMatrixScene PrimaryScene,
     IReadOnlyList<MatrixScenePresentation> Presentations,
-    long LatestStreamId);
+    long LatestStreamId,
+    int CapturedInterfaceSamples);
 
 /// <summary>
 /// Draws the shared glyph scene with Direct3D 11 and presents it through a
@@ -36,6 +37,9 @@ internal sealed class Direct3D11Presenter : IDisposable
     private const uint InstanceStride = 32;
     private const uint QuadStride = 8;
     private const int BackBufferCount = 2;
+    private const int DxgiErrorAccessLost = unchecked((int)0x887A0026);
+    private const int DxgiErrorWaitTimeout = unchecked((int)0x887A0027);
+    private const int DesktopCaptureWarmupFrames = 2;
 
     private static readonly FeatureLevel[] RequiredFeatureLevels =
     [
@@ -45,6 +49,10 @@ internal sealed class Direct3D11Presenter : IDisposable
         FeatureLevel.Level_10_0
     ];
 
+    private static readonly Lazy<ShaderBytecodes> CompiledShaders = new(
+        CompileShaders,
+        LazyThreadSafetyMode.ExecutionAndPublication);
+
     private readonly SharedMatrixScene _defaultScene;
     private readonly ID3D11Device _device;
     private readonly ID3D11DeviceContext _context;
@@ -52,18 +60,23 @@ internal sealed class Direct3D11Presenter : IDisposable
     private readonly IDCompositionDevice _compositionDevice;
     private readonly IDCompositionTarget _compositionTarget;
     private readonly IDCompositionVisual _compositionVisual;
+    private readonly ID3D11Texture2D _backBufferTexture;
     private readonly ID3D11RenderTargetView _renderTargetView;
     private readonly ID3D11VertexShader _vertexShader;
     private readonly ID3D11PixelShader _pixelShader;
     private readonly ID3D11InputLayout _inputLayout;
     private readonly ID3D11VertexShader _transitionVertexShader;
     private readonly ID3D11PixelShader _transitionPixelShader;
+    private readonly ID3D11PixelShader _desktopDifferencePixelShader;
     private readonly ID3D11InputLayout _transitionInputLayout;
     private readonly ID3D11Buffer _quadBuffer;
     private readonly ID3D11Buffer _constantBuffer;
     private readonly ID3D11Buffer _transitionConstantBuffer;
+    private readonly ID3D11Buffer _desktopDifferenceConstantBuffer;
     private readonly ID3D11SamplerState _sampler;
+    private readonly ID3D11SamplerState _maskSampler;
     private readonly ID3D11BlendState _blendState;
+    private readonly ID3D11BlendState _captureBlendState;
     private readonly bool _transparentSurface;
     private readonly Dictionary<SharedMatrixScene, SceneGpuResources>
         _sceneResources =
@@ -73,15 +86,19 @@ internal sealed class Direct3D11Presenter : IDisposable
     private float _surfaceGlyphOpacity = 1;
     private float _attackRevealProgress;
     private float _attackVeilOpacity = 1;
-    private float _attackCaptureStrength;
     private float _attackStreamCutoff;
-    private float _attackCaptureStreamCutoff = float.MaxValue;
     private float _attackModeEnabled;
     private float _attackHaloFactor = 1;
     private int _currentTargetWidth = 1;
     private int _currentTargetHeight = 1;
     private ID3D11Texture2D? _attackInterfaceTexture;
     private ID3D11ShaderResourceView? _attackInterfaceView;
+    private ID3D11Texture2D? _captureReferenceTexture;
+    private ID3D11ShaderResourceView? _captureReferenceView;
+    private readonly List<DesktopDuplicationSource> _desktopDuplications = [];
+    private string _desktopDuplicationTopology = string.Empty;
+    private int _desktopCaptureWarmupCursor;
+    private bool _desktopCapturePrepared;
     private long _lastSlowPresentReportTimestamp;
     private bool _disposed;
 
@@ -149,22 +166,16 @@ internal sealed class Direct3D11Presenter : IDisposable
         _compositionTarget.SetRoot(_compositionVisual).CheckError();
         _compositionDevice.Commit().CheckError();
 
-        using ID3D11Texture2D backBuffer =
+        _backBufferTexture =
             _swapChain.GetBuffer<ID3D11Texture2D>(0);
-        _renderTargetView = _device.CreateRenderTargetView(backBuffer);
+        _renderTargetView = _device.CreateRenderTargetView(
+            _backBufferTexture);
 
-        ReadOnlyMemory<byte> vertexBytecode = Compiler.Compile(
-            ShaderSource,
-            "VSMain",
-            "WallpaperMatrix.Direct3D11.hlsl",
-            "vs_4_0",
-            ShaderFlags.OptimizationLevel3);
-        ReadOnlyMemory<byte> pixelBytecode = Compiler.Compile(
-            ShaderSource,
-            "PSMain",
-            "WallpaperMatrix.Direct3D11.hlsl",
-            "ps_4_0",
-            ShaderFlags.OptimizationLevel3);
+        ShaderBytecodes shaderBytecodes = CompiledShaders.Value;
+        ReadOnlyMemory<byte> vertexBytecode =
+            shaderBytecodes.MatrixVertex;
+        ReadOnlyMemory<byte> pixelBytecode =
+            shaderBytecodes.MatrixPixel;
 
         _vertexShader = _device.CreateVertexShader(vertexBytecode.Span);
         _pixelShader = _device.CreatePixelShader(pixelBytecode.Span);
@@ -198,22 +209,16 @@ internal sealed class Direct3D11Presenter : IDisposable
         _inputLayout = _device.CreateInputLayout(
             inputElements,
             vertexBytecode.Span);
-        ReadOnlyMemory<byte> transitionVertexBytecode = Compiler.Compile(
-            TransitionShaderSource,
-            "VSMain",
-            "WallpaperMatrix.AttackTransition.hlsl",
-            "vs_4_0",
-            ShaderFlags.OptimizationLevel3);
-        ReadOnlyMemory<byte> transitionPixelBytecode = Compiler.Compile(
-            TransitionShaderSource,
-            "PSMain",
-            "WallpaperMatrix.AttackTransition.hlsl",
-            "ps_4_0",
-            ShaderFlags.OptimizationLevel3);
+        ReadOnlyMemory<byte> transitionVertexBytecode =
+            shaderBytecodes.TransitionVertex;
+        ReadOnlyMemory<byte> transitionPixelBytecode =
+            shaderBytecodes.TransitionPixel;
         _transitionVertexShader =
             _device.CreateVertexShader(transitionVertexBytecode.Span);
         _transitionPixelShader =
             _device.CreatePixelShader(transitionPixelBytecode.Span);
+        _desktopDifferencePixelShader = _device.CreatePixelShader(
+            shaderBytecodes.DesktopDifferencePixel.Span);
         _transitionInputLayout = _device.CreateInputLayout(
             [
                 new(
@@ -241,7 +246,18 @@ internal sealed class Direct3D11Presenter : IDisposable
         _constantBuffer = _device.CreateConstantBuffer<ShaderConstants>();
         _transitionConstantBuffer =
             _device.CreateConstantBuffer<TransitionShaderConstants>();
+        _desktopDifferenceConstantBuffer =
+            _device.CreateConstantBuffer<DesktopDifferenceConstants>();
         _sampler = _device.CreateSamplerState(SamplerDescription.LinearClamp);
+        _maskSampler = _device.CreateSamplerState(
+            new SamplerDescription(
+                Filter.MinMagMipPoint,
+                TextureAddressMode.Clamp,
+                mipLODBias: 0,
+                maxAnisotropy: 1,
+                ComparisonFunction.Never,
+                minLOD: 0,
+                maxLOD: float.MaxValue));
         // The shader returns straight (non-premultiplied) RGB, but the
         // DirectComposition swap chain stores premultiplied alpha.  The
         // built-in NonPremultiplied state also multiplies the alpha channel
@@ -254,6 +270,8 @@ internal sealed class Direct3D11Presenter : IDisposable
                 Blend.InverseSourceAlpha,
                 Blend.One,
                 Blend.InverseSourceAlpha));
+        _captureBlendState = _device.CreateBlendState(
+            BlendDescription.Opaque);
 
         DiagnosticLog.Write(
             $"Direct3D 11 создан: featureLevel={FormatFeatureLevel(featureLevel)}; "
@@ -289,45 +307,58 @@ internal sealed class Direct3D11Presenter : IDisposable
             throw new InvalidOperationException(
                 "Буфер констант D3D11 не выровнен по 16 байтам.");
         }
-        Compiler.Compile(
-            ShaderSource,
-            "VSMain",
-            "WallpaperMatrix.Direct3D11.hlsl",
-            "vs_4_0",
-            ShaderFlags.OptimizationLevel3);
-        Compiler.Compile(
-            ShaderSource,
-            "PSMain",
-            "WallpaperMatrix.Direct3D11.hlsl",
-            "ps_4_0",
-            ShaderFlags.OptimizationLevel3);
-        Compiler.Compile(
-            TransitionShaderSource,
-            "VSMain",
-            "WallpaperMatrix.AttackTransition.hlsl",
-            "vs_4_0",
-            ShaderFlags.OptimizationLevel3);
-        Compiler.Compile(
-            TransitionShaderSource,
-            "PSMain",
-            "WallpaperMatrix.AttackTransition.hlsl",
-            "ps_4_0",
-            ShaderFlags.OptimizationLevel3);
+        if (Unsafe.SizeOf<TransitionShaderConstants>() % 16 != 0
+            || Unsafe.SizeOf<DesktopDifferenceConstants>() % 16 != 0)
+        {
+            throw new InvalidOperationException(
+                "Служебный буфер констант D3D11 не выровнен по 16 байтам.");
+        }
+        _ = CompiledShaders.Value;
     }
+
+    private static ShaderBytecodes CompileShaders() =>
+        new(
+            Compiler.Compile(
+                ShaderSource,
+                "VSMain",
+                "WallpaperMatrix.Direct3D11.hlsl",
+                "vs_4_0",
+                ShaderFlags.OptimizationLevel3),
+            Compiler.Compile(
+                ShaderSource,
+                "PSMain",
+                "WallpaperMatrix.Direct3D11.hlsl",
+                "ps_4_0",
+                ShaderFlags.OptimizationLevel3),
+            Compiler.Compile(
+                TransitionShaderSource,
+                "VSMain",
+                "WallpaperMatrix.AttackTransition.hlsl",
+                "vs_4_0",
+                ShaderFlags.OptimizationLevel3),
+            Compiler.Compile(
+                TransitionShaderSource,
+                "PSMain",
+                "WallpaperMatrix.AttackTransition.hlsl",
+                "ps_4_0",
+                ShaderFlags.OptimizationLevel3),
+            Compiler.Compile(
+                DesktopDifferenceShaderSource,
+                "PSMain",
+                "WallpaperMatrix.DesktopDifference.hlsl",
+                "ps_4_0",
+                ShaderFlags.OptimizationLevel3));
 
     public void SetAttackTransitionState(
         double revealProgress,
         double veilOpacity,
-        double glyphOpacity,
-        double captureStrength)
+        double glyphOpacity)
     {
         _attackRevealProgress =
             (float)Math.Clamp(revealProgress, 0.0, 1.0);
         _attackVeilOpacity =
             (float)Math.Clamp(veilOpacity, 0.0, 1.0);
         _glyphOpacity = (float)Math.Clamp(glyphOpacity, 0.0, 1.0);
-        _attackCaptureStrength =
-            (float)Math.Clamp(captureStrength, 0.0, 1.0);
     }
 
     public void SetAttackInterfaceFrame(AttackInterfaceFrame? frame)
@@ -340,8 +371,14 @@ internal sealed class Direct3D11Presenter : IDisposable
         _attackInterfaceTexture?.Dispose();
         _attackInterfaceView = null;
         _attackInterfaceTexture = null;
-        if (frame is null)
-            return;
+        // A failed desktop capture must degrade to a fully transparent attack
+        // layer. Disabling mask clipping here would instead let the overlay
+        // cover the entire desktop with an unqualified stream.
+        frame ??= new AttackInterfaceFrame(
+            new byte[2],
+            1,
+            1,
+            0);
         if (frame.Width <= 0
             || frame.Height <= 0
             || frame.Samples.Length
@@ -394,13 +431,9 @@ internal sealed class Direct3D11Presenter : IDisposable
 
     public void SetAttackGlyphState(
         long existingStreamCutoff,
-        long captureStreamCutoff,
         double haloFactor)
     {
         _attackStreamCutoff = existingStreamCutoff;
-        _attackCaptureStreamCutoff = captureStreamCutoff == long.MaxValue
-            ? float.MaxValue
-            : captureStreamCutoff;
         _attackModeEnabled = 1;
         _attackHaloFactor =
             (float)Math.Clamp(haloFactor, 0.0, 1.0);
@@ -426,10 +459,162 @@ internal sealed class Direct3D11Presenter : IDisposable
     public bool Present(
         int targetWidth,
         int targetHeight,
-        IReadOnlyList<MatrixScenePresentation> presentations)
+        IReadOnlyList<MatrixScenePresentation> presentations) =>
+        PresentCore(
+            targetWidth,
+            targetHeight,
+            presentations,
+            captureBounds: null,
+            captureSampleScale: 0,
+            out _);
+
+    public AttackInterfaceFrame PresentAndCapture(
+        int targetWidth,
+        int targetHeight,
+        IReadOnlyList<MatrixScenePresentation> presentations,
+        DrawingRectangle virtualBounds,
+        int sampleScale)
+    {
+        try
+        {
+            if (!PresentCore(
+                    targetWidth,
+                    targetHeight,
+                    presentations,
+                    virtualBounds,
+                    Math.Max(1, sampleScale),
+                    out AttackInterfaceFrame? frame)
+                || frame is null)
+            {
+                throw new InvalidOperationException(
+                    "Direct3D 11 не вернул визуальную карту интерфейса.");
+            }
+            return frame;
+        }
+        finally
+        {
+            // The duplication session is only needed while Attack starts.
+            // Releasing it avoids a permanent capture observer, its textures,
+            // and any interaction with protected video surfaces.
+            DisposeDesktopDuplications();
+            _desktopDuplicationTopology = string.Empty;
+            _captureReferenceView?.Dispose();
+            _captureReferenceTexture?.Dispose();
+            _captureReferenceView = null;
+            _captureReferenceTexture = null;
+        }
+    }
+
+    /// <summary>
+    /// Warms DXGI Desktop Duplication without waiting for a frame. A newly
+    /// created duplication may initially return a surface from before the
+    /// wallpaper reached DWM. Two discarded presentation cycles establish a
+    /// steady reference before the real interface capture is accepted.
+    /// </summary>
+    public bool PrepareAttackInterfaceCapture(
+        DrawingRectangle virtualBounds,
+        int targetWidth,
+        int targetHeight)
     {
         if (_disposed || targetWidth <= 0 || targetHeight <= 0)
             return false;
+        if (_desktopCapturePrepared)
+            return true;
+
+        EnsureDesktopDuplications(virtualBounds);
+        EnsureCaptureReference(targetWidth, targetHeight);
+        if (_desktopDuplications.Count == 0)
+            return false;
+
+        int sourceCount = _desktopDuplications.Count;
+        for (int offset = 0; offset < sourceCount; offset++)
+        {
+            int sourceIndex =
+                (_desktopCaptureWarmupCursor + offset) % sourceCount;
+            DesktopDuplicationSource source =
+                _desktopDuplications[sourceIndex];
+            if (source.WarmupFrames >= DesktopCaptureWarmupFrames)
+                continue;
+
+            _desktopCaptureWarmupCursor =
+                (sourceIndex + 1) % sourceCount;
+            Result acquireResult = source.Duplication.AcquireNextFrame(
+                0,
+                out _,
+                out IDXGIResource desktopResource);
+            if (acquireResult.Failure)
+            {
+                if (acquireResult.Code == DxgiErrorAccessLost)
+                {
+                    DisposeDesktopDuplications();
+                    _desktopDuplicationTopology = string.Empty;
+                }
+                else if (acquireResult.Code != DxgiErrorWaitTimeout)
+                {
+                    DiagnosticLog.Write(
+                        "DXGI не подготовил кадр захвата интерфейса: "
+                        + $"device={source.DeviceName}; "
+                        + $"HRESULT=0x{acquireResult.Code:X8}.");
+                }
+                return false;
+            }
+
+            try
+            {
+                using (desktopResource)
+                using (ID3D11Texture2D desktopTexture =
+                       desktopResource.QueryInterface<ID3D11Texture2D>())
+                {
+                    // Also create the reusable GPU copy before the visible
+                    // transition, keeping its allocation off the Attack path.
+                    source.CopyDesktopFrame(
+                        _device,
+                        _context,
+                        desktopTexture);
+                }
+                source.WarmupFrames++;
+            }
+            finally
+            {
+                source.Duplication.ReleaseFrame();
+            }
+            break;
+        }
+
+        if (_desktopDuplications.All(source =>
+                source.WarmupFrames >= DesktopCaptureWarmupFrames))
+        {
+            _desktopCapturePrepared = true;
+            DiagnosticLog.Write(
+                "DXGI-захват интерфейса прогрет неблокирующими кадрами DWM: "
+                + $"выходов={_desktopDuplications.Count}; "
+                + $"кадров={DesktopCaptureWarmupFrames}.");
+        }
+
+        // Complete a pending request on the next render iteration. Thus one
+        // ordinary Present follows the final discarded warm-up frame.
+        return false;
+    }
+
+    private bool PresentCore(
+        int targetWidth,
+        int targetHeight,
+        IReadOnlyList<MatrixScenePresentation> presentations,
+        DrawingRectangle? captureBounds,
+        int captureSampleScale,
+        out AttackInterfaceFrame? capturedFrame)
+    {
+        capturedFrame = null;
+        if (_disposed || targetWidth <= 0 || targetHeight <= 0)
+            return false;
+
+        bool captureDesktop = captureBounds.HasValue
+            && captureSampleScale > 0;
+        if (captureDesktop)
+        {
+            EnsureDesktopDuplications(captureBounds!.Value);
+            EnsureCaptureReference(targetWidth, targetHeight);
+        }
 
         long frameStartedAt = Stopwatch.GetTimestamp();
         List<SceneDrawState> drawStates = [];
@@ -463,17 +648,415 @@ internal sealed class Direct3D11Presenter : IDisposable
             targetWidth,
             targetHeight,
             drawStates);
+        if (captureDesktop)
+        {
+            _context.CopyResource(
+                _captureReferenceTexture!,
+                _backBufferTexture);
+        }
         Result presentResult = _swapChain.Present(0, PresentFlags.None);
         if (presentResult.Failure)
         {
             throw new InvalidOperationException(
                 $"Direct3D 11 не передал кадр композитору; HRESULT={presentResult.Code:X8}.");
         }
+        if (captureDesktop)
+        {
+            capturedFrame = CaptureDesktopDifferences(
+                captureBounds!.Value,
+                targetWidth,
+                targetHeight,
+                captureSampleScale);
+        }
         ReportSlowPresent(
             frameStartedAt,
             uploadFinishedAt,
             Stopwatch.GetTimestamp());
         return true;
+    }
+
+    private void EnsureCaptureReference(int width, int height)
+    {
+        if (_captureReferenceTexture is not null)
+        {
+            Texture2DDescription existing =
+                _captureReferenceTexture.Description;
+            if (existing.Width == (uint)width
+                && existing.Height == (uint)height)
+            {
+                return;
+            }
+        }
+
+        _captureReferenceView?.Dispose();
+        _captureReferenceTexture?.Dispose();
+        _captureReferenceTexture = _device.CreateTexture2D(
+            new Texture2DDescription(
+                Format.B8G8R8A8_UNorm,
+                (uint)width,
+                (uint)height,
+                arraySize: 1,
+                mipLevels: 1,
+                BindFlags.ShaderResource,
+                ResourceUsage.Default));
+        _captureReferenceView = _device.CreateShaderResourceView(
+            _captureReferenceTexture);
+    }
+
+    private void EnsureDesktopDuplications(DrawingRectangle virtualBounds)
+    {
+        string topology = string.Join(
+            ";",
+            System.Windows.Forms.Screen.AllScreens
+                .OrderBy(screen => screen.DeviceName)
+                .Select(screen =>
+                    $"{screen.DeviceName}:{screen.Bounds.Left},"
+                    + $"{screen.Bounds.Top},{screen.Bounds.Width},"
+                    + $"{screen.Bounds.Height}"));
+        topology = $"{virtualBounds.Left},{virtualBounds.Top},"
+            + $"{virtualBounds.Width},{virtualBounds.Height}|{topology}";
+        if (_desktopDuplications.Count > 0
+            && string.Equals(
+                topology,
+                _desktopDuplicationTopology,
+                StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        DisposeDesktopDuplications();
+        _desktopDuplicationTopology = topology;
+        _desktopCaptureWarmupCursor = 0;
+        _desktopCapturePrepared = false;
+        HashSet<string> capturedDevices = new(
+            StringComparer.OrdinalIgnoreCase);
+        using IDXGIDevice dxgiDevice = _device.QueryInterface<IDXGIDevice>();
+        using IDXGIAdapter adapter = dxgiDevice.GetAdapter();
+        string adapterName = adapter.Description.Description;
+        for (uint outputIndex = 0; ; outputIndex++)
+        try
+        {
+            Result outputResult = adapter.EnumOutputs(
+                outputIndex,
+                out IDXGIOutput output);
+            if (outputResult.Failure)
+                break;
+            using (output)
+            {
+                OutputDescription description = output.Description;
+                if (!description.AttachedToDesktop)
+                    continue;
+                using IDXGIOutput1 output1 =
+                    output.QueryInterface<IDXGIOutput1>();
+                IDXGIOutputDuplication duplication =
+                    output1.DuplicateOutput(_device);
+                DrawingRectangle desktopBounds = ToRectangle(
+                    description.DesktopCoordinates);
+                _desktopDuplications.Add(
+                    new DesktopDuplicationSource(
+                        description.DeviceName,
+                        desktopBounds,
+                        Convert.ToInt32(description.Rotation),
+                        duplication));
+                capturedDevices.Add(description.DeviceName);
+                DiagnosticLog.Write(
+                    "DXGI-захват интерфейса подключён: "
+                    + $"device={description.DeviceName}; "
+                    + $"bounds={desktopBounds.Left},{desktopBounds.Top} "
+                    + $"{desktopBounds.Width}x{desktopBounds.Height}; "
+                    + $"rotation={description.Rotation}; "
+                    + $"adapter={adapterName}.");
+            }
+        }
+        catch (Exception exception)
+        {
+            DiagnosticLog.Write(
+                $"DXGI не создал дублирование выхода {outputIndex} "
+                + $"на адаптере {adapterName}; монитор исключён из отпечатка АТАКИ.",
+                exception);
+        }
+
+        foreach (System.Windows.Forms.Screen screen in
+                 System.Windows.Forms.Screen.AllScreens)
+        {
+            if (capturedDevices.Contains(screen.DeviceName))
+                continue;
+            DiagnosticLog.Write(
+                "DXGI не видит монитор на адаптере обоев; отпечаток "
+                + "АТАКИ на нём безопасно отключён: "
+                + $"device={screen.DeviceName}; "
+                + $"bounds={screen.Bounds.Left},{screen.Bounds.Top} "
+                + $"{screen.Bounds.Width}x{screen.Bounds.Height}; "
+                + $"wallpaperAdapter={adapterName}.");
+        }
+    }
+
+    private AttackInterfaceFrame CaptureDesktopDifferences(
+        DrawingRectangle virtualBounds,
+        int targetWidth,
+        int targetHeight,
+        int sampleScale)
+    {
+        int sampleWidth = checked(
+            (targetWidth + sampleScale - 1) / sampleScale);
+        int sampleHeight = checked(
+            (targetHeight + sampleScale - 1) / sampleScale);
+        byte[] samples = new byte[checked(sampleWidth * sampleHeight * 2)];
+        int capturedOutputs = 0;
+        int protectedOutputs = 0;
+        bool rebuildDuplications = false;
+        List<string> failures = [];
+        long startedAt = Stopwatch.GetTimestamp();
+
+        foreach (DesktopDuplicationSource source in _desktopDuplications)
+        {
+            Result acquireResult = source.Duplication.AcquireNextFrame(
+                0,
+                out OutduplFrameInfo frameInfo,
+                out IDXGIResource desktopResource);
+            if (acquireResult.Failure)
+            {
+                failures.Add(
+                    $"{source.DeviceName}=0x{acquireResult.Code:X8}");
+                rebuildDuplications |=
+                    acquireResult.Code == DxgiErrorAccessLost;
+                continue;
+            }
+
+            try
+            {
+                using (desktopResource)
+                using (ID3D11Texture2D desktopTexture =
+                       desktopResource.QueryInterface<ID3D11Texture2D>())
+                {
+                    source.CopyDesktopFrame(
+                        _device,
+                        _context,
+                        desktopTexture);
+                }
+                if (frameInfo.ProtectedContentMaskedOut)
+                    protectedOutputs++;
+                RenderDesktopDifference(
+                    source,
+                    virtualBounds,
+                    targetWidth,
+                    targetHeight,
+                    sampleScale,
+                    sampleWidth,
+                    sampleHeight,
+                    samples);
+                capturedOutputs++;
+            }
+            catch (Exception exception)
+            {
+                failures.Add(
+                    $"{source.DeviceName}={exception.GetBaseException().Message}");
+            }
+            finally
+            {
+                source.Duplication.ReleaseFrame();
+            }
+        }
+
+        if (capturedOutputs == 0)
+            Array.Clear(samples);
+        int influenced = 0;
+        for (int index = 1; index < samples.Length; index += 2)
+        {
+            if (samples[index] >= 128)
+                influenced++;
+        }
+        long finishedAt = Stopwatch.GetTimestamp();
+        DiagnosticLog.Write(
+            "Визуальная карта интерфейса АТАКИ подготовлена через "
+            + "DXGI Desktop Duplication: "
+            + $"{sampleWidth}x{sampleHeight}; "
+            + $"выходов={capturedOutputs}/{_desktopDuplications.Count}; "
+            + $"маска={influenced * 100.0 / Math.Max(1, sampleWidth * sampleHeight):0.##}%; "
+            + $"protected={protectedOutputs}; "
+            + $"время={Stopwatch.GetElapsedTime(startedAt, finishedAt).TotalMilliseconds:0} мс"
+            + (failures.Count == 0
+                ? "."
+                : $"; пропуски={string.Join(", ", failures)}."));
+        if (rebuildDuplications)
+        {
+            DisposeDesktopDuplications();
+            _desktopDuplicationTopology = string.Empty;
+            DiagnosticLog.Write(
+                "DXGI Desktop Duplication потерял доступ к рабочему столу; "
+                + "контур будет создан заново при следующей АТАКЕ.");
+        }
+        return new AttackInterfaceFrame(
+            samples,
+            sampleWidth,
+            sampleHeight,
+            influenced);
+    }
+
+    private unsafe void RenderDesktopDifference(
+        DesktopDuplicationSource source,
+        DrawingRectangle virtualBounds,
+        int targetWidth,
+        int targetHeight,
+        int sampleScale,
+        int globalSampleWidth,
+        int globalSampleHeight,
+        byte[] destination)
+    {
+        DrawingRectangle monitorOnSurface = new(
+            source.DesktopBounds.Left - virtualBounds.Left,
+            source.DesktopBounds.Top - virtualBounds.Top,
+            source.DesktopBounds.Width,
+            source.DesktopBounds.Height);
+        DrawingRectangle clipped = DrawingRectangle.Intersect(
+            monitorOnSurface,
+            new DrawingRectangle(0, 0, targetWidth, targetHeight));
+        if (clipped.Width <= 0 || clipped.Height <= 0)
+            return;
+
+        int sampleLeft = Math.Clamp(
+            clipped.Left / sampleScale,
+            0,
+            globalSampleWidth);
+        int sampleTop = Math.Clamp(
+            clipped.Top / sampleScale,
+            0,
+            globalSampleHeight);
+        int sampleRight = Math.Clamp(
+            (clipped.Right + sampleScale - 1) / sampleScale,
+            sampleLeft,
+            globalSampleWidth);
+        int sampleBottom = Math.Clamp(
+            (clipped.Bottom + sampleScale - 1) / sampleScale,
+            sampleTop,
+            globalSampleHeight);
+        int localWidth = sampleRight - sampleLeft;
+        int localHeight = sampleBottom - sampleTop;
+        if (localWidth <= 0 || localHeight <= 0)
+            return;
+
+        CaptureGpuResources resources = source.EnsureReductionResources(
+            _device,
+            localWidth,
+            localHeight);
+        Texture2DDescription desktopDescription =
+            source.DesktopTexture!.Description;
+        DesktopDifferenceConstants constants = new(
+            targetWidth,
+            targetHeight,
+            desktopDescription.Width,
+            desktopDescription.Height,
+            monitorOnSurface.Left,
+            monitorOnSurface.Top,
+            monitorOnSurface.Width,
+            monitorOnSurface.Height,
+            sampleLeft,
+            sampleTop,
+            sampleScale,
+            source.Rotation);
+        UpdateDesktopDifferenceConstantBuffer(constants);
+
+        _context.OMSetRenderTargets(resources.RenderTargetView);
+        _context.OMSetBlendState(_captureBlendState);
+        _context.RSSetViewport(
+            new Viewport(0, 0, localWidth, localHeight, 0, 1));
+        _context.IASetInputLayout(_transitionInputLayout);
+        _context.IASetPrimitiveTopology(PrimitiveTopology.TriangleStrip);
+        _context.IASetVertexBuffer(0, _quadBuffer, QuadStride);
+        _context.VSSetShader(_transitionVertexShader);
+        _context.PSSetShader(_desktopDifferencePixelShader);
+        _context.PSSetConstantBuffer(
+            0,
+            _desktopDifferenceConstantBuffer);
+        _context.PSSetShaderResource(0, source.DesktopView!);
+        _context.PSSetShaderResource(1, _captureReferenceView!);
+        _context.Draw(4, 0);
+        _context.PSSetShaderResource(
+            0,
+            (ID3D11ShaderResourceView)null!);
+        _context.PSSetShaderResource(
+            1,
+            (ID3D11ShaderResourceView)null!);
+        _context.CopyResource(
+            resources.StagingTexture,
+            resources.RenderTexture);
+
+        MappedSubresource mapped = _context.Map(
+            resources.StagingTexture,
+            0,
+            MapMode.Read,
+            Vortice.Direct3D11.MapFlags.None);
+        int localInfluenced = 0;
+        try
+        {
+            byte* sourceBytes = (byte*)mapped.DataPointer;
+            for (int row = 0; row < localHeight; row++)
+            {
+                int globalRow = sampleTop + row;
+                byte* rowSource = sourceBytes + row * mapped.RowPitch;
+                for (int column = 0; column < localWidth; column++)
+                {
+                    int globalColumn = sampleLeft + column;
+                    int localIndex = column * 2;
+                    int globalIndex =
+                        (globalRow * globalSampleWidth + globalColumn) * 2;
+                    byte mask = rowSource[localIndex + 1];
+                    if (mask >= 128)
+                        localInfluenced++;
+                    if (mask <= destination[globalIndex + 1])
+                        continue;
+                    destination[globalIndex] = rowSource[localIndex];
+                    destination[globalIndex + 1] = mask;
+                }
+            }
+        }
+        finally
+        {
+            _context.Unmap(resources.StagingTexture, 0);
+        }
+        DiagnosticLog.Write(
+            "DXGI-карта выхода подготовлена: "
+            + $"device={source.DeviceName}; "
+            + $"rotation={source.Rotation}; "
+            + $"samples={localWidth}x{localHeight}; "
+            + $"mask={localInfluenced * 100.0 / Math.Max(1, localWidth * localHeight):0.##}%.");
+    }
+
+    private void UpdateDesktopDifferenceConstantBuffer(
+        DesktopDifferenceConstants constants)
+    {
+        MappedSubresource mapped = _context.Map(
+            _desktopDifferenceConstantBuffer,
+            0,
+            MapMode.WriteDiscard,
+            Vortice.Direct3D11.MapFlags.None);
+        try
+        {
+            Marshal.StructureToPtr(
+                constants,
+                mapped.DataPointer,
+                false);
+        }
+        finally
+        {
+            _context.Unmap(_desktopDifferenceConstantBuffer, 0);
+        }
+    }
+
+    private static DrawingRectangle ToRectangle(Vortice.RawRect rectangle) =>
+        new(
+            rectangle.Left,
+            rectangle.Top,
+            rectangle.Right - rectangle.Left,
+            rectangle.Bottom - rectangle.Top);
+
+    private void DisposeDesktopDuplications()
+    {
+        foreach (DesktopDuplicationSource source in _desktopDuplications)
+            source.Dispose();
+        _desktopDuplications.Clear();
+        _desktopCaptureWarmupCursor = 0;
+        _desktopCapturePrepared = false;
     }
 
     private void ReportSlowPresent(
@@ -695,17 +1278,10 @@ internal sealed class Direct3D11Presenter : IDisposable
                 1.0f);
             if (_attackModeEnabled > 0.5f)
             {
-                // New streams do the visible takeover and rebuild the image.
-                // Near the end, only ordinary glyphs from the old wallpaper
-                // join them to preserve continuity; already developed image
-                // cells never rise as a finished picture over the interface.
+                // Only streams born after the attack boundary are allowed on
+                // the foreground surface. The original wallpaper remains the
+                // sole owner of every pre-existing stream and image cell.
                 float takeoverProgress = _attackRevealProgress;
-                float inheritedFlow = Math.Clamp(
-                    (takeoverProgress - 0.58f) / 0.42f,
-                    0.0f,
-                    1.0f);
-                inheritedFlow = inheritedFlow * inheritedFlow
-                    * (3.0f - 2.0f * inheritedFlow);
                 float solidBody = 1.0f - Math.Clamp(
                     (takeoverProgress - 0.76f) / 0.24f,
                     0.0f,
@@ -714,17 +1290,9 @@ internal sealed class Direct3D11Presenter : IDisposable
                     * (3.0f - 2.0f * solidBody);
                 DrawGlyphPass(
                     state,
-                    streamFilterMode: 3,
-                    solidBody: solidBody,
-                    haloFactor: _attackHaloFactor,
-                    opacityFactor: inheritedFlow,
-                    captureFactor: 0);
-                DrawGlyphPass(
-                    state,
                     streamFilterMode: 1,
                     solidBody: solidBody,
-                    haloFactor: _attackHaloFactor,
-                    captureFactor: _attackCaptureStrength);
+                    haloFactor: _attackHaloFactor);
             }
             else
             {
@@ -732,8 +1300,7 @@ internal sealed class Direct3D11Presenter : IDisposable
                     state,
                     streamFilterMode: 0,
                     solidBody: 1.0f - startupGlyphBlend,
-                    haloFactor: startupGlyphBlend,
-                    captureFactor: 0);
+                    haloFactor: startupGlyphBlend);
             }
         }
     }
@@ -742,9 +1309,7 @@ internal sealed class Direct3D11Presenter : IDisposable
         SceneDrawState state,
         float streamFilterMode,
         float solidBody,
-        float haloFactor,
-        float opacityFactor = 1,
-        float captureFactor = 0)
+        float haloFactor)
     {
         if (state.Resources.InstanceBuffer is null
             || state.InstanceCount <= 0
@@ -772,6 +1337,7 @@ internal sealed class Direct3D11Presenter : IDisposable
             _attackInterfaceView
                 ?? (ID3D11ShaderResourceView)null!);
         _context.PSSetSampler(0, _sampler);
+        _context.PSSetSampler(1, _maskSampler);
         DrawingRectangle viewport = state.Presentation.TargetBounds;
         DrawingRectangle source = state.Presentation.SourceBounds;
         double sourceAspect = source.Width / (double)source.Height;
@@ -797,8 +1363,7 @@ internal sealed class Direct3D11Presenter : IDisposable
             aspectScaleX,
             aspectScaleY,
             _glyphOpacity
-                * _surfaceGlyphOpacity
-                * Math.Clamp(opacityFactor, 0, 1),
+                * _surfaceGlyphOpacity,
             _attackModeEnabled > 0.5f
                 && state.Presentation.AttackStreamCutoff >= 0
                     ? state.Presentation.AttackStreamCutoff
@@ -816,8 +1381,9 @@ internal sealed class Direct3D11Presenter : IDisposable
             viewport.Height,
             _currentTargetWidth,
             _currentTargetHeight,
-            _attackInterfaceView is null ? 0 : captureFactor,
-            _attackCaptureStreamCutoff);
+            _attackModeEnabled > 0.5f && _attackInterfaceView is not null,
+            _attackRevealProgress,
+            _attackModeEnabled > 0.5f);
         UpdateConstantBuffer(constants);
         _context.DrawInstanced(
             4,
@@ -860,13 +1426,25 @@ internal sealed class Direct3D11Presenter : IDisposable
         _context.VSSetShader(_transitionVertexShader);
         _context.PSSetShader(_transitionPixelShader);
         _context.PSSetConstantBuffer(0, _transitionConstantBuffer);
+        _context.PSSetShaderResource(
+            1,
+            _attackInterfaceView
+                ?? (ID3D11ShaderResourceView)null!);
+        _context.PSSetSampler(1, _maskSampler);
         UpdateTransitionConstantBuffer(
             new TransitionShaderConstants(
                 parameters,
                 opacity,
                 topDownProgress,
-                _currentTargetHeight));
+                _currentTargetWidth,
+                _currentTargetHeight,
+                target,
+                _attackModeEnabled > 0.5f
+                    && _attackInterfaceView is not null));
         _context.Draw(4, 0);
+        _context.PSSetShaderResource(
+            1,
+            (ID3D11ShaderResourceView)null!);
     }
 
     private void UpdateConstantBuffer(ShaderConstants constants)
@@ -929,20 +1507,30 @@ internal sealed class Direct3D11Presenter : IDisposable
         foreach (SceneGpuResources resources in _sceneResources.Values)
             resources.Dispose();
         _sceneResources.Clear();
+        DisposeDesktopDuplications();
+        _captureReferenceView?.Dispose();
+        _captureReferenceTexture?.Dispose();
+        _captureReferenceView = null;
+        _captureReferenceTexture = null;
         _attackInterfaceView?.Dispose();
         _attackInterfaceTexture?.Dispose();
+        _captureBlendState.Dispose();
         _blendState.Dispose();
+        _maskSampler.Dispose();
         _sampler.Dispose();
+        _desktopDifferenceConstantBuffer.Dispose();
         _transitionConstantBuffer.Dispose();
         _constantBuffer.Dispose();
         _quadBuffer.Dispose();
         _transitionInputLayout.Dispose();
+        _desktopDifferencePixelShader.Dispose();
         _transitionPixelShader.Dispose();
         _transitionVertexShader.Dispose();
         _inputLayout.Dispose();
         _pixelShader.Dispose();
         _vertexShader.Dispose();
         _renderTargetView.Dispose();
+        _backBufferTexture.Dispose();
         _compositionVisual.Dispose();
         _compositionTarget.Dispose();
         _compositionDevice.Dispose();
@@ -971,12 +1559,171 @@ internal sealed class Direct3D11Presenter : IDisposable
         }
     }
 
+    private sealed class CaptureGpuResources : IDisposable
+    {
+        public int Width { get; }
+        public int Height { get; }
+        public ID3D11Texture2D RenderTexture { get; }
+        public ID3D11RenderTargetView RenderTargetView { get; }
+        public ID3D11Texture2D StagingTexture { get; }
+
+        public CaptureGpuResources(
+            int width,
+            int height,
+            ID3D11Texture2D renderTexture,
+            ID3D11RenderTargetView renderTargetView,
+            ID3D11Texture2D stagingTexture)
+        {
+            Width = width;
+            Height = height;
+            RenderTexture = renderTexture;
+            RenderTargetView = renderTargetView;
+            StagingTexture = stagingTexture;
+        }
+
+        public void Dispose()
+        {
+            RenderTargetView.Dispose();
+            StagingTexture.Dispose();
+            RenderTexture.Dispose();
+        }
+    }
+
+    private sealed class DesktopDuplicationSource : IDisposable
+    {
+        public string DeviceName { get; }
+        public DrawingRectangle DesktopBounds { get; }
+        public int Rotation { get; }
+        public IDXGIOutputDuplication Duplication { get; }
+        public ID3D11Texture2D? DesktopTexture { get; private set; }
+        public ID3D11ShaderResourceView? DesktopView { get; private set; }
+        public int WarmupFrames { get; set; }
+        private CaptureGpuResources? _reductionResources;
+
+        public DesktopDuplicationSource(
+            string deviceName,
+            DrawingRectangle desktopBounds,
+            int rotation,
+            IDXGIOutputDuplication duplication)
+        {
+            DeviceName = deviceName;
+            DesktopBounds = desktopBounds;
+            Rotation = rotation;
+            Duplication = duplication;
+        }
+
+        public void CopyDesktopFrame(
+            ID3D11Device device,
+            ID3D11DeviceContext context,
+            ID3D11Texture2D source)
+        {
+            Texture2DDescription sourceDescription = source.Description;
+            if (DesktopTexture is null
+                || DesktopTexture.Description.Width
+                    != sourceDescription.Width
+                || DesktopTexture.Description.Height
+                    != sourceDescription.Height
+                || DesktopTexture.Description.Format
+                    != sourceDescription.Format)
+            {
+                DesktopView?.Dispose();
+                DesktopTexture?.Dispose();
+                DesktopTexture = device.CreateTexture2D(
+                    new Texture2DDescription(
+                        sourceDescription.Format,
+                        sourceDescription.Width,
+                        sourceDescription.Height,
+                        arraySize: 1,
+                        mipLevels: 1,
+                        BindFlags.ShaderResource,
+                        ResourceUsage.Default));
+                DesktopView = device.CreateShaderResourceView(
+                    DesktopTexture);
+            }
+            context.CopyResource(DesktopTexture, source);
+        }
+
+        public CaptureGpuResources EnsureReductionResources(
+            ID3D11Device device,
+            int width,
+            int height)
+        {
+            if (_reductionResources is not null
+                && _reductionResources.Width == width
+                && _reductionResources.Height == height)
+            {
+                return _reductionResources;
+            }
+
+            _reductionResources?.Dispose();
+            ID3D11Texture2D? renderTexture = null;
+            ID3D11RenderTargetView? renderTargetView = null;
+            ID3D11Texture2D? stagingTexture = null;
+            try
+            {
+                renderTexture = device.CreateTexture2D(
+                    new Texture2DDescription(
+                        Format.R8G8_UNorm,
+                        (uint)width,
+                        (uint)height,
+                        arraySize: 1,
+                        mipLevels: 1,
+                        BindFlags.RenderTarget,
+                        ResourceUsage.Default));
+                renderTargetView =
+                    device.CreateRenderTargetView(renderTexture);
+                stagingTexture = device.CreateTexture2D(
+                    new Texture2DDescription(
+                        Format.R8G8_UNorm,
+                        (uint)width,
+                        (uint)height,
+                        arraySize: 1,
+                        mipLevels: 1,
+                        BindFlags.None,
+                        ResourceUsage.Staging,
+                        CpuAccessFlags.Read));
+                _reductionResources = new CaptureGpuResources(
+                    width,
+                    height,
+                    renderTexture,
+                    renderTargetView,
+                    stagingTexture);
+                return _reductionResources;
+            }
+            catch
+            {
+                stagingTexture?.Dispose();
+                renderTargetView?.Dispose();
+                renderTexture?.Dispose();
+                throw;
+            }
+        }
+
+        public void Dispose()
+        {
+            _reductionResources?.Dispose();
+            _reductionResources = null;
+            DesktopView?.Dispose();
+            DesktopTexture?.Dispose();
+            DesktopView = null;
+            DesktopTexture = null;
+            Duplication.Dispose();
+        }
+    }
+
     private sealed record SceneDrawState(
         MatrixScenePresentation Presentation,
         SceneGpuResources Resources,
         MatrixRenderParameters Parameters,
         GlyphAtlasData Atlas,
         int InstanceCount);
+
+    private readonly record struct ShaderBytecodes(
+        ReadOnlyMemory<byte> MatrixVertex,
+        ReadOnlyMemory<byte> MatrixPixel,
+        ReadOnlyMemory<byte> TransitionVertex,
+        ReadOnlyMemory<byte> TransitionPixel,
+        ReadOnlyMemory<byte> DesktopDifferencePixel);
 
     private static string FormatFeatureLevel(FeatureLevel level) =>
         level switch
@@ -1012,10 +1759,10 @@ internal sealed class Direct3D11Presenter : IDisposable
         public readonly Vector2 TargetSurfaceSize;
         public readonly Vector2 TargetViewportOrigin;
         public readonly Vector2 TargetViewportSize;
-        public readonly float CaptureEnabled;
-        public readonly float CaptureStrength;
-        public readonly float CaptureStreamCutoff;
-        private readonly Vector3 _paddingCapture;
+        public readonly float InterfaceMaskEnabled;
+        public readonly float AttackRevealProgress;
+        public readonly float AttackRevealEnabled;
+        private readonly Vector3 _paddingAttack;
 
         public ShaderConstants(
             MatrixRenderParameters parameters,
@@ -1037,8 +1784,9 @@ internal sealed class Direct3D11Presenter : IDisposable
             float viewportHeight,
             float targetWidth,
             float targetHeight,
-            float captureStrength,
-            float captureStreamCutoff)
+            bool interfaceMaskEnabled,
+            float attackRevealProgress,
+            bool attackRevealEnabled)
         {
             SourceSize = new(
                 parameters.SourceWidth,
@@ -1071,10 +1819,48 @@ internal sealed class Direct3D11Presenter : IDisposable
             TargetSurfaceSize = new(targetWidth, targetHeight);
             TargetViewportOrigin = new(viewportLeft, viewportTop);
             TargetViewportSize = new(viewportWidth, viewportHeight);
-            CaptureEnabled = captureStrength > 0.0001f ? 1 : 0;
-            CaptureStrength = captureStrength;
-            CaptureStreamCutoff = captureStreamCutoff;
-            _paddingCapture = Vector3.Zero;
+            InterfaceMaskEnabled = interfaceMaskEnabled ? 1 : 0;
+            AttackRevealProgress = Math.Clamp(
+                attackRevealProgress,
+                0,
+                1);
+            AttackRevealEnabled = attackRevealEnabled ? 1 : 0;
+            _paddingAttack = Vector3.Zero;
+        }
+    }
+
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    private readonly struct DesktopDifferenceConstants
+    {
+        public readonly Vector2 ReferenceSize;
+        public readonly Vector2 DesktopSize;
+        public readonly Vector2 MonitorOrigin;
+        public readonly Vector2 MonitorSize;
+        public readonly Vector2 SampleOrigin;
+        public readonly float SampleScale;
+        public readonly float Rotation;
+
+        public DesktopDifferenceConstants(
+            int referenceWidth,
+            int referenceHeight,
+            uint desktopWidth,
+            uint desktopHeight,
+            int monitorLeft,
+            int monitorTop,
+            int monitorWidth,
+            int monitorHeight,
+            int sampleLeft,
+            int sampleTop,
+            int sampleScale,
+            int rotation)
+        {
+            ReferenceSize = new(referenceWidth, referenceHeight);
+            DesktopSize = new(desktopWidth, desktopHeight);
+            MonitorOrigin = new(monitorLeft, monitorTop);
+            MonitorSize = new(monitorWidth, monitorHeight);
+            SampleOrigin = new(sampleLeft, sampleTop);
+            SampleScale = sampleScale;
+            Rotation = rotation;
         }
     }
 
@@ -1085,14 +1871,21 @@ internal sealed class Direct3D11Presenter : IDisposable
         public readonly float DesktopOpacity;
         public readonly float GradientProgress;
         public readonly float GradientEnabled;
-        public readonly float TargetSurfaceHeight;
-        private readonly float _padding;
+        public readonly float InterfaceMaskEnabled;
+        private readonly float _padding0;
+        public readonly Vector2 TargetSurfaceSize;
+        public readonly Vector2 TargetViewportOrigin;
+        public readonly Vector2 TargetViewportSize;
+        private readonly Vector2 _padding1;
 
         public TransitionShaderConstants(
             MatrixRenderParameters parameters,
             float desktopOpacity,
             float topDownProgress,
-            float targetSurfaceHeight)
+            float targetSurfaceWidth,
+            float targetSurfaceHeight,
+            DrawingRectangle targetViewport,
+            bool interfaceMaskEnabled)
         {
             BackgroundColor = new(
                 (float)parameters.BackgroundRed,
@@ -1101,8 +1894,18 @@ internal sealed class Direct3D11Presenter : IDisposable
             DesktopOpacity = desktopOpacity;
             GradientProgress = Math.Clamp(topDownProgress, 0, 1);
             GradientEnabled = topDownProgress >= 0 ? 1 : 0;
-            TargetSurfaceHeight = Math.Max(1, targetSurfaceHeight);
-            _padding = 0;
+            InterfaceMaskEnabled = interfaceMaskEnabled ? 1 : 0;
+            _padding0 = 0;
+            TargetSurfaceSize = new(
+                Math.Max(1, targetSurfaceWidth),
+                Math.Max(1, targetSurfaceHeight));
+            TargetViewportOrigin = new(
+                targetViewport.Left,
+                targetViewport.Top);
+            TargetViewportSize = new(
+                targetViewport.Width,
+                targetViewport.Height);
+            _padding1 = Vector2.Zero;
         }
     }
 
@@ -1130,15 +1933,16 @@ internal sealed class Direct3D11Presenter : IDisposable
             float2 TargetSurfaceSize;
             float2 TargetViewportOrigin;
             float2 TargetViewportSize;
-            float CaptureEnabled;
-            float CaptureStrength;
-            float CaptureStreamCutoff;
-            float3 PaddingCapture;
+            float InterfaceMaskEnabled;
+            float AttackRevealProgress;
+            float AttackRevealEnabled;
+            float3 PaddingAttack;
         };
 
         Texture2D<float> Atlas : register(t0);
         Texture2D<float2> AttackInterface : register(t1);
         SamplerState AtlasSampler : register(s0);
+        SamplerState InterfaceMaskSampler : register(s1);
 
         struct VertexInput
         {
@@ -1157,7 +1961,6 @@ internal sealed class Direct3D11Presenter : IDisposable
             float Emphasis : TEXCOORD4;
             float Glow : TEXCOORD5;
             nointerpolation float StreamId : TEXCOORD6;
-            nointerpolation float2 CaptureUv : TEXCOORD7;
         };
 
         PixelInput VSMain(VertexInput input)
@@ -1195,20 +1998,6 @@ internal sealed class Direct3D11Presenter : IDisposable
             output.Emphasis = input.Detail.y;
             output.Glow = input.Detail.z;
             output.StreamId = input.Detail.w;
-            float2 cellCenter =
-                (input.CellGlyphLevel.xy + 0.5) * CellSize;
-            float2 localCenter = cellCenter - SourceOrigin;
-            float2 centerClip = float2(
-                localCenter.x / SourceViewportSize.x * 2.0 - 1.0,
-                1.0 - localCenter.y / SourceViewportSize.y * 2.0)
-                * AspectScale;
-            float2 viewportPosition = float2(
-                centerClip.x * 0.5 + 0.5,
-                0.5 - centerClip.y * 0.5);
-            output.CaptureUv = (
-                TargetViewportOrigin
-                + viewportPosition * TargetViewportSize)
-                / max(TargetSurfaceSize, float2(1.0, 1.0));
             return output;
         }
 
@@ -1254,16 +2043,24 @@ internal sealed class Direct3D11Presenter : IDisposable
 
         float4 PSMain(PixelInput input) : SV_TARGET
         {
+            float2 surfaceSize = max(
+                TargetSurfaceSize,
+                float2(1.0, 1.0));
+            float2 fragmentUv = saturate(input.Position.xy / surfaceSize);
+            float2 captured = float2(0.0, 1.0);
+            if (InterfaceMaskEnabled > 0.5)
+            {
+                captured = AttackInterface.Sample(
+                    InterfaceMaskSampler,
+                    fragmentUv);
+            }
+            if (InterfaceMaskEnabled > 0.5)
+                clip(captured.g - 0.5);
+
             if (StreamFilterMode > 0.5
                 && StreamFilterMode < 1.5)
             {
                 clip(input.StreamId - AttackStreamCutoff - 0.5);
-            }
-            else if (StreamFilterMode > 1.5)
-            {
-                clip(AttackStreamCutoff + 0.5 - input.StreamId);
-                if (StreamFilterMode > 2.5)
-                    clip(2.5 - input.Style);
             }
 
             float center = SampleGlyph(input, input.Local);
@@ -1309,20 +2106,6 @@ internal sealed class Direct3D11Presenter : IDisposable
             wideLight *= 0.25;
 
             float level = input.Level;
-            if (CaptureEnabled > 0.5)
-            {
-                float2 captured = AttackInterface.Sample(
-                    AtlasSampler,
-                    saturate(input.CaptureUv));
-                level = lerp(
-                    level,
-                    captured.r,
-                    captured.g
-                        * CaptureStrength
-                        * (1.0 - step(
-                            CaptureStreamCutoff + 0.5,
-                            input.StreamId)));
-            }
 
             float isImage = step(2.5, input.Style);
             float softLight = nearLight * 0.68 + wideLight * 0.32;
@@ -1343,6 +2126,18 @@ internal sealed class Direct3D11Presenter : IDisposable
                 max(bodyAlpha, glowAmount),
                 0.0,
                 1.0);
+            if (AttackRevealEnabled > 0.5)
+            {
+                const float feather = 0.12;
+                float front = lerp(
+                    -feather,
+                    1.0 + feather,
+                    AttackRevealProgress);
+                alpha *= 1.0 - smoothstep(
+                    front - feather,
+                    front + feather,
+                    input.Position.y / surfaceSize.y);
+            }
             clip(alpha - 0.006);
 
             float3 body = lerp(
@@ -1378,6 +2173,122 @@ internal sealed class Direct3D11Presenter : IDisposable
         }
         """;
 
+    private const string DesktopDifferenceShaderSource = """
+        cbuffer DesktopDifferenceConstants : register(b0)
+        {
+            float2 ReferenceSize;
+            float2 DesktopSize;
+            float2 MonitorOrigin;
+            float2 MonitorSize;
+            float2 SampleOrigin;
+            float SampleScale;
+            float Rotation;
+        };
+
+        Texture2D<float4> DesktopFrame : register(t0);
+        Texture2D<float4> WallpaperReference : register(t1);
+
+        struct PixelInput
+        {
+            float4 Position : SV_POSITION;
+            float2 TexturePosition : TEXCOORD0;
+        };
+
+        float4 PSMain(PixelInput input) : SV_TARGET
+        {
+            int scale = max(1, (int)round(SampleScale));
+            int2 tile = int2(input.Position.xy);
+            int2 globalOrigin =
+                (int2(SampleOrigin) + tile) * scale;
+            float luminanceTotal = 0.0;
+            float sampledCount = 0.0;
+            float changedCount = 0.0;
+            float mask = 0.0;
+
+            [loop]
+            for (int offsetY = 0; offsetY < 8; offsetY++)
+            {
+                [loop]
+                for (int offsetX = 0; offsetX < 8; offsetX++)
+                {
+                    if (offsetX >= scale || offsetY >= scale)
+                        continue;
+                    int2 globalPixel = globalOrigin
+                        + int2(offsetX, offsetY);
+                    int2 local = globalPixel - int2(MonitorOrigin);
+                    if (local.x < 0 || local.y < 0
+                        || local.x >= (int)MonitorSize.x
+                        || local.y >= (int)MonitorSize.y
+                        || globalPixel.x < 0 || globalPixel.y < 0
+                        || globalPixel.x >= (int)ReferenceSize.x
+                        || globalPixel.y >= (int)ReferenceSize.y)
+                    {
+                        continue;
+                    }
+
+                    int2 desktopPixel = local;
+                    int rotation = (int)round(Rotation);
+                    if (rotation == 2)
+                    {
+                        desktopPixel = int2(
+                            local.y,
+                            (int)DesktopSize.y - 1 - local.x);
+                    }
+                    else if (rotation == 3)
+                    {
+                        desktopPixel = int2(
+                            (int)DesktopSize.x - 1 - local.x,
+                            (int)DesktopSize.y - 1 - local.y);
+                    }
+                    else if (rotation == 4)
+                    {
+                        desktopPixel = int2(
+                            (int)DesktopSize.x - 1 - local.y,
+                            local.x);
+                    }
+                    if (desktopPixel.x < 0 || desktopPixel.y < 0
+                        || desktopPixel.x >= (int)DesktopSize.x
+                        || desktopPixel.y >= (int)DesktopSize.y)
+                    {
+                        continue;
+                    }
+
+                    float4 wallpaper = WallpaperReference.Load(
+                        int3(globalPixel, 0));
+                    if (wallpaper.a < 0.98)
+                        continue;
+                    float3 desktop = DesktopFrame.Load(
+                        int3(desktopPixel, 0)).rgb;
+                    luminanceTotal += dot(
+                        desktop,
+                        float3(0.2126, 0.7152, 0.0722));
+                    sampledCount += 1.0;
+                    float3 difference = abs(desktop - wallpaper.rgb);
+                    float maximumDifference = max(
+                        difference.r,
+                        max(difference.g, difference.b));
+                    float totalDifference =
+                        difference.r + difference.g + difference.b;
+                    bool changed = maximumDifference >= (14.0 / 255.0)
+                        || totalDifference >= (28.0 / 255.0);
+                    if (!changed)
+                        continue;
+
+                    mask = 1.0;
+                    changedCount += 1.0;
+                }
+            }
+
+            float luminance = sampledCount > 0.0
+                ? luminanceTotal / sampledCount
+                : 0.0;
+            luminance = pow(
+                saturate((luminance - 0.012) / 0.976),
+                0.82);
+            return float4(luminance, mask, 0.0, 1.0);
+        }
+        """;
+
     private const string TransitionShaderSource = """
         cbuffer TransitionConstants : register(b0)
         {
@@ -1385,9 +2296,16 @@ internal sealed class Direct3D11Presenter : IDisposable
             float DesktopOpacity;
             float GradientProgress;
             float GradientEnabled;
-            float TargetSurfaceHeight;
-            float Padding;
+            float InterfaceMaskEnabled;
+            float Padding0;
+            float2 TargetSurfaceSize;
+            float2 TargetViewportOrigin;
+            float2 TargetViewportSize;
+            float2 Padding1;
         };
+
+        Texture2D<float2> AttackInterface : register(t1);
+        SamplerState InterfaceMaskSampler : register(s1);
 
         struct VertexInput
         {
@@ -1425,7 +2343,19 @@ internal sealed class Direct3D11Presenter : IDisposable
                 alpha *= 1.0 - smoothstep(
                     front - feather,
                     front + feather,
-                    input.Position.y / max(TargetSurfaceHeight, 1.0));
+                    input.Position.y / max(TargetSurfaceSize.y, 1.0));
+            }
+            if (InterfaceMaskEnabled > 0.5)
+            {
+                float2 captureUv = (
+                    TargetViewportOrigin
+                    + input.TexturePosition * TargetViewportSize)
+                    / max(TargetSurfaceSize, float2(1.0, 1.0));
+                alpha *= step(
+                    0.5,
+                    AttackInterface.Sample(
+                        InterfaceMaskSampler,
+                        saturate(captureUv)).g);
             }
             return float4(BackgroundColor, alpha);
         }

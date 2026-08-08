@@ -28,6 +28,10 @@ internal sealed class NativeWallpaperWindow : IDisposable
     private IReadOnlyDictionary<string, PreparedImage?>? _pendingDatabaseImages;
     private IReadOnlyDictionary<string, PreparedImage?> _activeDatabaseImages =
         new Dictionary<string, PreparedImage?>();
+    private AttackInterfaceCaptureRequest? _pendingAttackInterfaceCapture;
+    private AttackCompositionRequest? _pendingAttackComposition;
+    private bool _stopAttackCompositionPending;
+    private AttackComposition? _attackComposition;
     private PreparedImage? _activeImage;
     private MonitorOutputPlan _currentPlan;
     private bool _hasPendingImage;
@@ -55,30 +59,73 @@ internal sealed class NativeWallpaperWindow : IDisposable
         }
     }
 
-    public AttackFrameSnapshot CaptureAttackFrame()
+    public AttackFrameSnapshot BeginAttackComposition(
+        AttackInterfaceFrame? interfaceFrame,
+        double transitionSeconds)
     {
-        lock (_runtimeLock)
+        AttackCompositionRequest request = new(
+            interfaceFrame,
+            transitionSeconds);
+        lock (_commandLock)
         {
-            SceneRuntime[] runtimes = _sceneRuntimes.ToArray();
-            IReadOnlyList<MatrixScenePresentation> presentations =
-                BuildPresentations(
-                    _currentPlan,
-                    captureAttackCutoff: true,
-                    runtimes);
-            long latestStreamId = runtimes.Length == 0
-                ? 0
-                : runtimes.Max(runtime =>
-                {
-                    lock (runtime.Scene.SyncRoot)
-                        return runtime.Scene.LatestStreamId;
-                });
-            SharedMatrixScene primary = runtimes.FirstOrDefault()?.Scene
-                ?? throw new InvalidOperationException(
-                    "Общий кадр ещё не создан.");
-            return new AttackFrameSnapshot(
-                primary,
-                presentations,
-                latestStreamId);
+            _pendingAttackComposition = request;
+            _stopAttackCompositionPending = false;
+        }
+        if (!request.Completed.Wait(TimeSpan.FromSeconds(5)))
+        {
+            throw new TimeoutException(
+                "Поток обоев не подготовил симуляцию АТАКИ СИСТЕМЫ.");
+        }
+        if (request.Error is not null)
+        {
+            throw new InvalidOperationException(
+                "Не удалось подготовить симуляцию АТАКИ СИСТЕМЫ.",
+                request.Error);
+        }
+        return request.Snapshot
+            ?? throw new InvalidOperationException(
+                "Симуляция АТАКИ СИСТЕМЫ не вернула кадр.");
+    }
+
+    public AttackInterfaceFrame CaptureAttackInterface()
+    {
+        AttackInterfaceCaptureRequest request = new();
+        lock (_commandLock)
+        {
+            if (_pendingAttackInterfaceCapture is not null)
+            {
+                throw new InvalidOperationException(
+                    "Снимок интерфейса АТАКИ уже выполняется.");
+            }
+            _pendingAttackInterfaceCapture = request;
+        }
+        if (!request.Completed.Wait(TimeSpan.FromSeconds(5)))
+        {
+            lock (_commandLock)
+            {
+                if (ReferenceEquals(_pendingAttackInterfaceCapture, request))
+                    _pendingAttackInterfaceCapture = null;
+            }
+            throw new TimeoutException(
+                "Поток обоев не подготовил визуальную карту интерфейса.");
+        }
+        if (request.Error is not null)
+        {
+            throw new InvalidOperationException(
+                "Не удалось отделить интерфейс Windows от живых обоев.",
+                request.Error);
+        }
+        return request.Frame
+            ?? throw new InvalidOperationException(
+                "Поток обоев не вернул визуальную карту интерфейса.");
+    }
+
+    public void EndAttackComposition()
+    {
+        lock (_commandLock)
+        {
+            _pendingAttackComposition = null;
+            _stopAttackCompositionPending = true;
         }
     }
 
@@ -123,11 +170,19 @@ internal sealed class NativeWallpaperWindow : IDisposable
         MonitorOutputPlan plan,
         AppSettings settings,
         bool animateStartupReveal,
+        IReadOnlyDictionary<string, PreparedImage?>? initialDatabaseImages = null,
         Action<string, Exception, bool>? failureHandler = null)
     {
         _bounds = plan.VirtualBounds;
         _currentPlan = plan;
         _initialSettings = settings.Copy();
+        if (initialDatabaseImages is not null)
+        {
+            _activeDatabaseImages =
+                new Dictionary<string, PreparedImage?>(
+                    initialDatabaseImages,
+                    StringComparer.OrdinalIgnoreCase);
+        }
         _animateStartupReveal = animateStartupReveal;
         _failureHandler = failureHandler;
         _thread = new Thread(RenderThreadMain)
@@ -329,11 +384,39 @@ internal sealed class NativeWallpaperWindow : IDisposable
                     activePlan = ApplyPendingCommands(
                         activePlan,
                         ref presentedVersion);
+
+                    // The desktop duplication frame represents the scene that
+                    // DWM is displaying now. Capture against that same scene
+                    // before RenderIfDue advances the simulation; otherwise a
+                    // legitimate stream step would be mistaken for Windows UI.
+                    AttackInterfaceCaptureRequest? interfaceCapture =
+                        PeekAttackInterfaceCaptureRequest();
+                    bool interfaceCapturePrepared =
+                        interfaceCapture is not null
+                        && _direct3DPresenter?.PrepareAttackInterfaceCapture(
+                            _bounds,
+                            _bounds.Width,
+                            _bounds.Height) == true;
+                    if (interfaceCapture is not null
+                        && interfaceCapturePrepared)
+                    {
+                        interfaceCapture =
+                            TakeAttackInterfaceCaptureRequest();
+                        if (interfaceCapture is not null)
+                        {
+                            CompleteAttackInterfaceCapture(
+                                interfaceCapture,
+                                activePlan,
+                                ref presentedVersion);
+                        }
+                    }
+
                     TimeSpan now = sharedClock.Elapsed;
                     foreach (SceneRuntime runtime in _sceneRuntimes)
                         runtime.Renderer.RenderIfDue(
                             paused: false,
                             now);
+                    UpdateAttackComposition(now);
                     waitMilliseconds = _sceneRuntimes
                         .Min(runtime =>
                             runtime.Renderer.RecommendedWaitMilliseconds(
@@ -341,6 +424,14 @@ internal sealed class NativeWallpaperWindow : IDisposable
                 }
                 else
                     waitMilliseconds = 25;
+                if (PeekAttackInterfaceCaptureRequest() is not null)
+                {
+                    // Warm-up is independent of the configured stream rate:
+                    // repeat the unchanged wallpaper frame while DWM and each
+                    // duplication output establish their common phase.
+                    presentedVersion = long.MinValue;
+                    waitMilliseconds = Math.Min(waitMilliseconds, 16);
+                }
                 if (!startupRevealCompleted)
                 {
                     double progress = Math.Clamp(
@@ -394,6 +485,7 @@ internal sealed class NativeWallpaperWindow : IDisposable
         }
         finally
         {
+            DisposeAttackComposition();
             foreach (SceneRuntime runtime in _sceneRuntimes)
                 runtime.Dispose();
             _sceneRuntimes.Clear();
@@ -428,14 +520,62 @@ internal sealed class NativeWallpaperWindow : IDisposable
         }
     }
 
-    private IReadOnlyList<MatrixScenePresentation> BuildPresentations(
-        MonitorOutputPlan plan,
-        bool captureAttackCutoff = false,
-        IReadOnlyList<SceneRuntime>? runtimeSnapshot = null)
+    private AttackInterfaceCaptureRequest?
+        PeekAttackInterfaceCaptureRequest()
     {
-        IReadOnlyList<SceneRuntime> sourceRuntimes =
-            runtimeSnapshot ?? _sceneRuntimes;
-        Dictionary<string, SceneRuntime> runtimes = sourceRuntimes
+        lock (_commandLock)
+            return _pendingAttackInterfaceCapture;
+    }
+
+    private AttackInterfaceCaptureRequest?
+        TakeAttackInterfaceCaptureRequest()
+    {
+        lock (_commandLock)
+        {
+            AttackInterfaceCaptureRequest? request =
+                _pendingAttackInterfaceCapture;
+            _pendingAttackInterfaceCapture = null;
+            return request;
+        }
+    }
+
+    private void CompleteAttackInterfaceCapture(
+        AttackInterfaceCaptureRequest request,
+        MonitorOutputPlan plan,
+        ref long presentedVersion)
+    {
+        try
+        {
+            Direct3D11Presenter presenter = _direct3DPresenter
+                ?? throw new InvalidOperationException(
+                    "D3D11-композитор живых обоев отсутствует.");
+            IReadOnlyList<MatrixScenePresentation> presentations =
+                BuildPresentations(plan);
+            request.Frame = presenter.PresentAndCapture(
+                _bounds.Width,
+                _bounds.Height,
+                presentations,
+                _bounds,
+                AttackInterfaceCaptureService.SampleScale);
+            presentedVersion = CombinedSceneVersion();
+            Volatile.Write(
+                ref _lastPresentUtcTicks,
+                DateTime.UtcNow.Ticks);
+        }
+        catch (Exception exception)
+        {
+            request.Error = exception;
+        }
+        finally
+        {
+            request.Completed.Set();
+        }
+    }
+
+    private IReadOnlyList<MatrixScenePresentation> BuildPresentations(
+        MonitorOutputPlan plan)
+    {
+        Dictionary<string, SceneRuntime> runtimes = _sceneRuntimes
             .ToDictionary(
                 runtime => runtime.Id,
                 StringComparer.OrdinalIgnoreCase);
@@ -450,20 +590,10 @@ internal sealed class NativeWallpaperWindow : IDisposable
             }
             presentations.AddRange(scenePlan.Targets
                 .Where(target => !target.IsVirtual)
-                .Select(target =>
-            {
-                long attackCutoff = -1;
-                if (captureAttackCutoff)
-                {
-                    lock (runtime.Scene.SyncRoot)
-                        attackCutoff = runtime.Scene.LatestStreamId;
-                }
-                return new MatrixScenePresentation(
+                .Select(target => new MatrixScenePresentation(
                     runtime.Scene,
                     target.TargetBounds,
-                    target.SourceBounds,
-                    attackCutoff);
-            }));
+                    target.SourceBounds)));
         }
         return presentations;
     }
@@ -477,6 +607,8 @@ internal sealed class NativeWallpaperWindow : IDisposable
         IReadOnlyDictionary<string, PreparedImage?>? databaseImages;
         bool hasImage;
         bool resetImageOverlay;
+        AttackCompositionRequest? attackRequest;
+        bool stopAttackComposition;
         lock (_commandLock)
         {
             pendingPlan = _pendingPlan;
@@ -488,7 +620,14 @@ internal sealed class NativeWallpaperWindow : IDisposable
             _hasPendingImage = false;
             resetImageOverlay = _resetPendingImageOverlay;
             _resetPendingImageOverlay = false;
+            attackRequest = _pendingAttackComposition;
+            _pendingAttackComposition = null;
+            stopAttackComposition = _stopAttackCompositionPending;
+            _stopAttackCompositionPending = false;
         }
+
+        if (stopAttackComposition)
+            DisposeAttackComposition();
 
         if (hasImage)
             _activeImage = image;
@@ -540,8 +679,248 @@ internal sealed class NativeWallpaperWindow : IDisposable
                     databaseImage,
                     runtime.ImageProjection);
             }
+            RefreshAttackDatabaseImages();
+        }
+        if (attackRequest is not null)
+        {
+            try
+            {
+                DisposeAttackComposition();
+                _attackComposition = CreateAttackComposition(
+                    activePlan,
+                    attackRequest.InterfaceFrame,
+                    attackRequest.TransitionSeconds);
+                attackRequest.Snapshot = _attackComposition.Snapshot;
+            }
+            catch (Exception exception)
+            {
+                attackRequest.Error = exception;
+            }
+            finally
+            {
+                attackRequest.Completed.Set();
+            }
         }
         return activePlan;
+    }
+
+    private AttackComposition CreateAttackComposition(
+        MonitorOutputPlan plan,
+        AttackInterfaceFrame? interfaceFrame,
+        double transitionSeconds)
+    {
+        PreparedImage? interfaceImage = PrepareAttackImage(interfaceFrame);
+        Dictionary<string, SceneRuntime> flowMasters = _sceneRuntimes
+            .Where(runtime => runtime.IsFlowMaster)
+            .GroupBy(
+                runtime => runtime.FlowRootMonitorId,
+                StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(
+                group => group.Key,
+                group => group.First(),
+                StringComparer.OrdinalIgnoreCase);
+        List<AttackSceneRuntime> attackRuntimes = [];
+        List<MatrixScenePresentation> presentations = [];
+        long latestStreamId = 0;
+
+        try
+        {
+            foreach (MonitorScenePlan scenePlan in plan.Scenes)
+            {
+                if (!flowMasters.TryGetValue(
+                        scenePlan.FlowRootMonitorId,
+                        out SceneRuntime? flowSource))
+                {
+                    continue;
+                }
+
+                bool hasDatabaseImage = scenePlan.Settings.ImageMode
+                    && ImageForDatabaseRoot(
+                        scenePlan.DatabaseRootMonitorId) is not null;
+                foreach (MonitorSceneTarget target in scenePlan.Targets
+                             .Where(target => !target.IsVirtual))
+                {
+                    long streamCutoff;
+                    lock (flowSource.Scene.SyncRoot)
+                        streamCutoff = flowSource.Scene.LatestStreamId;
+                    latestStreamId = Math.Max(
+                        latestStreamId,
+                        streamCutoff);
+
+                    AppSettings interfaceSettings =
+                        scenePlan.Settings.Copy(
+                            includeMonitorProfiles: false);
+                    interfaceSettings.ImageMode = interfaceImage is not null;
+                    SharedMatrixScene scene = new(
+                        Math.Max(1, flowSource.Scene.Width),
+                        Math.Max(1, flowSource.Scene.Height));
+                    MatrixSceneRenderer.AttackImageLayerRenderer renderer =
+                        flowSource.Renderer.CreateAttackImageLayer(
+                        scene,
+                        interfaceSettings,
+                        interfaceImage,
+                        AttackImageProjection(target),
+                        target.SourceBounds,
+                        streamCutoff);
+
+                    AttackSceneRuntime attackRuntime = new(
+                        scenePlan.DatabaseRootMonitorId,
+                        scenePlan.ImageProjection,
+                        scenePlan.Settings.Copy(
+                            includeMonitorProfiles: false),
+                        Math.Max(transitionSeconds, 0.001),
+                        hasDatabaseImage,
+                        scene,
+                        renderer);
+                    attackRuntimes.Add(attackRuntime);
+                    presentations.Add(new MatrixScenePresentation(
+                        scene,
+                        target.TargetBounds,
+                        target.SourceBounds,
+                        streamCutoff));
+                }
+            }
+
+            SharedMatrixScene primary = attackRuntimes.FirstOrDefault()?.Scene
+                ?? throw new InvalidOperationException(
+                    "Активные сцены АТАКИ СИСТЕМЫ отсутствуют.");
+            AttackFrameSnapshot snapshot = new(
+                primary,
+                presentations,
+                latestStreamId,
+                interfaceFrame?.InfluencedSampleCount ?? 0);
+            DiagnosticLog.Write(
+                "Симуляция интерфейса АТАКИ подготовлена через ядро образов: "
+                + $"областей={attackRuntimes.Count}; "
+                + $"отсчётов интерфейса={interfaceFrame?.InfluencedSampleCount ?? 0}; "
+                + $"захват={transitionSeconds:0.##} с; "
+                + "переход к базе=первая фактическая смена после захвата.");
+            return new AttackComposition(
+                attackRuntimes,
+                snapshot);
+        }
+        catch
+        {
+            foreach (AttackSceneRuntime runtime in attackRuntimes)
+                runtime.Dispose();
+            throw;
+        }
+    }
+
+    private void UpdateAttackComposition(TimeSpan now)
+    {
+        AttackComposition? composition = _attackComposition;
+        if (composition is null)
+            return;
+
+        double elapsedSeconds = composition.Clock.Elapsed.TotalSeconds;
+        foreach (AttackSceneRuntime runtime in composition.Runtimes)
+        {
+            if (!runtime.DatabaseActive
+                && !runtime.HadDatabaseImageAtStart
+                && elapsedSeconds >= runtime.NoDatabaseReleaseSeconds)
+            {
+                ActivateAttackDatabase(runtime, image: null);
+                DiagnosticLog.Write(
+                    "АТАКА СИСТЕМЫ завершила отпечаток интерфейса без Базы данных: "
+                    + $"root={runtime.DatabaseRootMonitorId}; "
+                    + $"boundary={runtime.NoDatabaseReleaseSeconds:0.##} с.");
+            }
+            runtime.Renderer.RenderIfDue(now);
+        }
+    }
+
+    private void RefreshAttackDatabaseImages()
+    {
+        AttackComposition? composition = _attackComposition;
+        if (composition is null)
+            return;
+        foreach (AttackSceneRuntime runtime in composition.Runtimes)
+        {
+            PreparedImage? image =
+                ImageForDatabaseRoot(runtime.DatabaseRootMonitorId);
+            if (runtime.DatabaseActive)
+            {
+                runtime.Renderer.SetImage(
+                    image,
+                    runtime.DatabaseProjection);
+                continue;
+            }
+
+            // This method is called only when the manager publishes a real
+            // database-image change. A change that occurs before capture has
+            // completed is intentionally ignored; the following publication
+            // becomes the first eligible boundary.
+            if (composition.Clock.Elapsed.TotalSeconds
+                < runtime.CaptureSeconds)
+            {
+                continue;
+            }
+
+            ActivateAttackDatabase(runtime, image);
+            DiagnosticLog.Write(
+                "АТАКА СИСТЕМЫ передала новые струи Базе данных на "
+                + "фактической смене образа: "
+                + $"root={runtime.DatabaseRootMonitorId}; "
+                + $"elapsed={composition.Clock.Elapsed.TotalSeconds:0.##} с.");
+        }
+    }
+
+    private static void ActivateAttackDatabase(
+        AttackSceneRuntime runtime,
+        PreparedImage? image)
+    {
+        runtime.DatabaseActive = true;
+        runtime.Renderer.UpdateSettings(runtime.DatabaseSettings);
+        runtime.Renderer.SetImage(
+            image,
+            runtime.DatabaseProjection);
+    }
+
+    private void DisposeAttackComposition()
+    {
+        AttackComposition? composition = _attackComposition;
+        _attackComposition = null;
+        composition?.Dispose();
+    }
+
+    private MatrixImageProjection AttackImageProjection(
+        MonitorSceneTarget target) =>
+        new(
+            Math.Max(1, _bounds.Width),
+            Math.Max(1, _bounds.Height),
+            new DrawingRectangle(
+                target.TargetBounds.Left,
+                target.TargetBounds.Top,
+                Math.Max(1, target.TargetBounds.Width),
+                Math.Max(1, target.TargetBounds.Height)),
+            target.SourceBounds);
+
+    private static PreparedImage? PrepareAttackImage(
+        AttackInterfaceFrame? frame)
+    {
+        if (frame is null
+            || frame.Width <= 0
+            || frame.Height <= 0
+            || frame.Samples.Length != frame.Width * frame.Height * 2)
+        {
+            return null;
+        }
+
+        int pixelCount = checked(frame.Width * frame.Height);
+        byte[] tone = new byte[pixelCount];
+        byte[] influence = new byte[pixelCount];
+        for (int index = 0; index < pixelCount; index++)
+        {
+            tone[index] = frame.Samples[index * 2];
+            influence[index] = frame.Samples[index * 2 + 1];
+        }
+        return new PreparedImage(
+            tone,
+            frame.Width,
+            frame.Height,
+            "ATTACK://SYSTEM-INTERFACE",
+            influence);
     }
 
     private void ReconfigureRuntimes(MonitorOutputPlan plan)
@@ -870,6 +1249,90 @@ internal sealed class NativeWallpaperWindow : IDisposable
     {
         RequestClose();
         WaitForClose(TimeSpan.FromSeconds(2));
+    }
+
+    private sealed class AttackCompositionRequest
+    {
+        public AttackInterfaceFrame? InterfaceFrame { get; }
+        public double TransitionSeconds { get; }
+        public ManualResetEventSlim Completed { get; } = new(false);
+        public AttackFrameSnapshot? Snapshot { get; set; }
+        public Exception? Error { get; set; }
+
+        public AttackCompositionRequest(
+            AttackInterfaceFrame? interfaceFrame,
+            double transitionSeconds)
+        {
+            InterfaceFrame = interfaceFrame;
+            TransitionSeconds = transitionSeconds;
+        }
+    }
+
+    private sealed class AttackInterfaceCaptureRequest
+    {
+        public ManualResetEventSlim Completed { get; } = new(false);
+        public AttackInterfaceFrame? Frame { get; set; }
+        public Exception? Error { get; set; }
+    }
+
+    private sealed class AttackComposition : IDisposable
+    {
+        public IReadOnlyList<AttackSceneRuntime> Runtimes { get; }
+        public AttackFrameSnapshot Snapshot { get; }
+        public Stopwatch Clock { get; } = Stopwatch.StartNew();
+
+        public AttackComposition(
+            IReadOnlyList<AttackSceneRuntime> runtimes,
+            AttackFrameSnapshot snapshot)
+        {
+            Runtimes = runtimes;
+            Snapshot = snapshot;
+        }
+
+        public void Dispose()
+        {
+            Clock.Stop();
+            foreach (AttackSceneRuntime runtime in Runtimes)
+                runtime.Dispose();
+        }
+    }
+
+    private sealed class AttackSceneRuntime : IDisposable
+    {
+        public string DatabaseRootMonitorId { get; }
+        public MatrixImageProjection DatabaseProjection { get; }
+        public AppSettings DatabaseSettings { get; }
+        public double CaptureSeconds { get; }
+        public bool HadDatabaseImageAtStart { get; }
+        public double NoDatabaseReleaseSeconds =>
+            Math.Max(CaptureSeconds * 2.0, 1.0);
+        public SharedMatrixScene Scene { get; }
+        public MatrixSceneRenderer.AttackImageLayerRenderer Renderer { get; }
+        public bool DatabaseActive { get; set; }
+
+        public AttackSceneRuntime(
+            string databaseRootMonitorId,
+            MatrixImageProjection databaseProjection,
+            AppSettings databaseSettings,
+            double captureSeconds,
+            bool hadDatabaseImageAtStart,
+            SharedMatrixScene scene,
+            MatrixSceneRenderer.AttackImageLayerRenderer renderer)
+        {
+            DatabaseRootMonitorId = databaseRootMonitorId;
+            DatabaseProjection = databaseProjection;
+            DatabaseSettings = databaseSettings;
+            CaptureSeconds = captureSeconds;
+            HadDatabaseImageAtStart = hadDatabaseImageAtStart;
+            Scene = scene;
+            Renderer = renderer;
+        }
+
+        public void Dispose()
+        {
+            Renderer.Dispose();
+            Scene.Dispose();
+        }
     }
 
     private sealed class SceneRuntime : IDisposable

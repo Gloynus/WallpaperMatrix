@@ -11,7 +11,11 @@ public sealed class ImageSequenceService
     private readonly object _cacheLock = new();
     private readonly Dictionary<SourceCacheKey, ImageSourceFrame> _sourceCache = [];
     private readonly LinkedList<SourceCacheKey> _sourceCacheOrder = [];
+    private readonly HashSet<string> _reportedUnavailable =
+        new(StringComparer.OrdinalIgnoreCase);
     private int _index = -1;
+
+    public event Action<string, bool>? ImageAvailabilityChanged;
 
     public int Count => _files.Count;
     public string? CurrentPath => _index >= 0 && _index < _files.Count ? _files[_index] : null;
@@ -90,9 +94,13 @@ public sealed class ImageSequenceService
             foreach (ImagePlaylistEntry entry in entries)
             {
                 if (!entry.Enabled
-                    || !File.Exists(entry.Path)
                     || !ImagePlaylistCatalog.IsSupportedImage(entry.Path))
                 {
+                    continue;
+                }
+                if (!File.Exists(entry.Path))
+                {
+                    ReportUnavailable(entry.Path);
                     continue;
                 }
                 string fullPath = Path.GetFullPath(entry.Path);
@@ -116,7 +124,10 @@ public sealed class ImageSequenceService
                 file.LastWriteTimeUtc.Ticks,
                 file.Length);
             if (TryGetCached(cacheKey, out ImageSourceFrame cached))
+            {
+                ReportAvailable(file.FullName);
                 return cached;
+            }
 
             int sourceWidth;
             int sourceHeight;
@@ -160,13 +171,39 @@ public sealed class ImageSequenceService
                 file.FullName,
                 file.LastWriteTimeUtc,
                 file.Length);
+            ReportAvailable(file.FullName);
             AddToCache(cacheKey, frame);
             return frame;
         }
         catch
         {
+            ReportUnavailable(path);
             return null;
         }
+    }
+
+    private void ReportUnavailable(string path)
+    {
+        string key;
+        try
+        {
+            key = Path.GetFullPath(path);
+        }
+        catch
+        {
+            key = path;
+        }
+        if (_reportedUnavailable.Add(key))
+            ImageAvailabilityChanged?.Invoke(path, false);
+    }
+
+    private void ReportAvailable(string path)
+    {
+        _reportedUnavailable.Remove(path);
+        // A sequence may have been rebuilt since the failed read while the
+        // panel still retains the red state. Every successful read therefore
+        // confirms availability; the bound row ignores unchanged values.
+        ImageAvailabilityChanged?.Invoke(path, true);
     }
 
     private bool TryGetCached(

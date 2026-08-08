@@ -124,7 +124,6 @@ public partial class App : System.Windows.Application
         startInBackground |= validateRouteSwitch;
         startInBackground |= validateVirtualOutput;
         startInBackground |= validateRecovery;
-        forceAttack |= validateAttackOverlay;
 
         _singleInstanceMutex = new Mutex(true, "Local\\WallpaperMatrix.SingleInstance", out bool isFirstInstance);
         if (!isFirstInstance)
@@ -140,8 +139,15 @@ public partial class App : System.Windows.Application
 
         _settingsStore = new SettingsStore();
         _settings = _settingsStore.Load();
-        if (validateRouteSwitch)
+        if (validateRouteSwitch || validateAttackOverlay)
             _settings.PauseDuringFullscreenApps = false;
+        if (validateAttackOverlay)
+        {
+            // Keep the lifecycle check short but meaningful: the reference
+            // frame must already be fully opaque before interface capture.
+            // This copy is never persisted to the operator's settings.
+            _settings.ImageDurationSeconds = 1.0;
+        }
         IReadOnlyList<MonitorDescriptor> startupMonitors =
             OutputDeviceCatalog.Capture(_settings);
         MonitorTopology.EnsureProfiles(
@@ -158,6 +164,8 @@ public partial class App : System.Windows.Application
         _wallpaperManager.RuntimeStatusChanged += OnWallpaperRuntimeStatusChanged;
         _wallpaperManager.VirtualOutputStateChanged +=
             OnVirtualOutputStateChanged;
+        _wallpaperManager.PlaylistImageAvailabilityChanged +=
+            OnPlaylistImageAvailabilityChanged;
         try
         {
             _wallpaperManager.Start();
@@ -168,6 +176,8 @@ public partial class App : System.Windows.Application
             _wallpaperManager.RuntimeStatusChanged -= OnWallpaperRuntimeStatusChanged;
             _wallpaperManager.VirtualOutputStateChanged -=
                 OnVirtualOutputStateChanged;
+            _wallpaperManager.PlaylistImageAvailabilityChanged -=
+                OnPlaylistImageAvailabilityChanged;
             DiagnosticLog.Write("Запуск живых обоев завершился ошибкой.", ex);
             _wallpaperManager.Dispose();
             _wallpaperManager = null;
@@ -215,13 +225,21 @@ public partial class App : System.Windows.Application
             Dispatcher.BeginInvoke(StartAttack);
         if (validateAttackOverlay)
         {
+            int phase = 0;
             _attackValidationTimer = new DispatcherTimer(
                 DispatcherPriority.Background)
             {
-                Interval = TimeSpan.FromSeconds(12)
+                Interval = TimeSpan.FromSeconds(2)
             };
             _attackValidationTimer.Tick += (_, _) =>
             {
+                if (phase++ == 0)
+                {
+                    StartAttack();
+                    _attackValidationTimer!.Interval =
+                        TimeSpan.FromSeconds(12);
+                    return;
+                }
                 _attackValidationTimer?.Stop();
                 DiagnosticLog.Write(
                     "Самопроверка жизненного цикла АТАКИ СИСТЕМЫ завершена.");
@@ -593,6 +611,17 @@ public partial class App : System.Windows.Application
         string monitorId) =>
         _wallpaperManager?.ShowImage(preview, path, monitorId);
 
+    private void OnPlaylistImageAvailabilityChanged(
+        string path,
+        bool available)
+    {
+        Dispatcher.BeginInvoke(
+            DispatcherPriority.Background,
+            () => _settingsWindow?.SetPlaylistImageAvailability(
+                path,
+                available));
+    }
+
     private void SetWallpaperPaused(bool paused) =>
         _wallpaperManager?.SetPaused(paused);
 
@@ -633,9 +662,20 @@ public partial class App : System.Windows.Application
         _settingsWindow?.LoadSettings(_settings);
     }
 
-    private void SelectPlaylistFromTray(string playlistId)
+    private void SelectPlaylistFromTray(
+        string databaseRootMonitorId,
+        string playlistId)
     {
-        ImagePlaylist? selected = _settings.ImagePlaylists
+        IReadOnlyList<MonitorDescriptor> monitors =
+            OutputDeviceCatalog.Capture(_settings);
+        MonitorTopology.EnsureProfiles(_settings, monitors);
+        MonitorProfile? databaseProfile = MonitorTopology.Find(
+            _settings.MonitorProfiles,
+            databaseRootMonitorId);
+        if (databaseProfile is null)
+            return;
+
+        ImagePlaylist? selected = databaseProfile.Settings.ImagePlaylists
             .FirstOrDefault(playlist => string.Equals(
                 playlist.Id,
                 playlistId,
@@ -643,35 +683,20 @@ public partial class App : System.Windows.Application
         if (selected is null)
             return;
 
-        _settings.ActiveImagePlaylistId = selected.Id;
-        _settings.OperatorPlaylistId = selected.Id;
-        _settings.OperatorPlaylistName = selected.Name;
-        foreach (MonitorProfile profile in _settings.MonitorProfiles)
-        {
-            ImagePlaylist? profilePlaylist = profile.Settings.ImagePlaylists
-                .FirstOrDefault(playlist => string.Equals(
-                    playlist.Id,
-                    selected.Id,
-                    StringComparison.OrdinalIgnoreCase))
-                ?? profile.Settings.ImagePlaylists.FirstOrDefault(playlist =>
-                    string.Equals(
-                        playlist.Name,
-                        selected.Name,
-                        StringComparison.CurrentCultureIgnoreCase));
-            if (profilePlaylist is null)
-                continue;
-            profile.Settings.ActiveImagePlaylistId = profilePlaylist.Id;
-            profile.Settings.OperatorPlaylistId = profilePlaylist.Id;
-            profile.Settings.OperatorPlaylistName = profilePlaylist.Name;
-        }
-
+        databaseProfile.Settings.ActiveImagePlaylistId = selected.Id;
+        databaseProfile.Settings.OperatorPlaylistId = selected.Id;
+        databaseProfile.Settings.OperatorPlaylistName = selected.Name;
+        MonitorSettingsSynchronizer.SynchronizePrimary(
+            _settings,
+            monitors);
         _settings.Normalize();
         _settingsStore?.Save(_settings);
         _playlistStore?.Save(_settings);
         _wallpaperManager?.ApplySettings(_settings);
         UpdateTrayState();
         DiagnosticLog.Write(
-            $"Плейлист переключён из области уведомлений: {selected.Name}.");
+            $"Плейлист базы данных {databaseRootMonitorId} переключён "
+            + $"из области уведомлений: {selected.Name}.");
     }
 
     private void UpdateTrayState()
@@ -756,6 +781,8 @@ public partial class App : System.Windows.Application
             _wallpaperManager.RuntimeStatusChanged -= OnWallpaperRuntimeStatusChanged;
             _wallpaperManager.VirtualOutputStateChanged -=
                 OnVirtualOutputStateChanged;
+            _wallpaperManager.PlaylistImageAvailabilityChanged -=
+                OnPlaylistImageAvailabilityChanged;
         }
         _wallpaperManager?.Dispose();
         _singleInstanceMutex?.ReleaseMutex();

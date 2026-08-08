@@ -5,6 +5,11 @@
 
 ## 3.x
 
+- [3.8.0](docs/releases/3.8.0.md)
+- [3.7.11](docs/releases/3.7.11.md)
+- [3.7.10](docs/releases/3.7.10.md)
+- [3.7.9](docs/releases/3.7.9.md)
+- [3.7.8](docs/releases/3.7.8.md)
 - [3.7.7](docs/releases/3.7.7.md)
 - [3.7.6](docs/releases/3.7.6.md)
 - [3.7.5](docs/releases/3.7.5.md)

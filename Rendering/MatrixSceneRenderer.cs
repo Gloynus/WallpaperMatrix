@@ -33,6 +33,7 @@ internal sealed class MatrixSceneRenderer : IDisposable
     private PreparedImage? _image;
     private MatrixImageProjection _imageProjection;
     private byte[]? _imageMask;
+    private byte[]? _imageInfluenceMask;
     private GlyphAtlasData? _pendingAtlas;
     private bool _maskDirty = true;
     private bool _wasPaused;
@@ -246,6 +247,28 @@ internal sealed class MatrixSceneRenderer : IDisposable
             _observedTrailGenerations,
             count);
     }
+
+    /// <summary>
+    /// Creates a view-local image layer for the system attack. The layer owns
+    /// no stream simulation and no glyph atlas: it observes deposits from this
+    /// renderer and publishes only the cells that can be visible through the
+    /// requested source viewport.
+    /// </summary>
+    public AttackImageLayerRenderer CreateAttackImageLayer(
+        SharedMatrixScene scene,
+        AppSettings settings,
+        PreparedImage? image,
+        MatrixImageProjection projection,
+        System.Drawing.Rectangle sourceBounds,
+        long minimumStreamId) =>
+        new(
+            this,
+            scene,
+            settings,
+            image,
+            projection,
+            sourceBounds,
+            minimumStreamId);
 
     public void SetMotionScale(double scale) =>
         Volatile.Write(
@@ -610,9 +633,8 @@ internal sealed class MatrixSceneRenderer : IDisposable
         if ((uint)column >= (uint)_columns || (uint)row >= (uint)_rows)
             return;
 
-        bool imageInfluence = _settings.ImageMode
-            && _imageMask is not null
-            && _imageMask.Length == _imageLevels.Length;
+        int index = row * _columns + column;
+        bool imageInfluence = HasImageInfluenceAt(index);
         if (imageInfluence)
         {
             ReplaceImageCell(
@@ -622,7 +644,6 @@ internal sealed class MatrixSceneRenderer : IDisposable
                 stream.MemoryFadeSeconds,
                 stream.Id);
         }
-        int index = row * _columns + column;
         if (!imageInfluence)
             ClearImageCell(index);
         uint noise = Hash((uint)column, (uint)row, stream.Seed);
@@ -670,9 +691,6 @@ internal sealed class MatrixSceneRenderer : IDisposable
         if (_observedTrailGenerations.Length != _trailImageResistance.Length)
             _observedTrailGenerations = new long[_trailImageResistance.Length];
 
-        bool imageInfluence = _settings.ImageMode
-            && _imageMask is not null
-            && _imageMask.Length == _imageLevels.Length;
         for (int index = 0; index < count; index++)
         {
             long generation = source._trailGenerations[index];
@@ -681,10 +699,10 @@ internal sealed class MatrixSceneRenderer : IDisposable
             _observedTrailGenerations[index] = generation;
             if (!source._trailOccupied[index])
                 continue;
-
             int row = index / _columns;
             int column = index - row * _columns;
             uint revealSeed = source._trailRevealSeeds[index];
+            bool imageInfluence = HasImageInfluenceAt(index);
             if (imageInfluence)
             {
                 ReplaceImageCell(
@@ -772,64 +790,114 @@ internal sealed class MatrixSceneRenderer : IDisposable
         long streamId)
     {
         int index = row * _columns + column;
-        double sourceTone = _imageMask![index] / 255.0;
+        ImageCellReveal reveal = ResolveImageCell(
+            _imageMask![index],
+            column,
+            row,
+            revealSeed,
+            fadeSeconds,
+            streamId,
+            _settings,
+            _imageGlyphDensities,
+            _columns,
+            _rows);
+        _imageLevels[index] = reveal.Level;
+        _imageInitialLevels[index] = reveal.Level;
+        _imageHoldSeconds[index] = reveal.HoldSeconds;
+        _imageFadeElapsed[index] = 0;
+        _imageFadeSeconds[index] = reveal.FadeSeconds;
+        _imageGlyphs[index] = reveal.Glyph;
+        _imageStyles[index] = reveal.Style;
+        _imageStreamIds[index] = reveal.StreamId;
+    }
+
+    private static ImageCellReveal ResolveImageCell(
+        byte sourceToneByte,
+        int column,
+        int row,
+        uint revealSeed,
+        double fadeSeconds,
+        long streamId,
+        AppSettings settings,
+        GlyphDensity[][] glyphDensities,
+        int columns,
+        int rows)
+    {
+        double sourceTone = sourceToneByte / 255.0;
         double tone = ShapeImageTone(
             sourceTone,
-            _settings.ImageExpressiveness,
-            _settings.ImageToneCalmness);
+            settings.ImageExpressiveness,
+            settings.ImageToneCalmness);
         uint cellHash = Hash((uint)column, (uint)row, 0xC0DEF00Du);
         double coverage = Math.Min(1.0, tone * 1.18);
         double threshold = (
             Bayer4[((row & 3) << 2) + (column & 3)] + 0.5) / 16.0;
         if (coverage < threshold)
-        {
-            _imageLevels[index] = 0;
-            _imageInitialLevels[index] = 0;
-            _imageHoldSeconds[index] = 0;
-            _imageFadeElapsed[index] = 0;
-            _imageGlyphs[index] = 0;
-            _imageStyles[index] = 0;
-            _imageStreamIds[index] = 0;
-            return;
-        }
+            return ImageCellReveal.Empty;
 
         int weightTier = SelectImageWeightTier(cellHash, revealSeed, tone);
         double intensity = (0.12 + tone * 0.78)
-            * EdgeShade((column + 0.5) / _columns)
-            * EdgeShade((row + 0.5) / _rows)
-            * _settings.ImageBrightness;
-        double exactLevel = Math.Clamp(intensity * PaletteLevels, 0.0, PaletteLevels);
+            * EdgeShade((column + 0.5) / Math.Max(1, columns))
+            * EdgeShade((row + 0.5) / Math.Max(1, rows))
+            * settings.ImageBrightness;
+        double exactLevel = Math.Clamp(
+            intensity * PaletteLevels,
+            0.0,
+            PaletteLevels);
         int targetLevel = (int)Math.Floor(exactLevel);
-        if (UnitHash(Hash(cellHash, revealSeed, 0x51ED270Bu)) < exactLevel - targetLevel)
+        if (UnitHash(Hash(cellHash, revealSeed, 0x51ED270Bu))
+            < exactLevel - targetLevel)
+        {
             targetLevel++;
+        }
         targetLevel = Math.Clamp(targetLevel, 0, PaletteLevels);
-        int targetGlyph = targetLevel == 0
-            ? 0
-            : SelectImageGlyph(cellHash, revealSeed, tone, weightTier);
-        _imageLevels[index] = targetLevel;
-        _imageInitialLevels[index] = targetLevel;
-        _imageHoldSeconds[index] = (float)(
-            _settings.ImageDurationSeconds
-            * _settings.ImageStability);
-        _imageFadeElapsed[index] = 0;
-        _imageFadeSeconds[index] = (float)Math.Max(0.1, fadeSeconds);
-        _imageGlyphs[index] = (ushort)targetGlyph;
-        _imageStyles[index] = targetLevel == 0 ? (byte)0 : (byte)(3 + weightTier);
-        _imageStreamIds[index] = targetLevel == 0 ? 0 : streamId;
+        if (targetLevel == 0)
+            return ImageCellReveal.Empty;
+
+        int targetGlyph = SelectImageGlyph(
+            cellHash,
+            revealSeed,
+            tone,
+            weightTier,
+            settings.ImageGlyphMatch,
+            glyphDensities);
+        return new ImageCellReveal(
+            targetLevel,
+            (float)(settings.ImageDurationSeconds * settings.ImageStability),
+            (float)Math.Max(0.1, fadeSeconds),
+            (ushort)targetGlyph,
+            (byte)(3 + weightTier),
+            streamId);
     }
 
     private int SelectImageGlyph(
         uint cellHash,
         uint revealSeed,
         double tone,
-        int weightTier)
+        int weightTier) =>
+        SelectImageGlyph(
+            cellHash,
+            revealSeed,
+            tone,
+            weightTier,
+            _settings.ImageGlyphMatch,
+            _imageGlyphDensities);
+
+    private static int SelectImageGlyph(
+        uint cellHash,
+        uint revealSeed,
+        double tone,
+        int weightTier,
+        double glyphMatch,
+        GlyphDensity[][] imageGlyphDensities)
     {
         uint choice = Hash(cellHash, revealSeed, 0x91E10DA5u);
         double matchRoll = UnitHash(Hash(choice, 0xA341316Cu, 0xC8013EA4u));
-        if (_settings.ImageGlyphMatch <= 0 || matchRoll >= _settings.ImageGlyphMatch)
+        if (glyphMatch <= 0 || matchRoll >= glyphMatch)
             return (int)(choice % MatrixGlyphSet.GlyphStrings.Length);
 
-        GlyphDensity[] densities = _imageGlyphDensities[Math.Clamp(weightTier, 0, 2)];
+        GlyphDensity[] densities =
+            imageGlyphDensities[Math.Clamp(weightTier, 0, 2)];
         if (densities.Length == 0)
             return (int)(choice % MatrixGlyphSet.GlyphStrings.Length);
 
@@ -952,6 +1020,7 @@ internal sealed class MatrixSceneRenderer : IDisposable
         // The previous tone map belongs to the old grid. Initial streams are
         // seeded below, so detach it before they can reveal any image cells.
         _imageMask = null;
+        _imageInfluenceMask = null;
         _maskDirty = true;
         _instances = new GlyphInstance[cellCount];
         _streamsByColumn = new List<RainStream>[_columns];
@@ -1671,84 +1740,175 @@ internal sealed class MatrixSceneRenderer : IDisposable
 
         _maskDirty = false;
         _imageMask = null;
+        _imageInfluenceMask = null;
         if (_image is null || _columns <= 0 || _rows <= 0)
             return;
 
         try
         {
-            int sourceWidth = _image.Width;
-            int sourceHeight = _image.Height;
-            int canvasWidth = Math.Max(1, _imageProjection.CanvasWidth);
-            int canvasHeight = Math.Max(1, _imageProjection.CanvasHeight);
-            System.Drawing.Rectangle viewport =
-                _imageProjection.ViewportBounds;
-            System.Drawing.Rectangle destination =
-                _imageProjection.DestinationBounds;
-            double scaleX = canvasWidth / (double)sourceWidth;
-            double scaleY = canvasHeight / (double)sourceHeight;
-            double scale = _settings.ImageFit == "Fill"
-                ? Math.Max(scaleX, scaleY)
-                : Math.Min(scaleX, scaleY);
-            double drawnWidth = sourceWidth * scale;
-            double drawnHeight = sourceHeight * scale;
-            double offsetX = (canvasWidth - drawnWidth) * 0.5;
-            double offsetY = (canvasHeight - drawnHeight) * 0.5;
-            byte[] mask = new byte[_columns * _rows];
-            double[] offsets = [0.25, 0.75];
-            for (int row = 0; row < _rows; row++)
-            {
-                for (int column = 0; column < _columns; column++)
-                {
-                    double total = 0;
-                    int samples = 0;
-                    foreach (double yOffset in offsets)
-                    {
-                        foreach (double xOffset in offsets)
-                        {
-                            samples++;
-                            double sampleX = (column + xOffset) * _cellWidth;
-                            double sampleY = (row + yOffset) * _cellHeight;
-                            if (sampleX < destination.Left
-                                || sampleX >= destination.Right
-                                || sampleY < destination.Top
-                                || sampleY >= destination.Bottom
-                                || destination.Width <= 0
-                                || destination.Height <= 0)
-                            {
-                                continue;
-                            }
-                            double databaseX = viewport.Left
-                                + (sampleX - destination.Left)
-                                * viewport.Width
-                                / destination.Width;
-                            double databaseY = viewport.Top
-                                + (sampleY - destination.Top)
-                                * viewport.Height
-                                / destination.Height;
-                            double sourceX = (databaseX - offsetX) / scale;
-                            double sourceY = (databaseY - offsetY) / scale;
-                            if (sourceX < 0
-                                || sourceX >= sourceWidth
-                                || sourceY < 0
-                                || sourceY >= sourceHeight)
-                            {
-                                continue;
-                            }
-                            total += SamplePreparedTone(_image, sourceX, sourceY);
-                        }
-                    }
-                    mask[row * _columns + column] = samples == 0
-                        ? (byte)0
-                        : (byte)Math.Clamp((int)Math.Round(total / samples), 0, 255);
-                }
-            }
-            _imageMask = mask;
+            ProjectedImageMap projected = BuildProjectedImageMap(
+                _image,
+                _imageProjection,
+                _settings.ImageFit,
+                columnStart: 0,
+                rowStart: 0,
+                _columns,
+                _rows);
+            _imageMask = projected.Tone;
+            _imageInfluenceMask = projected.Influence;
         }
         catch
         {
             _imageMask = null;
+            _imageInfluenceMask = null;
         }
     }
+
+    private ProjectedImageMap BuildProjectedImageMap(
+        PreparedImage image,
+        MatrixImageProjection projection,
+        string imageFit,
+        int columnStart,
+        int rowStart,
+        int columnCount,
+        int rowCount)
+    {
+        int sourceWidth = image.Width;
+        int sourceHeight = image.Height;
+        int canvasWidth = Math.Max(1, projection.CanvasWidth);
+        int canvasHeight = Math.Max(1, projection.CanvasHeight);
+        System.Drawing.Rectangle viewport = projection.ViewportBounds;
+        System.Drawing.Rectangle destination = projection.DestinationBounds;
+        double scaleX = canvasWidth / (double)sourceWidth;
+        double scaleY = canvasHeight / (double)sourceHeight;
+        double scale = imageFit == "Fill"
+            ? Math.Max(scaleX, scaleY)
+            : Math.Min(scaleX, scaleY);
+        double drawnWidth = sourceWidth * scale;
+        double drawnHeight = sourceHeight * scale;
+        double offsetX = (canvasWidth - drawnWidth) * 0.5;
+        double offsetY = (canvasHeight - drawnHeight) * 0.5;
+        byte[] tone = new byte[checked(columnCount * rowCount)];
+        byte[]? influence = image.InfluenceMap is null
+            ? null
+            : new byte[tone.Length];
+        double[] offsets = [0.25, 0.75];
+        for (int localRow = 0; localRow < rowCount; localRow++)
+        {
+            int row = rowStart + localRow;
+            for (int localColumn = 0;
+                 localColumn < columnCount;
+                 localColumn++)
+            {
+                int column = columnStart + localColumn;
+                double total = 0;
+                double toneWeight = 0;
+                double influenceMaximum = 0;
+                int samples = 0;
+                foreach (double yOffset in offsets)
+                {
+                    foreach (double xOffset in offsets)
+                    {
+                        samples++;
+                        double sampleX = (column + xOffset) * _cellWidth;
+                        double sampleY = (row + yOffset) * _cellHeight;
+                        if (sampleX < destination.Left
+                            || sampleX >= destination.Right
+                            || sampleY < destination.Top
+                            || sampleY >= destination.Bottom
+                            || destination.Width <= 0
+                            || destination.Height <= 0)
+                        {
+                            continue;
+                        }
+                        double databaseX = viewport.Left
+                            + (sampleX - destination.Left)
+                            * viewport.Width
+                            / destination.Width;
+                        double databaseY = viewport.Top
+                            + (sampleY - destination.Top)
+                            * viewport.Height
+                            / destination.Height;
+                        double sourceX = (databaseX - offsetX) / scale;
+                        double sourceY = (databaseY - offsetY) / scale;
+                        if (sourceX < 0
+                            || sourceX >= sourceWidth
+                            || sourceY < 0
+                            || sourceY >= sourceHeight)
+                        {
+                            continue;
+                        }
+                        if (influence is null)
+                        {
+                            total += SamplePreparedTone(
+                                image,
+                                sourceX,
+                                sourceY);
+                        }
+                        else
+                        {
+                            PreparedInfluenceSample sample =
+                                SamplePreparedInfluence(
+                                    image,
+                                    sourceX,
+                                    sourceY);
+                            double sampleWeight = sample.Influence / 255.0;
+                            total += sample.Tone * sampleWeight;
+                            toneWeight += sampleWeight;
+                            influenceMaximum = Math.Max(
+                                influenceMaximum,
+                                sample.Influence);
+                        }
+                    }
+                }
+
+                int localIndex = localRow * columnCount + localColumn;
+                double divisor = influence is null
+                    ? samples
+                    : toneWeight;
+                tone[localIndex] = divisor <= 0.000001
+                    ? (byte)0
+                    : (byte)Math.Clamp(
+                        (int)Math.Round(total / divisor),
+                        0,
+                        255);
+                if (influence is not null)
+                {
+                    // Influence is a coverage mask, not a tone. A single
+                    // covered sub-sample is enough to preserve a thin icon
+                    // edge or one-pixel letter; averaging would erase it.
+                    influence[localIndex] = samples == 0
+                        ? (byte)0
+                        : (byte)Math.Clamp(
+                            (int)Math.Round(influenceMaximum),
+                            0,
+                            255);
+                }
+            }
+        }
+        return new ProjectedImageMap(tone, influence);
+    }
+
+    private bool HasImageInfluenceAt(int index) =>
+        HasImageInfluence(
+            _settings.ImageMode,
+            _imageMask,
+            _imageInfluenceMask,
+            index,
+            _imageLevels.Length);
+
+    private static bool HasImageInfluence(
+        bool imageMode,
+        byte[]? tone,
+        byte[]? influence,
+        int index,
+        int expectedLength) =>
+        imageMode
+        && tone is not null
+        && tone.Length == expectedLength
+        && (influence is null
+            || ((uint)index < (uint)influence.Length
+                && influence[index] >= 128));
 
     private static double SamplePreparedTone(
         PreparedImage image,
@@ -1771,6 +1931,55 @@ internal sealed class MatrixSceneRenderer : IDisposable
                 - image.ToneMap[bottom * image.Width + left]) * horizontal;
         return topTone + (bottomTone - topTone) * vertical;
     }
+
+    private static PreparedInfluenceSample SamplePreparedInfluence(
+        PreparedImage image,
+        double x,
+        double y)
+    {
+        byte[] influence = image.InfluenceMap!;
+        double clampedX = Math.Clamp(x - 0.5, 0, image.Width - 1.0);
+        double clampedY = Math.Clamp(y - 0.5, 0, image.Height - 1.0);
+        int left = (int)Math.Floor(clampedX);
+        int top = (int)Math.Floor(clampedY);
+        int right = Math.Min(image.Width - 1, left + 1);
+        int bottom = Math.Min(image.Height - 1, top + 1);
+        double horizontal = clampedX - left;
+        double vertical = clampedY - top;
+        double topLeftWeight = (1.0 - horizontal) * (1.0 - vertical);
+        double topRightWeight = horizontal * (1.0 - vertical);
+        double bottomLeftWeight = (1.0 - horizontal) * vertical;
+        double bottomRightWeight = horizontal * vertical;
+        int topLeft = top * image.Width + left;
+        int topRight = top * image.Width + right;
+        int bottomLeft = bottom * image.Width + left;
+        int bottomRight = bottom * image.Width + right;
+        double topLeftCoverage = influence[topLeft] / 255.0;
+        double topRightCoverage = influence[topRight] / 255.0;
+        double bottomLeftCoverage = influence[bottomLeft] / 255.0;
+        double bottomRightCoverage = influence[bottomRight] / 255.0;
+        double coveredWeight =
+            topLeftWeight * topLeftCoverage
+            + topRightWeight * topRightCoverage
+            + bottomLeftWeight * bottomLeftCoverage
+            + bottomRightWeight * bottomRightCoverage;
+        double weightedTone =
+            image.ToneMap[topLeft] * topLeftWeight * topLeftCoverage
+            + image.ToneMap[topRight] * topRightWeight * topRightCoverage
+            + image.ToneMap[bottomLeft] * bottomLeftWeight * bottomLeftCoverage
+            + image.ToneMap[bottomRight] * bottomRightWeight * bottomRightCoverage;
+        double tone = coveredWeight <= 0.000001
+            ? 0
+            : weightedTone / coveredWeight;
+        double conservativeCoverage = Math.Max(
+            Math.Max(influence[topLeft], influence[topRight]),
+            Math.Max(influence[bottomLeft], influence[bottomRight]));
+        return new PreparedInfluenceSample(tone, conservativeCoverage);
+    }
+
+    private readonly record struct PreparedInfluenceSample(
+        double Tone,
+        double Influence);
 
     private void RebuildCurveLookups()
     {
@@ -1844,7 +2053,531 @@ internal sealed class MatrixSceneRenderer : IDisposable
         _disposed = true;
         _image = null;
         _imageMask = null;
+        _imageInfluenceMask = null;
         _instances = [];
+    }
+
+    /// <summary>
+    /// Compact, view-local image state used by the topmost attack surface.
+    /// Stream ownership, motion, timing and glyph geometry remain in the
+    /// existing renderer. This object only observes deposits and applies the
+    /// ordinary image reveal/fade model to the cells visible in one target.
+    /// </summary>
+    internal sealed class AttackImageLayerRenderer : IDisposable
+    {
+        private readonly MatrixSceneRenderer _source;
+        private readonly SharedMatrixScene _scene;
+        private readonly System.Drawing.Rectangle _sourceBounds;
+        private readonly long _minimumStreamId;
+        private AppSettings _settings;
+        private PreparedImage? _image;
+        private MatrixImageProjection _projection;
+        private byte[]? _imageMask;
+        private byte[]? _imageInfluenceMask;
+        private bool _maskDirty = true;
+        private int _sourceColumns;
+        private int _sourceRows;
+        private int _sourceCellWidth;
+        private int _sourceCellHeight;
+        private int _columnStart;
+        private int _rowStart;
+        private int _columnCount;
+        private int _rowCount;
+        private AttackImageCell[] _cells = [];
+        private GlyphInstance[] _instances = [];
+        private TimeSpan _lastFrameAt;
+        private long _publishedAtlasVersion = long.MinValue;
+        private bool _disposed;
+
+        internal AttackImageLayerRenderer(
+            MatrixSceneRenderer source,
+            SharedMatrixScene scene,
+            AppSettings settings,
+            PreparedImage? image,
+            MatrixImageProjection projection,
+            System.Drawing.Rectangle sourceBounds,
+            long minimumStreamId)
+        {
+            _source = source;
+            _scene = scene;
+            _settings = settings.Copy();
+            _image = image;
+            _projection = projection;
+            _sourceBounds = sourceBounds;
+            _minimumStreamId = minimumStreamId;
+            RebuildRegion();
+            UpdateAndPublish(dt: 0);
+        }
+
+        public void UpdateSettings(AppSettings settings)
+        {
+            bool maskChanged = !string.Equals(
+                settings.ImageFit,
+                _settings.ImageFit,
+                StringComparison.Ordinal);
+            _settings = settings.Copy();
+            if (maskChanged)
+                _maskDirty = true;
+        }
+
+        public void SetImage(
+            PreparedImage? image,
+            MatrixImageProjection projection)
+        {
+            _image = image;
+            _projection = projection;
+            _maskDirty = true;
+        }
+
+        public bool RenderIfDue(TimeSpan now)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            EnsureRegionGeometry();
+            _scene.SetPresentationFrameRate(_settings.FramesPerSecond);
+            double interval = 1.0 / _settings.FramesPerSecond;
+            if ((now - _lastFrameAt).TotalSeconds < interval)
+                return false;
+
+            double dt = Math.Min(
+                0.08,
+                Math.Max(0.0, (now - _lastFrameAt).TotalSeconds));
+            _lastFrameAt = now;
+            EnsureImageMask();
+            UpdateAndPublish(dt);
+            return true;
+        }
+
+        private void EnsureRegionGeometry()
+        {
+            if (_sourceColumns == _source._columns
+                && _sourceRows == _source._rows
+                && _sourceCellWidth == _source._cellWidth
+                && _sourceCellHeight == _source._cellHeight)
+            {
+                return;
+            }
+            RebuildRegion();
+        }
+
+        private void RebuildRegion()
+        {
+            _sourceColumns = _source._columns;
+            _sourceRows = _source._rows;
+            _sourceCellWidth = _source._cellWidth;
+            _sourceCellHeight = _source._cellHeight;
+
+            int left = Math.Clamp(_sourceBounds.Left, 0, _source._width);
+            int top = Math.Clamp(_sourceBounds.Top, 0, _source._height);
+            int right = Math.Clamp(_sourceBounds.Right, left, _source._width);
+            int bottom = Math.Clamp(_sourceBounds.Bottom, top, _source._height);
+            _columnStart = Math.Clamp(
+                left / Math.Max(1, _sourceCellWidth),
+                0,
+                _sourceColumns);
+            _rowStart = Math.Clamp(
+                top / Math.Max(1, _sourceCellHeight),
+                0,
+                _sourceRows);
+            int columnEnd = Math.Clamp(
+                (int)Math.Ceiling(
+                    right / (double)Math.Max(1, _sourceCellWidth)),
+                _columnStart,
+                _sourceColumns);
+            int rowEnd = Math.Clamp(
+                (int)Math.Ceiling(
+                    bottom / (double)Math.Max(1, _sourceCellHeight)),
+                _rowStart,
+                _sourceRows);
+            _columnCount = columnEnd - _columnStart;
+            _rowCount = rowEnd - _rowStart;
+            int cellCount = checked(_columnCount * _rowCount);
+
+            _cells = new AttackImageCell[cellCount];
+            _instances = new GlyphInstance[Math.Max(1, cellCount)];
+
+            for (int localRow = 0; localRow < _rowCount; localRow++)
+            {
+                int sourceRow = _rowStart + localRow;
+                int sourceOffset = sourceRow * _sourceColumns + _columnStart;
+                int localOffset = localRow * _columnCount;
+                if (sourceOffset < 0
+                    || sourceOffset + _columnCount
+                        > _source._trailGenerations.Length)
+                {
+                    continue;
+                }
+                for (int localColumn = 0;
+                     localColumn < _columnCount;
+                     localColumn++)
+                {
+                    _cells[localOffset + localColumn]
+                        .ObservedTrailGeneration =
+                        _source._trailGenerations[
+                            sourceOffset + localColumn];
+                }
+            }
+
+            _imageMask = null;
+            _imageInfluenceMask = null;
+            _maskDirty = true;
+            _publishedAtlasVersion = long.MinValue;
+        }
+
+        private void EnsureImageMask()
+        {
+            if (!_maskDirty)
+                return;
+            _maskDirty = false;
+            _imageMask = null;
+            _imageInfluenceMask = null;
+            if (_image is null || _columnCount <= 0 || _rowCount <= 0)
+                return;
+
+            try
+            {
+                ProjectedImageMap projected =
+                    _source.BuildProjectedImageMap(
+                        _image,
+                        _projection,
+                        _settings.ImageFit,
+                        _columnStart,
+                        _rowStart,
+                        _columnCount,
+                        _rowCount);
+                _imageMask = projected.Tone;
+                _imageInfluenceMask = projected.Influence;
+            }
+            catch
+            {
+                _imageMask = null;
+                _imageInfluenceMask = null;
+            }
+        }
+
+        private void UpdateAndPublish(double dt)
+        {
+            int count = 0;
+            for (int localRow = 0; localRow < _rowCount; localRow++)
+            {
+                int row = _rowStart + localRow;
+                for (int localColumn = 0;
+                     localColumn < _columnCount;
+                     localColumn++)
+                {
+                    int column = _columnStart + localColumn;
+                    int localIndex =
+                        localRow * _columnCount + localColumn;
+                    int sourceIndex = row * _sourceColumns + column;
+                    ref AttackImageCell cell = ref _cells[localIndex];
+                    cell.Advance(dt);
+                    if ((uint)sourceIndex
+                        >= (uint)_source._trailGenerations.Length)
+                    {
+                        continue;
+                    }
+
+                    long generation =
+                        _source._trailGenerations[sourceIndex];
+                    if (cell.ObservedTrailGeneration != generation)
+                    {
+                        cell.ObservedTrailGeneration = generation;
+                        if (_source._trailOccupied[sourceIndex]
+                            && _source._trailStreamIds[sourceIndex]
+                                > _minimumStreamId)
+                        {
+                            bool imageInfluence = HasImageInfluence(
+                                _settings.ImageMode,
+                                _imageMask,
+                                _imageInfluenceMask,
+                                localIndex,
+                                _cells.Length);
+                            uint revealSeed =
+                                _source._trailRevealSeeds[sourceIndex];
+                            if (imageInfluence)
+                            {
+                                ImageCellReveal reveal = ResolveImageCell(
+                                    _imageMask![localIndex],
+                                    column,
+                                    row,
+                                    revealSeed,
+                                    _source._trailMemoryFadeSeconds[
+                                        sourceIndex],
+                                    _source._trailStreamIds[sourceIndex],
+                                    _settings,
+                                    _source._imageGlyphDensities,
+                                    _sourceColumns,
+                                    _sourceRows);
+                                cell.Apply(reveal);
+                            }
+                            else
+                            {
+                                cell.ClearImage();
+                            }
+
+                            uint noise = Hash(
+                                (uint)column,
+                                (uint)row,
+                                revealSeed);
+                            bool revealedImageCell = cell.IsImageCell;
+                            bool deliberateGap =
+                                (noise & 31) == 0
+                                || ((noise >> 5) & 63) == 0;
+                            cell.SuppressImage =
+                                deliberateGap && !revealedImageCell;
+                            cell.ImageResistance = imageInfluence
+                                ? (float)_settings.ImageResistance
+                                : 0.0f;
+                        }
+                    }
+
+                    bool imageCell = cell.IsImageCell;
+                    bool covered = false;
+                    // A pre-existing slow stream may reach this cell after a
+                    // newer attack stream. It remains the wallpaper's concern
+                    // and must neither appear in nor occlude the foreground
+                    // image layer.
+                    if (_source._trailOccupied[sourceIndex]
+                        && _source._trailStreamIds[sourceIndex]
+                            > _minimumStreamId)
+                    {
+                        double age = Math.Max(
+                            0,
+                            _source._simulationTime
+                                - _source._trailBornAt[sourceIndex]);
+                        double resistance = Math.Clamp(
+                            cell.ImageResistance,
+                            0.0f,
+                            1.0f);
+                        double fadeRate = resistance >= 0.999
+                            ? double.PositiveInfinity
+                            : 1.0 / Math.Max(0.001, 1.0 - resistance);
+                        double effectiveAge =
+                            double.IsPositiveInfinity(fadeRate)
+                                ? double.PositiveInfinity
+                                : age * fadeRate;
+                        double emphasis =
+                            _source._trailImpulseEnabled[sourceIndex]
+                                ? HeadImpulseModel.Emphasis(
+                                    age,
+                                    _source._trailPulseHoldSeconds[sourceIndex],
+                                    _source._trailPulseFadeSeconds[sourceIndex])
+                                : 0.0;
+                        double baseFade =
+                            double.IsPositiveInfinity(effectiveAge)
+                                ? 0.0
+                                : TrailMemoryModel.RemainingBrightness(
+                                    effectiveAge,
+                                    _source._trailMemoryHoldSeconds[sourceIndex],
+                                    _source._trailMemoryFadeSeconds[sourceIndex]);
+                        if (baseFade > 0.001
+                            || emphasis > 0.001
+                            || imageCell)
+                        {
+                            covered = true;
+                            if (!cell.SuppressImage)
+                            {
+                                double baseIntensity =
+                                    _source._trailBaseIntensity[sourceIndex]
+                                    * EdgeShade(
+                                        (column + 0.5)
+                                            / Math.Max(1, _sourceColumns))
+                                    * EdgeShade(
+                                        (row + 0.5)
+                                            / Math.Max(1, _sourceRows));
+                                double intensity = baseFade
+                                    * (baseIntensity
+                                        + (1.0 - baseIntensity) * emphasis);
+                                int rainLevel = CalculateLevel(intensity);
+                                int level = imageCell
+                                    ? Math.Max(
+                                        rainLevel,
+                                        Math.Clamp(
+                                            (int)Math.Ceiling(
+                                                cell.ImageLevel),
+                                            0,
+                                            PaletteLevels))
+                                    : rainLevel;
+                                int glyph = imageCell
+                                    ? cell.ImageGlyph
+                                    : _source._trailGlyphs[sourceIndex];
+                                float style = imageCell
+                                    ? cell.ImageStyle
+                                    : emphasis > 0.001 ? (byte)1 : (byte)0;
+                                double glow = Math.Clamp(
+                                    _source._trailGlowStrength[sourceIndex]
+                                        + _settings.HeadGlow * emphasis,
+                                    0.0,
+                                    2.0);
+                                AddInstance(
+                                    ref count,
+                                    column,
+                                    row,
+                                    glyph,
+                                    level / (double)PaletteLevels,
+                                    style,
+                                    emphasis,
+                                    glow,
+                                    _source._trailStreamIds[sourceIndex]);
+                            }
+                        }
+                    }
+
+                    if (covered || cell.ImageLevel <= 0)
+                        continue;
+                    AddInstance(
+                        ref count,
+                        column,
+                        row,
+                        cell.ImageGlyph,
+                        cell.ImageLevel / PaletteLevels,
+                        cell.ImageStyle,
+                        emphasis: 0,
+                        glow: 0,
+                        cell.ImageStreamId);
+                }
+            }
+
+            SignalRgb signal = SignalColorModel.ToRgb(
+                _settings.SignalHue,
+                _settings.SignalBrightness);
+            SignalRgb background = SignalColorModel.ToBackgroundRgb(
+                _settings.BackgroundHue,
+                _settings.BackgroundBrightness);
+            MatrixRenderParameters parameters = new(
+                _source._width,
+                _source._height,
+                _sourceCellWidth,
+                _sourceCellHeight,
+                _settings.HeadBrightness,
+                signal.Red,
+                signal.Green,
+                signal.Blue,
+                background.Red,
+                background.Green,
+                background.Blue);
+            long atlasVersion = _source._scene.AtlasVersion;
+            GlyphAtlasData? atlas = atlasVersion == _publishedAtlasVersion
+                ? null
+                : _source._scene.Atlas;
+            lock (_scene.SyncRoot)
+            {
+                _scene.Publish(
+                    _instances,
+                    count,
+                    atlas,
+                    parameters,
+                    _source._nextStreamId);
+            }
+            _publishedAtlasVersion = atlasVersion;
+        }
+
+        private void AddInstance(
+            ref int count,
+            int column,
+            int row,
+            int glyph,
+            double level,
+            float style,
+            double emphasis,
+            double glow,
+            long streamId)
+        {
+            if ((uint)count >= (uint)_instances.Length)
+                return;
+            _instances[count++] = new GlyphInstance(
+                column,
+                row,
+                glyph,
+                level,
+                style,
+                emphasis,
+                glow,
+                streamId);
+        }
+
+        public void Dispose()
+        {
+            if (_disposed)
+                return;
+            _disposed = true;
+            _image = null;
+            _imageMask = null;
+            _imageInfluenceMask = null;
+            _instances = [];
+            _cells = [];
+        }
+
+        private struct AttackImageCell
+        {
+            public long ObservedTrailGeneration;
+            public long ImageStreamId;
+            public float ImageResistance;
+            public float ImageLevel;
+            public float ImageInitialLevel;
+            public float ImageHoldSeconds;
+            public float ImageFadeElapsed;
+            public float ImageFadeSeconds;
+            public ushort ImageGlyph;
+            public byte ImageStyle;
+            public bool SuppressImage;
+
+            public readonly bool IsImageCell =>
+                ImageLevel > 0.01f && ImageStyle >= 3;
+
+            public void Apply(ImageCellReveal reveal)
+            {
+                ImageLevel = reveal.Level;
+                ImageInitialLevel = reveal.Level;
+                ImageHoldSeconds = reveal.HoldSeconds;
+                ImageFadeElapsed = 0;
+                ImageFadeSeconds = reveal.FadeSeconds;
+                ImageGlyph = reveal.Glyph;
+                ImageStyle = reveal.Style;
+                ImageStreamId = reveal.StreamId;
+            }
+
+            public void ClearImage()
+            {
+                ImageLevel = 0;
+                ImageInitialLevel = 0;
+                ImageHoldSeconds = 0;
+                ImageFadeElapsed = 0;
+                ImageGlyph = 0;
+                ImageStyle = 0;
+                ImageStreamId = 0;
+            }
+
+            public void Advance(double dt)
+            {
+                if (dt <= 0 || ImageLevel <= 0)
+                    return;
+
+                float remaining = ImageHoldSeconds;
+                double fadeDelta = dt;
+                if (remaining > 0)
+                {
+                    double held = Math.Min(dt, remaining);
+                    ImageHoldSeconds =
+                        (float)Math.Max(0, remaining - held);
+                    fadeDelta -= held;
+                }
+                if (fadeDelta > 0)
+                    ImageFadeElapsed += (float)fadeDelta;
+
+                double position = ImageFadeElapsed
+                    / Math.Max(0.1f, ImageFadeSeconds);
+                double naturalFade = TrailMemoryModel.RemainingBrightness(
+                    position,
+                    holdSeconds: 0.0,
+                    fadeSeconds: 1.0);
+                ImageLevel = (float)(ImageInitialLevel * naturalFade);
+                if (ImageLevel > 0.01f)
+                    return;
+                ImageGlyph = 0;
+                ImageStyle = 0;
+                ImageStreamId = 0;
+            }
+        }
     }
 
     private sealed class RainStream
@@ -1905,6 +2638,27 @@ internal sealed class MatrixSceneRenderer : IDisposable
         long[] ImageStreamIds,
         List<RainStream>[] StreamsByColumn,
         ColumnSpawner[] Spawners);
+
+    private readonly record struct ProjectedImageMap(
+        byte[] Tone,
+        byte[]? Influence);
+
+    private readonly record struct ImageCellReveal(
+        float Level,
+        float HoldSeconds,
+        float FadeSeconds,
+        ushort Glyph,
+        byte Style,
+        long StreamId)
+    {
+        public static ImageCellReveal Empty { get; } = new(
+            0,
+            0,
+            0.1f,
+            0,
+            0,
+            0);
+    }
 
     private readonly record struct GlyphDensity(ushort Glyph, double Density);
 }

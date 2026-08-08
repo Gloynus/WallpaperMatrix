@@ -69,6 +69,7 @@ public sealed class WallpaperManager : IDisposable
     public event Action? PauseStateChanged;
     public event Action? RuntimeStatusChanged;
     public event Action<string, bool>? VirtualOutputStateChanged;
+    public event Action<string, bool>? PlaylistImageAvailabilityChanged;
 
     public WallpaperManager(AppSettings settings)
     {
@@ -76,6 +77,8 @@ public sealed class WallpaperManager : IDisposable
         _output = new WallpaperOutputSession(ReportWindowFailure);
         _output.VirtualOutputStateChanged +=
             OnVirtualOutputStateChanged;
+        _images.ImageAvailabilityChanged +=
+            OnPlaylistImageAvailabilityChanged;
         _imageTimer = new DispatcherTimer(DispatcherPriority.Background)
         {
             Interval = TimeSpan.FromMilliseconds(120)
@@ -116,13 +119,10 @@ public sealed class WallpaperManager : IDisposable
 
     public void Start()
     {
-        _output.Start(_settings, _currentImage);
-        RefreshSecondaryDatabaseChannels(forceReload: true);
-        UpdateImageTargetSize();
+        StartOutputFromSystemWallpaper();
         SetRuntimeStatus(
             $"ВЫВОД АКТИВЕН // DIRECT3D 11 // ЭКРАНОВ: {_output.WindowCount}",
             isError: false);
-        ReloadImages();
         _imageTimer.Start();
         _attackTimer.Start();
         _outputHealthTimer.Start();
@@ -131,6 +131,31 @@ public sealed class WallpaperManager : IDisposable
         SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
         SystemEvents.SessionSwitch += OnSessionSwitch;
         SystemEvents.PowerModeChanged += OnPowerModeChanged;
+    }
+
+    private void StartOutputFromSystemWallpaper()
+    {
+        SystemWallpaperSnapshot startupWallpapers =
+            SystemWallpaperService.Capture(_settings);
+        DiagnosticLog.Write(
+            $"Нулевой образ базы данных: системные обои доступны для "
+            + $"{startupWallpapers.Paths.Count} устройств вывода; "
+            + $"раскладка={startupWallpapers.Position}.");
+        IReadOnlyDictionary<string, PreparedImage?> initialDatabaseImages =
+            PrepareStartupDatabaseImages(startupWallpapers);
+        _output.Start(
+            _settings,
+            _currentImage,
+            initialDatabaseImages);
+        DateTime startupCycleStartedAt = DateTime.UtcNow;
+        _imageStartedAt = startupCycleStartedAt;
+        foreach (DatabaseImageChannel channel in
+                 _secondaryDatabaseChannels.Values)
+        {
+            channel.StartedAtUtc = startupCycleStartedAt;
+        }
+        RefreshSecondaryDatabaseChannels(forceReload: false);
+        UpdateImageTargetSize();
     }
 
     public void ApplySettings(AppSettings settings)
@@ -417,9 +442,8 @@ public sealed class WallpaperManager : IDisposable
         {
             try
             {
-                _output.Start(_settings, _currentImage);
+                StartOutputFromSystemWallpaper();
                 ResetOutputRecovery();
-                UpdateImageTargetSize();
                 SetRuntimeStatus(
                     $"ВЫВОД ВОЗОБНОВЛЁН // DIRECT3D 11 // ЭКРАНОВ: {_output.WindowCount}",
                     isError: false);
@@ -657,7 +681,9 @@ public sealed class WallpaperManager : IDisposable
         });
     }
 
-    private void RefreshSecondaryDatabaseChannels(bool forceReload)
+    private void RefreshSecondaryDatabaseChannels(
+        bool forceReload,
+        IReadOnlyDictionary<string, string>? startupWallpapers = null)
     {
         IReadOnlyList<MonitorDescriptor> monitors =
             OutputDeviceCatalog.Capture(_settings);
@@ -719,9 +745,21 @@ public sealed class WallpaperManager : IDisposable
                         TargetHeight = height
                     }
                 };
+                channel.Sequence.ImageAvailabilityChanged +=
+                    OnPlaylistImageAvailabilityChanged;
                 _secondaryDatabaseChannels[root] = channel;
                 if (nextSettings.ImageMode)
-                    QueueSecondaryImageLoad(channel, ImageLoadKind.Reload);
+                {
+                    string? startupWallpaper = StartupWallpaperForRoot(
+                        startupWallpapers,
+                        root);
+                    QueueSecondaryImageLoad(
+                        channel,
+                        startupWallpaper is null
+                            ? ImageLoadKind.Reload
+                            : ImageLoadKind.Specific,
+                        startupWallpaper);
+                }
                 continue;
             }
 
@@ -759,6 +797,187 @@ public sealed class WallpaperManager : IDisposable
         }
         PublishDatabaseImages();
         UpdateImageTimerInterval();
+    }
+
+    private static string? StartupWallpaperForRoot(
+        IReadOnlyDictionary<string, string>? startupWallpapers,
+        string rootMonitorId)
+    {
+        if (startupWallpapers is null || startupWallpapers.Count == 0)
+            return null;
+        if (!string.IsNullOrWhiteSpace(rootMonitorId)
+            && startupWallpapers.TryGetValue(
+                rootMonitorId,
+                out string? exact)
+            && File.Exists(exact))
+        {
+            return exact;
+        }
+        return startupWallpapers.Values.FirstOrDefault(File.Exists);
+    }
+
+    private IReadOnlyDictionary<string, PreparedImage?>
+        PrepareStartupDatabaseImages(
+            SystemWallpaperSnapshot startupWallpapers)
+    {
+        IReadOnlyList<MonitorDescriptor> monitors =
+            OutputDeviceCatalog.Capture(_settings);
+        AppSettings topology = _settings.Copy();
+        MonitorTopology.EnsureProfiles(topology, monitors);
+        IReadOnlyList<MonitorRoute> routes = MonitorTopology.Resolve(
+            topology.MonitorProfiles,
+            monitors,
+            MonitorRouteDomain.Database);
+        MonitorOutputPlan plan = MonitorOutputPlan.Create(
+            topology,
+            monitors);
+        MonitorDescriptor? primary = monitors.FirstOrDefault(monitor =>
+            monitor.Primary);
+        _primaryDatabaseRoot = primary is null
+            ? ""
+            : routes.FirstOrDefault(route => string.Equals(
+                route.MonitorId,
+                primary.Id,
+                StringComparison.OrdinalIgnoreCase)) is { Mode: not MonitorLinkMode.Disabled } route
+                ? route.RootMonitorId
+                : "";
+
+        foreach (DatabaseImageChannel channel in
+                 _secondaryDatabaseChannels.Values)
+        {
+            channel.Cancel();
+        }
+        _secondaryDatabaseChannels.Clear();
+
+        Dictionary<string, PreparedImage?> preparedImages =
+            new(StringComparer.OrdinalIgnoreCase);
+        DateTime startedAt = DateTime.UtcNow;
+        IReadOnlyList<string> roots = routes
+            .Where(route => route.Mode != MonitorLinkMode.Disabled)
+            .Select(route => route.RootMonitorId)
+            .Where(root => !string.IsNullOrWhiteSpace(root))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        foreach (string root in roots)
+        {
+            MonitorProfile? profile = MonitorTopology.Find(
+                topology.MonitorProfiles,
+                root);
+            AppSettings databaseSettings = string.Equals(
+                root,
+                _primaryDatabaseRoot,
+                StringComparison.OrdinalIgnoreCase)
+                    ? _settings.Copy(includeMonitorProfiles: false)
+                    : profile?.Settings.Copy(includeMonitorProfiles: false)
+                        ?? _settings.Copy(includeMonitorProfiles: false);
+            databaseSettings.Normalize(includeMonitorProfiles: false);
+            (int width, int height) = DatabaseTargetSize(plan, root);
+            string? wallpaper = StartupWallpaperForRoot(
+                startupWallpapers.Paths,
+                root);
+            ImageSequenceService sequence = string.Equals(
+                root,
+                _primaryDatabaseRoot,
+                StringComparison.OrdinalIgnoreCase)
+                    ? _images
+                    : new ImageSequenceService();
+            if (!ReferenceEquals(sequence, _images))
+                sequence.ImageAvailabilityChanged +=
+                    OnPlaylistImageAvailabilityChanged;
+            sequence.TargetWidth = width;
+            sequence.TargetHeight = height;
+            ImageSourceFrame? source = null;
+            PreparedImage? prepared = null;
+            if (databaseSettings.ImageMode && wallpaper is not null)
+            {
+                try
+                {
+                    source = SystemWallpaperImageComposer.Compose(
+                        wallpaper,
+                        width,
+                        height,
+                        startupWallpapers.Position,
+                        startupWallpapers.BackgroundColor);
+                    prepared = _imagePreparation.Prepare(
+                        source,
+                        databaseSettings,
+                        width,
+                        height,
+                        CancellationToken.None,
+                        cacheResult: false);
+                }
+                catch (Exception exception)
+                {
+                    DiagnosticLog.Write(
+                        $"Не удалось подготовить нулевой образ базы {root}.",
+                        exception);
+                }
+            }
+
+            preparedImages[root] = prepared;
+            DiagnosticLog.Write(
+                $"Нулевой образ базы подготовлен: root={root}; "
+                + $"file={Path.GetFileName(wallpaper) ?? "—"}; "
+                + $"ready={prepared is not null}; target={width}x{height}.");
+            if (string.Equals(
+                root,
+                _primaryDatabaseRoot,
+                StringComparison.OrdinalIgnoreCase))
+            {
+                _currentImageSource = source;
+                _currentImage = prepared;
+                _imageStartedAt = startedAt;
+                continue;
+            }
+
+            DatabaseImageChannel channel = new(root, databaseSettings)
+            {
+                Sequence = sequence,
+                Source = source,
+                Prepared = prepared,
+                StartedAtUtc = startedAt
+            };
+            _secondaryDatabaseChannels[root] = channel;
+        }
+        if (string.IsNullOrWhiteSpace(_primaryDatabaseRoot))
+        {
+            _currentImageSource = null;
+            _currentImage = null;
+            _imageStartedAt = startedAt;
+        }
+        return preparedImages;
+    }
+
+    private void OnPlaylistImageAvailabilityChanged(
+        string path,
+        bool available)
+    {
+        if (!available)
+        {
+            DiagnosticLog.Write(
+                $"Строка плейлиста недоступна и пропущена: {path}");
+        }
+        PlaylistImageAvailabilityChanged?.Invoke(path, available);
+    }
+
+    private static (int Width, int Height) DatabaseTargetSize(
+        MonitorOutputPlan plan,
+        string rootMonitorId)
+    {
+        MatrixImageProjection? projection = plan.Scenes
+            .Where(scene => string.Equals(
+                scene.DatabaseRootMonitorId,
+                rootMonitorId,
+                StringComparison.OrdinalIgnoreCase))
+            .Select(scene => scene.ImageProjection)
+            .OrderByDescending(item =>
+                (long)item.CanvasWidth * item.CanvasHeight)
+            .FirstOrDefault();
+        return projection is null
+            ? (2560, 1440)
+            : (
+                Math.Max(1, projection.CanvasWidth),
+                Math.Max(1, projection.CanvasHeight));
     }
 
     private void QueueSecondaryImageLoad(
@@ -924,7 +1143,6 @@ public sealed class WallpaperManager : IDisposable
         DateTime now = DateTime.UtcNow;
         double elapsed = (now - _imageStartedAt).TotalSeconds;
         if (_settings.ImageMode
-            && _currentImage is not null
             && elapsed >= _settings.ImageDurationSeconds)
         {
             NextImage();
@@ -933,7 +1151,6 @@ public sealed class WallpaperManager : IDisposable
                  _secondaryDatabaseChannels.Values)
         {
             if (!channel.Settings.ImageMode
-                || channel.Prepared is null
                 || channel.IsLoading
                 || (now - channel.StartedAtUtc).TotalSeconds
                     < channel.Settings.ImageDurationSeconds)
@@ -1080,11 +1297,10 @@ public sealed class WallpaperManager : IDisposable
 
         try
         {
-            _output.Start(_settings, _currentImage);
+            StartOutputFromSystemWallpaper();
             if (_fullscreenPaused)
                 _output.Suspend();
             ResetOutputRecovery();
-            UpdateImageTargetSize();
             _displayTopologySignature = CaptureDisplayTopology();
             _sessionUnavailable = false;
             _sessionResumeAttempts = 0;
@@ -1211,24 +1427,19 @@ public sealed class WallpaperManager : IDisposable
                 return;
             }
 
-            AttackFrameSnapshot? frame = _output.CaptureAttackFrame();
-            if (frame is null)
-            {
-                throw new InvalidOperationException(
-                    "Общий кадр потока недоступен.");
-            }
-
-            System.Drawing.Rectangle bounds =
-                System.Windows.Forms.SystemInformation.VirtualScreen;
             AttackInterfaceFrame? interfaceFrame = null;
             try
             {
-                interfaceFrame =
-                    AttackInterfaceCaptureService.Capture(bounds);
+                interfaceFrame = _output.CaptureAttackInterface();
+                if (interfaceFrame is null)
+                {
+                    throw new InvalidOperationException(
+                        "Вывод обоев не вернул визуальную карту интерфейса.");
+                }
                 DiagnosticLog.Write(
                     $"Карта интерфейса АТАКИ подготовлена: "
                     + $"{interfaceFrame.Width}x{interfaceFrame.Height}; "
-                    + $"окон={interfaceFrame.WindowCount}.");
+                    + $"отсчётов={interfaceFrame.InfluencedSampleCount}.");
             }
             catch (Exception captureException)
             {
@@ -1238,16 +1449,25 @@ public sealed class WallpaperManager : IDisposable
                     "Интерфейс не удалось снять; АТАКА продолжена без отпечатка.",
                     captureException);
             }
+            AttackFrameSnapshot? frame =
+                _output.BeginAttackComposition(
+                    interfaceFrame,
+                    settings.AttackTransitionSeconds);
+            if (frame is null)
+            {
+                throw new InvalidOperationException(
+                    "Общий кадр потока недоступен.");
+            }
+            System.Drawing.Rectangle bounds =
+                System.Windows.Forms.SystemInformation.VirtualScreen;
             AttackOverlayWindow overlay = new(
                 bounds,
                 frame,
                 interfaceFrame,
-                settings.AttackTransitionSeconds,
-                settings.ImageDurationSeconds);
+                settings.AttackTransitionSeconds);
             overlay.Closed += OnAttackOverlayClosed;
             overlay.ExitStarted += OnAttackExitStarted;
             _attackOverlay = overlay;
-            _imageStartedAt = DateTime.UtcNow;
             overlay.Start();
             SetRuntimeStatus(
                 "АТАКА СИСТЕМЫ // ИНТЕРФЕЙС ПЕРЕХВАЧЕН ПОТОКОМ",
@@ -1305,6 +1525,7 @@ public sealed class WallpaperManager : IDisposable
         overlay.ExitStarted -= OnAttackExitStarted;
         _attackOverlay = null;
         overlay.Dispose();
+        _output.EndAttackComposition();
         if (_disposed || !_output.IsRunning)
             return;
 
@@ -1327,6 +1548,7 @@ public sealed class WallpaperManager : IDisposable
             overlay.WaitForClose(TimeSpan.FromMilliseconds(700));
             overlay.Dispose();
         }
+        _output.EndAttackComposition();
 
         if (!_disposed && _output.IsRunning)
         {

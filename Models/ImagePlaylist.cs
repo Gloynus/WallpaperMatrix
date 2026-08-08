@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.IO;
 using System.Text.Json.Serialization;
 using System.Windows.Media.Imaging;
@@ -42,9 +43,12 @@ public sealed class ImagePlaylist
     }
 }
 
-public sealed class ImagePlaylistEntry
+public sealed class ImagePlaylistEntry : INotifyPropertyChanged
 {
     private string? _resolution;
+    private bool? _exists;
+
+    public event PropertyChangedEventHandler? PropertyChanged;
 
     public string Path { get; set; } = "";
     public bool Enabled { get; set; } = true;
@@ -60,7 +64,7 @@ public sealed class ImagePlaylistEntry
         System.IO.Path.GetDirectoryName(Path) ?? "";
 
     [JsonIgnore]
-    public bool Exists => File.Exists(Path);
+    public bool Exists => _exists ??= IsReadableImage();
 
     [JsonIgnore]
     public string Resolution => _resolution ??= ReadResolution();
@@ -71,6 +75,26 @@ public sealed class ImagePlaylistEntry
         Enabled = Enabled,
         _resolution = _resolution
     };
+
+    public void RefreshAvailability()
+    {
+        SetAvailability(IsReadableImage());
+    }
+
+    public void SetAvailability(bool available)
+    {
+        bool next = available;
+        if (_exists == next)
+            return;
+        _exists = next;
+        _resolution = null;
+        PropertyChanged?.Invoke(
+            this,
+            new PropertyChangedEventArgs(nameof(Exists)));
+        PropertyChanged?.Invoke(
+            this,
+            new PropertyChangedEventArgs(nameof(Resolution)));
+    }
 
     public void Normalize()
     {
@@ -108,6 +132,29 @@ public sealed class ImagePlaylistEntry
         catch
         {
             return "—";
+        }
+    }
+
+    private bool IsReadableImage()
+    {
+        if (!File.Exists(Path))
+            return false;
+        try
+        {
+            using FileStream stream = new(
+                Path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            BitmapDecoder decoder = BitmapDecoder.Create(
+                stream,
+                BitmapCreateOptions.DelayCreation,
+                BitmapCacheOption.None);
+            return decoder.Frames.Count > 0;
+        }
+        catch
+        {
+            return false;
         }
     }
 }

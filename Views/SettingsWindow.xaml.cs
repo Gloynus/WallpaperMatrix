@@ -217,6 +217,21 @@ public partial class SettingsWindow : Window
         _playlistFileVersion = _playlistStore.FileVersion();
     }
 
+    public void SetPlaylistImageAvailability(
+        string path,
+        bool available)
+    {
+        foreach (ImagePlaylistEntry entry in _playlists
+                     .SelectMany(playlist => playlist.Entries)
+                     .Where(entry => string.Equals(
+                         entry.Path,
+                         path,
+                         StringComparison.OrdinalIgnoreCase)))
+        {
+            entry.SetAvailability(available);
+        }
+    }
+
     private void LoadSettingsCore(
         AppSettings settings,
         bool preserveAppliedSettings)
@@ -3208,7 +3223,8 @@ public partial class SettingsWindow : Window
 
         try
         {
-            if (!File.Exists(entry.Path))
+            entry.RefreshAvailability();
+            if (!entry.Exists)
                 throw new FileNotFoundException("Файл изображения не найден.", entry.Path);
             string path = entry.Path;
             await Task.Run(() =>
@@ -3278,6 +3294,13 @@ public partial class SettingsWindow : Window
     {
         if ((sender as FrameworkElement)?.DataContext is not ImagePlaylistEntry entry)
             return;
+        entry.RefreshAvailability();
+        if (!entry.Exists)
+        {
+            StatusText.Text = $"ОБРАЗ НЕДОСТУПЕН // {entry.DisplayName}";
+            e.Handled = true;
+            return;
+        }
         ImageModeCheck.IsChecked = true;
         AppSettings preview = ReadSettingsFromControls();
         ImageRequested?.Invoke(preview, entry.Path, _selectedMonitorId);
@@ -3508,6 +3531,8 @@ public partial class SettingsWindow : Window
 
     private void RefreshPlaylistEntries()
     {
+        foreach (ImagePlaylistEntry entry in CurrentPlaylist().Entries)
+            entry.RefreshAvailability();
         PlaylistList.ItemsSource = null;
         PlaylistList.ItemsSource = CurrentPlaylist().Entries;
     }

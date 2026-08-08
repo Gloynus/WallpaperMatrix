@@ -55,12 +55,24 @@ internal sealed class WallpaperOutputSession : IDisposable
                 return _virtualOutputs.Keys.ToArray();
         }
     }
-    public SharedMatrixScene? SharedFrame =>
-        _windows.Count > 0 ? _windows[0].SharedFrame : null;
-    public AttackFrameSnapshot? CaptureAttackFrame() =>
+    public AttackInterfaceFrame? CaptureAttackInterface() =>
         _windows.Count > 0
-            ? _windows[0].CaptureAttackFrame()
+            ? _windows[0].CaptureAttackInterface()
             : null;
+    public AttackFrameSnapshot? BeginAttackComposition(
+        AttackInterfaceFrame? interfaceFrame,
+        double transitionSeconds) =>
+        _windows.Count > 0
+            ? _windows[0].BeginAttackComposition(
+                interfaceFrame,
+                transitionSeconds)
+            : null;
+
+    public void EndAttackComposition()
+    {
+        foreach (NativeWallpaperWindow window in _windows)
+            window.EndAttackComposition();
+    }
     public int WindowCount => _screenCount;
     public int TargetWidth { get; private set; } = 2560;
     public int TargetHeight { get; private set; } = 1440;
@@ -109,7 +121,10 @@ internal sealed class WallpaperOutputSession : IDisposable
         _failureHandler = failureHandler;
     }
 
-    public void Start(AppSettings settings, PreparedImage? image)
+    public void Start(
+        AppSettings settings,
+        PreparedImage? image,
+        IReadOnlyDictionary<string, PreparedImage?>? initialDatabaseImages = null)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (IsRunning)
@@ -118,6 +133,13 @@ internal sealed class WallpaperOutputSession : IDisposable
         _settings = settings.Copy();
         _virtualOutputSettings = settings.Copy();
         _image = image;
+        if (initialDatabaseImages is not null)
+        {
+            _databaseImages =
+                new Dictionary<string, PreparedImage?>(
+                    initialDatabaseImages,
+                    StringComparer.OrdinalIgnoreCase);
+        }
         CreateWindows(animateStartupReveal: true);
         SetImage(_image);
         Activate();
@@ -385,6 +407,7 @@ internal sealed class WallpaperOutputSession : IDisposable
                 _plan,
                 _settings,
                 animateStartupReveal,
+                _databaseImages,
                 failureHandler: _failureHandler);
             created.Add(compositor);
             compositor.Start();
@@ -393,8 +416,6 @@ internal sealed class WallpaperOutputSession : IDisposable
 
             _windows.AddRange(created);
             _screenCount = _monitors.Count(monitor => !monitor.IsVirtual);
-            if (_databaseImages.Count > 0)
-                compositor.SetDatabaseImages(_databaseImages);
             string[] requestedOutputs;
             lock (_virtualOutputLock)
                 requestedOutputs = _virtualOutputRequests.ToArray();

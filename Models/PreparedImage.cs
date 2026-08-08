@@ -12,4 +12,5 @@ public sealed record PreparedImage(
     byte[] ToneMap,
     int Width,
     int Height,
-    string SourcePath);
+    string SourcePath,
+    byte[]? InfluenceMap = null);
