@@ -7,7 +7,7 @@ param(
 $ErrorActionPreference = "Stop"
 $projectPath = Join-Path $PSScriptRoot "WallpaperMatrix.csproj"
 if ([string]::IsNullOrWhiteSpace($OutputPath)) {
-    $OutputPath = Join-Path $PSScriptRoot "dist"
+    $OutputPath = Join-Path $PSScriptRoot "release\current"
 }
 elseif (-not [IO.Path]::IsPathRooted($OutputPath)) {
     $OutputPath = Join-Path $PSScriptRoot $OutputPath

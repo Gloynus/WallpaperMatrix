@@ -200,10 +200,11 @@ Wallpaper Matrix не рисует на защищённом рабочем ст
 
 ```powershell
 .\build.cmd
-.\dist\WallpaperMatrix.exe
+.\release\current\WallpaperMatrix.exe
 ```
 
-`build.ps1` создаёт один самодостаточный EXE для Windows x64. Тег вида
+`build.ps1` создаёт один самодостаточный EXE для Windows x64 в `release\current`.
+Тег вида
 `v3.9.0` запускает GitHub Actions, проверяет совпадение версии, собирает
 переносимый архив и публикует SHA-256.
 
