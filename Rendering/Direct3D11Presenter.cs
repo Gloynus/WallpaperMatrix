@@ -19,13 +19,20 @@ internal sealed record MatrixScenePresentation(
     SharedMatrixScene Scene,
     DrawingRectangle TargetBounds,
     DrawingRectangle SourceBounds,
-    long AttackStreamCutoff = -1);
+    MatrixSceneLayer Layer = MatrixSceneLayer.Standard);
+
+internal enum MatrixSceneLayer
+{
+    Standard,
+    AttackBase,
+    AttackForeground
+}
 
 internal sealed record AttackFrameSnapshot(
     SharedMatrixScene PrimaryScene,
     IReadOnlyList<MatrixScenePresentation> Presentations,
-    long LatestStreamId,
-    int CapturedInterfaceSamples);
+    int CapturedInterfaceSamples,
+    double StreamTraversalSeconds);
 
 /// <summary>
 /// Draws the shared glyph scene with Direct3D 11 and presents it through a
@@ -84,9 +91,8 @@ internal sealed class Direct3D11Presenter : IDisposable
     private float _glyphOpacity = 1;
     private float _surfaceRevealProgress = 1;
     private float _surfaceGlyphOpacity = 1;
-    private float _attackRevealProgress;
-    private float _attackVeilOpacity = 1;
-    private float _attackStreamCutoff;
+    private float _attackBackgroundProgress;
+    private float _attackBackgroundOpacity = 1;
     private float _attackModeEnabled;
     private float _attackHaloFactor = 1;
     private int _currentTargetWidth = 1;
@@ -349,16 +355,14 @@ internal sealed class Direct3D11Presenter : IDisposable
                 "ps_4_0",
                 ShaderFlags.OptimizationLevel3));
 
-    public void SetAttackTransitionState(
-        double revealProgress,
-        double veilOpacity,
-        double glyphOpacity)
+    public void SetAttackTransitionState(AttackTransitionState state)
     {
-        _attackRevealProgress =
-            (float)Math.Clamp(revealProgress, 0.0, 1.0);
-        _attackVeilOpacity =
-            (float)Math.Clamp(veilOpacity, 0.0, 1.0);
-        _glyphOpacity = (float)Math.Clamp(glyphOpacity, 0.0, 1.0);
+        _attackBackgroundProgress =
+            (float)Math.Clamp(state.BackgroundProgress, 0.0, 1.0);
+        _attackBackgroundOpacity =
+            (float)Math.Clamp(state.BackgroundOpacity, 0.0, 1.0);
+        _glyphOpacity =
+            (float)Math.Clamp(state.GlyphOpacity, 0.0, 1.0);
     }
 
     public void SetAttackInterfaceFrame(AttackInterfaceFrame? frame)
@@ -429,11 +433,8 @@ internal sealed class Direct3D11Presenter : IDisposable
             (float)Math.Clamp(glyphOpacity, 0.0, 1.0);
     }
 
-    public void SetAttackGlyphState(
-        long existingStreamCutoff,
-        double haloFactor)
+    public void SetAttackGlyphState(double haloFactor)
     {
-        _attackStreamCutoff = existingStreamCutoff;
         _attackModeEnabled = 1;
         _attackHaloFactor =
             (float)Math.Clamp(haloFactor, 0.0, 1.0);
@@ -1248,7 +1249,26 @@ internal sealed class Direct3D11Presenter : IDisposable
                 continue;
             }
 
-            if (_attackModeEnabled > 0.5f)
+            bool attackPresentation = _attackModeEnabled > 0.5f;
+            bool baseLayer = attackPresentation
+                && state.Presentation.Layer == MatrixSceneLayer.AttackBase;
+            bool foregroundLayer = attackPresentation
+                && state.Presentation.Layer == MatrixSceneLayer.AttackForeground;
+            if (baseLayer)
+            {
+                // The overlay owns a complete, opaque copy of the already
+                // running wallpaper scene. It reuses the same SharedMatrixScene
+                // and therefore creates neither a second simulation nor a
+                // second stream generator. Windows below the overlay can no
+                // longer leak through transparent attack cells.
+                DrawBackground(
+                    state.Presentation.TargetBounds,
+                    state.Parameters,
+                    _glyphOpacity,
+                    _attackBackgroundProgress,
+                    useInterfaceMask: false);
+            }
+            else if (foregroundLayer)
             {
                 // The front of the veil moves from the top edge to the
                 // bottom. At progress 0 every pixel is transparent; at 1 the
@@ -1256,8 +1276,9 @@ internal sealed class Direct3D11Presenter : IDisposable
                 DrawBackground(
                     state.Presentation.TargetBounds,
                     state.Parameters,
-                    _attackVeilOpacity,
-                    _attackRevealProgress);
+                    _attackBackgroundOpacity,
+                    _attackBackgroundProgress,
+                    useInterfaceMask: true);
             }
             else
             {
@@ -1276,40 +1297,54 @@ internal sealed class Direct3D11Presenter : IDisposable
                 (_surfaceRevealProgress - 0.75f) * 4.0f,
                 0.0f,
                 1.0f);
-            if (_attackModeEnabled > 0.5f)
+            if (baseLayer)
+            {
+                DrawGlyphPass(
+                    state,
+                    solidBody: 0,
+                    haloFactor: 1,
+                    useInterfaceMask: false,
+                    topDownRevealProgress: _attackBackgroundProgress);
+            }
+            else if (foregroundLayer)
             {
                 // Only streams born after the attack boundary are allowed on
                 // the foreground surface. The original wallpaper remains the
                 // sole owner of every pre-existing stream and image cell.
-                float takeoverProgress = _attackRevealProgress;
+                // Their glyphs are never clipped by the background timeline:
+                // the simulation itself is the only reveal mask for a stream.
+                float backgroundProgress = _attackBackgroundProgress;
                 float solidBody = 1.0f - Math.Clamp(
-                    (takeoverProgress - 0.76f) / 0.24f,
+                    (backgroundProgress - 0.76f) / 0.24f,
                     0.0f,
                     1.0f);
                 solidBody = solidBody * solidBody
                     * (3.0f - 2.0f * solidBody);
                 DrawGlyphPass(
                     state,
-                    streamFilterMode: 1,
                     solidBody: solidBody,
-                    haloFactor: _attackHaloFactor);
+                    haloFactor: _attackHaloFactor,
+                    useInterfaceMask: true,
+                    topDownRevealProgress: -1);
             }
             else
             {
                 DrawGlyphPass(
                     state,
-                    streamFilterMode: 0,
                     solidBody: 1.0f - startupGlyphBlend,
-                    haloFactor: startupGlyphBlend);
+                    haloFactor: startupGlyphBlend,
+                    useInterfaceMask: false,
+                    topDownRevealProgress: -1);
             }
         }
     }
 
     private void DrawGlyphPass(
         SceneDrawState state,
-        float streamFilterMode,
         float solidBody,
-        float haloFactor)
+        float haloFactor,
+        bool useInterfaceMask,
+        float topDownRevealProgress)
     {
         if (state.Resources.InstanceBuffer is null
             || state.InstanceCount <= 0
@@ -1364,11 +1399,6 @@ internal sealed class Direct3D11Presenter : IDisposable
             aspectScaleY,
             _glyphOpacity
                 * _surfaceGlyphOpacity,
-            _attackModeEnabled > 0.5f
-                && state.Presentation.AttackStreamCutoff >= 0
-                    ? state.Presentation.AttackStreamCutoff
-                    : _attackStreamCutoff,
-            streamFilterMode,
             solidBody,
             haloFactor,
             source.Left,
@@ -1381,9 +1411,8 @@ internal sealed class Direct3D11Presenter : IDisposable
             viewport.Height,
             _currentTargetWidth,
             _currentTargetHeight,
-            _attackModeEnabled > 0.5f && _attackInterfaceView is not null,
-            _attackRevealProgress,
-            _attackModeEnabled > 0.5f);
+            useInterfaceMask && _attackInterfaceView is not null,
+            topDownRevealProgress);
         UpdateConstantBuffer(constants);
         _context.DrawInstanced(
             4,
@@ -1403,7 +1432,8 @@ internal sealed class Direct3D11Presenter : IDisposable
         DrawingRectangle target,
         MatrixRenderParameters parameters,
         float opacity,
-        float topDownProgress = -1)
+        float topDownProgress = -1,
+        bool useInterfaceMask = false)
     {
         if (opacity <= 0.0001f
             || target.Width <= 0
@@ -1439,8 +1469,7 @@ internal sealed class Direct3D11Presenter : IDisposable
                 _currentTargetWidth,
                 _currentTargetHeight,
                 target,
-                _attackModeEnabled > 0.5f
-                    && _attackInterfaceView is not null));
+                useInterfaceMask && _attackInterfaceView is not null));
         _context.Draw(4, 0);
         _context.PSSetShaderResource(
             1,
@@ -1747,11 +1776,9 @@ internal sealed class Direct3D11Presenter : IDisposable
         public readonly float GlyphCount;
         public readonly float HeadBrightness;
         public readonly float GlyphOpacity;
-        public readonly float StreamFilterMode;
-        public readonly float AttackStreamCutoff;
         public readonly float SolidBody;
         public readonly float HaloFactor;
-        private readonly float _padding0;
+        private readonly Vector3 _padding0;
         public readonly Vector3 SignalColor;
         private readonly float _padding1;
         public readonly Vector3 BackgroundColor;
@@ -1760,9 +1787,7 @@ internal sealed class Direct3D11Presenter : IDisposable
         public readonly Vector2 TargetViewportOrigin;
         public readonly Vector2 TargetViewportSize;
         public readonly float InterfaceMaskEnabled;
-        public readonly float AttackRevealProgress;
-        public readonly float AttackRevealEnabled;
-        private readonly Vector3 _paddingAttack;
+        public readonly float TopDownRevealProgress;
 
         public ShaderConstants(
             MatrixRenderParameters parameters,
@@ -1770,8 +1795,6 @@ internal sealed class Direct3D11Presenter : IDisposable
             float aspectScaleX,
             float aspectScaleY,
             float glyphOpacity,
-            float attackStreamCutoff,
-            float streamFilterMode,
             float solidBody,
             float haloFactor,
             float sourceLeft,
@@ -1785,8 +1808,7 @@ internal sealed class Direct3D11Presenter : IDisposable
             float targetWidth,
             float targetHeight,
             bool interfaceMaskEnabled,
-            float attackRevealProgress,
-            bool attackRevealEnabled)
+            float topDownRevealProgress)
         {
             SourceSize = new(
                 parameters.SourceWidth,
@@ -1801,11 +1823,9 @@ internal sealed class Direct3D11Presenter : IDisposable
             GlyphCount = glyphCount;
             HeadBrightness = (float)parameters.HeadBrightness;
             GlyphOpacity = glyphOpacity;
-            StreamFilterMode = streamFilterMode;
-            AttackStreamCutoff = attackStreamCutoff;
             SolidBody = solidBody;
             HaloFactor = haloFactor;
-            _padding0 = 0;
+            _padding0 = Vector3.Zero;
             SignalColor = new(
                 (float)parameters.SignalRed,
                 (float)parameters.SignalGreen,
@@ -1820,12 +1840,7 @@ internal sealed class Direct3D11Presenter : IDisposable
             TargetViewportOrigin = new(viewportLeft, viewportTop);
             TargetViewportSize = new(viewportWidth, viewportHeight);
             InterfaceMaskEnabled = interfaceMaskEnabled ? 1 : 0;
-            AttackRevealProgress = Math.Clamp(
-                attackRevealProgress,
-                0,
-                1);
-            AttackRevealEnabled = attackRevealEnabled ? 1 : 0;
-            _paddingAttack = Vector3.Zero;
+            TopDownRevealProgress = topDownRevealProgress;
         }
     }
 
@@ -1921,11 +1936,9 @@ internal sealed class Direct3D11Presenter : IDisposable
             float GlyphCount;
             float HeadBrightness;
             float GlyphOpacity;
-            float StreamFilterMode;
-            float AttackStreamCutoff;
             float SolidBody;
             float HaloFactor;
-            float Padding0;
+            float3 Padding0;
             float3 SignalColor;
             float Padding1;
             float3 BackgroundColor;
@@ -1934,9 +1947,7 @@ internal sealed class Direct3D11Presenter : IDisposable
             float2 TargetViewportOrigin;
             float2 TargetViewportSize;
             float InterfaceMaskEnabled;
-            float AttackRevealProgress;
-            float AttackRevealEnabled;
-            float3 PaddingAttack;
+            float TopDownRevealProgress;
         };
 
         Texture2D<float> Atlas : register(t0);
@@ -1960,7 +1971,6 @@ internal sealed class Direct3D11Presenter : IDisposable
             float Style : TEXCOORD3;
             float Emphasis : TEXCOORD4;
             float Glow : TEXCOORD5;
-            nointerpolation float StreamId : TEXCOORD6;
         };
 
         PixelInput VSMain(VertexInput input)
@@ -1997,7 +2007,6 @@ internal sealed class Direct3D11Presenter : IDisposable
             output.Style = input.Detail.x;
             output.Emphasis = input.Detail.y;
             output.Glow = input.Detail.z;
-            output.StreamId = input.Detail.w;
             return output;
         }
 
@@ -2057,10 +2066,18 @@ internal sealed class Direct3D11Presenter : IDisposable
             if (InterfaceMaskEnabled > 0.5)
                 clip(captured.g - 0.5);
 
-            if (StreamFilterMode > 0.5
-                && StreamFilterMode < 1.5)
+            float reveal = 1.0;
+            if (TopDownRevealProgress >= 0.0)
             {
-                clip(input.StreamId - AttackStreamCutoff - 0.5);
+                const float revealFeather = 0.12;
+                float revealFront = lerp(
+                    -revealFeather,
+                    1.0 + revealFeather,
+                    saturate(TopDownRevealProgress));
+                reveal = 1.0 - smoothstep(
+                    revealFront - revealFeather,
+                    revealFront + revealFeather,
+                    input.Position.y / max(TargetSurfaceSize.y, 1.0));
             }
 
             float center = SampleGlyph(input, input.Local);
@@ -2125,19 +2142,7 @@ internal sealed class Direct3D11Presenter : IDisposable
             float alpha = clamp(
                 max(bodyAlpha, glowAmount),
                 0.0,
-                1.0);
-            if (AttackRevealEnabled > 0.5)
-            {
-                const float feather = 0.12;
-                float front = lerp(
-                    -feather,
-                    1.0 + feather,
-                    AttackRevealProgress);
-                alpha *= 1.0 - smoothstep(
-                    front - feather,
-                    front + feather,
-                    input.Position.y / surfaceSize.y);
-            }
+                1.0) * reveal;
             clip(alpha - 0.006);
 
             float3 body = lerp(
@@ -2202,7 +2207,6 @@ internal sealed class Direct3D11Presenter : IDisposable
                 (int2(SampleOrigin) + tile) * scale;
             float luminanceTotal = 0.0;
             float sampledCount = 0.0;
-            float changedCount = 0.0;
             float mask = 0.0;
 
             [loop]
@@ -2275,16 +2279,12 @@ internal sealed class Direct3D11Presenter : IDisposable
                         continue;
 
                     mask = 1.0;
-                    changedCount += 1.0;
                 }
             }
 
             float luminance = sampledCount > 0.0
                 ? luminanceTotal / sampledCount
                 : 0.0;
-            luminance = pow(
-                saturate((luminance - 0.012) / 0.976),
-                0.82);
             return float4(luminance, mask, 0.0, 1.0);
         }
         """;

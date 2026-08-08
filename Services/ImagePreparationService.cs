@@ -64,17 +64,12 @@ public sealed class ImagePreparationService
             analysisHeight,
             cancellationToken);
 
-        byte[] preparedTone = string.Equals(
-            settings.ImagePreparationMode,
-            "None",
-            StringComparison.Ordinal)
-            ? Quantize(tone, cancellationToken)
-            : ProcessToneMap(
-                tone,
-                analysisWidth,
-                analysisHeight,
-                settings,
-                cancellationToken);
+        byte[] preparedTone = PrepareLinearTone(
+            tone,
+            analysisWidth,
+            analysisHeight,
+            settings,
+            cancellationToken);
         PreparedImage prepared = new(
             preparedTone,
             analysisWidth,
@@ -85,6 +80,60 @@ public sealed class ImagePreparationService
         return prepared;
     }
 
+    /// <summary>
+    /// Runs an already sampled monochrome source through the same analysis
+    /// pipeline as a playlist image. The optional influence map is metadata:
+    /// it limits where the analysed image may be rendered, but never changes
+    /// how its tones are interpreted.
+    /// </summary>
+    public PreparedImage PrepareToneSource(
+        ReadOnlySpan<byte> sourceTone,
+        int width,
+        int height,
+        string path,
+        AppSettings settings,
+        CancellationToken cancellationToken,
+        byte[]? influenceMap = null)
+    {
+        if (width <= 0 || height <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(width),
+                "Размер карты тонов должен быть положительным.");
+        }
+
+        int pixelCount = checked(width * height);
+        if (sourceTone.Length != pixelCount
+            || (influenceMap is not null
+                && influenceMap.Length != pixelCount))
+        {
+            throw new ArgumentException(
+                "Карта тонов имеет неверный размер.",
+                nameof(sourceTone));
+        }
+
+        float[] linearTone = new float[pixelCount];
+        for (int index = 0; index < pixelCount; index++)
+        {
+            if ((index & 8191) == 0)
+                cancellationToken.ThrowIfCancellationRequested();
+            linearTone[index] = SrgbToLinear[sourceTone[index]];
+        }
+
+        byte[] preparedTone = PrepareLinearTone(
+            linearTone,
+            width,
+            height,
+            settings,
+            cancellationToken);
+        return new PreparedImage(
+            preparedTone,
+            width,
+            height,
+            path,
+            influenceMap);
+    }
+
     public void Clear()
     {
         lock (_cacheLock)
@@ -93,6 +142,24 @@ public sealed class ImagePreparationService
             _cacheOrder.Clear();
         }
     }
+
+    private static byte[] PrepareLinearTone(
+        float[] source,
+        int width,
+        int height,
+        AppSettings settings,
+        CancellationToken cancellationToken) =>
+        string.Equals(
+            settings.ImagePreparationMode,
+            "None",
+            StringComparison.Ordinal)
+            ? Quantize(source, cancellationToken)
+            : ProcessToneMap(
+                source,
+                width,
+                height,
+                settings,
+                cancellationToken);
 
     private static byte[] ProcessToneMap(
         float[] source,

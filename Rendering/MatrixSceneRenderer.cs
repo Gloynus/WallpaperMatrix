@@ -2285,6 +2285,7 @@ internal sealed class MatrixSceneRenderer : IDisposable
                             && _source._trailStreamIds[sourceIndex]
                                 > _minimumStreamId)
                         {
+                            cell.HasAttackDeposit = true;
                             bool imageInfluence = HasImageInfluence(
                                 _settings.ImageMode,
                                 _imageMask,
@@ -2337,8 +2338,7 @@ internal sealed class MatrixSceneRenderer : IDisposable
                     // and must neither appear in nor occlude the foreground
                     // image layer.
                     if (_source._trailOccupied[sourceIndex]
-                        && _source._trailStreamIds[sourceIndex]
-                            > _minimumStreamId)
+                        && cell.HasAttackDeposit)
                     {
                         double age = Math.Max(
                             0,
@@ -2520,6 +2520,7 @@ internal sealed class MatrixSceneRenderer : IDisposable
             public ushort ImageGlyph;
             public byte ImageStyle;
             public bool SuppressImage;
+            public bool HasAttackDeposit;
 
             public readonly bool IsImageCell =>
                 ImageLevel > 0.01f && ImageStyle >= 3;

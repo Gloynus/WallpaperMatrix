@@ -19,8 +19,7 @@ internal sealed class AttackOverlayWindow : IDisposable
     private readonly DrawingRectangle _bounds;
     private readonly SharedMatrixScene _scene;
     private MatrixScenePresentation[] _presentations;
-    private readonly double _transitionSeconds;
-    private readonly long _existingStreamCutoff;
+    private readonly AttackTransitionTimeline _transitionTimeline;
     private readonly int _capturedInterfaceSamples;
     private readonly AttackInterfaceFrame? _interfaceFrame;
     private readonly Thread _thread;
@@ -46,11 +45,12 @@ internal sealed class AttackOverlayWindow : IDisposable
         _bounds = bounds;
         _scene = frame.PrimaryScene;
         _presentations = frame.Presentations.ToArray();
-        _transitionSeconds = Math.Clamp(
-            transitionSeconds,
-            AppSettings.MinimumAttackTransitionSeconds,
-            AppSettings.MaximumAttackTransitionSeconds);
-        _existingStreamCutoff = frame.LatestStreamId;
+        _transitionTimeline = new AttackTransitionTimeline(
+            Math.Clamp(
+                transitionSeconds,
+                AppSettings.MinimumAttackTransitionSeconds,
+                AppSettings.MaximumAttackTransitionSeconds),
+            frame.StreamTraversalSeconds);
         _capturedInterfaceSamples = frame.CapturedInterfaceSamples;
         _interfaceFrame = interfaceFrame;
         _thread = new Thread(RenderThreadMain)
@@ -122,12 +122,8 @@ internal sealed class AttackOverlayWindow : IDisposable
                 transparentSurface: true);
             presenter.SetAttackInterfaceFrame(_interfaceFrame);
             presenter.SetAttackTransitionState(
-                revealProgress: 0,
-                veilOpacity: 1,
-                glyphOpacity: 1);
-            presenter.SetAttackGlyphState(
-                _existingStreamCutoff,
-                haloFactor: 1);
+                AttackTransitionState.Active(backgroundProgress: 0));
+            presenter.SetAttackGlyphState(haloFactor: 1);
             presenter.Present(
                 _bounds.Width,
                 _bounds.Height,
@@ -139,7 +135,7 @@ internal sealed class AttackOverlayWindow : IDisposable
             Stopwatch attackClock = Stopwatch.StartNew();
             Stopwatch? exitClock = null;
             double nextTopmostCheckSeconds = 0.5;
-            double exitStartRevealProgress = 0;
+            double exitStartBackgroundProgress = 0;
             started = true;
             _started.Set();
             DiagnosticLog.Write(
@@ -148,8 +144,9 @@ internal sealed class AttackOverlayWindow : IDisposable
                 + $"surface={_bounds.Width}x{_bounds.Height}; "
                 + $"viewports={_presentations.Length}; "
                 + $"interfaceSamples={_capturedInterfaceSamples}; "
-                + $"streamCutoff={_existingStreamCutoff}; "
-                + $"transition={_transitionSeconds:0.##}s; "
+                + "depositBoundary=post-attack-generations; "
+                + $"streamLead={_transitionTimeline.StreamLeadSeconds:0.##}s; "
+                + $"backgroundSweep={_transitionTimeline.DurationSeconds:0.##}s; "
                 + "databaseSwitch=next-cycle-after-transition.");
 
             while (!_cancellation.IsCancellationRequested)
@@ -190,16 +187,14 @@ internal sealed class AttackOverlayWindow : IDisposable
                     break;
                 }
 
-                double revealProgress;
-                double veilOpacity;
-                double glyphOpacity;
+                AttackTransitionState transitionState;
                 if (exiting)
                 {
                     if (exitClock is null)
                     {
                         exitClock = Stopwatch.StartNew();
-                        exitStartRevealProgress =
-                            AttackRevealProgress(
+                        exitStartBackgroundProgress =
+                            _transitionTimeline.BackgroundProgress(
                                 attackClock.Elapsed.TotalSeconds);
                         try
                         {
@@ -216,27 +211,21 @@ internal sealed class AttackOverlayWindow : IDisposable
                         0,
                         1);
                     double eased = SmoothStep(progress);
-                    revealProgress = exitStartRevealProgress;
-                    veilOpacity = 1.0 - eased;
-                    glyphOpacity = 1.0 - eased;
+                    transitionState = AttackTransitionState.Fading(
+                        exitStartBackgroundProgress,
+                        1.0 - eased);
                     if (progress >= 1)
                         break;
                 }
                 else
                 {
-                    revealProgress = AttackRevealProgress(
-                        attackClock.Elapsed.TotalSeconds);
-                    veilOpacity = 1;
-                    glyphOpacity = 1;
+                    transitionState = AttackTransitionState.Active(
+                        _transitionTimeline.BackgroundProgress(
+                            attackClock.Elapsed.TotalSeconds));
                 }
 
-                presenter.SetAttackTransitionState(
-                    revealProgress,
-                    veilOpacity,
-                    glyphOpacity);
-                presenter.SetAttackGlyphState(
-                    _existingStreamCutoff,
-                    haloFactor: 1);
+                presenter.SetAttackTransitionState(transitionState);
+                presenter.SetAttackGlyphState(haloFactor: 1);
                 presenter.Present(
                     _bounds.Width,
                     _bounds.Height,
@@ -284,16 +273,6 @@ internal sealed class AttackOverlayWindow : IDisposable
             }
             DiagnosticLog.Write("АТАКА СИСТЕМЫ завершена.");
         }
-    }
-
-    private double AttackRevealProgress(double elapsedSeconds)
-    {
-        // The operator value is the exact time from a completely transparent
-        // veil to a completely occupied virtual desktop.
-        return Math.Clamp(
-            elapsedSeconds / Math.Max(0.001, _transitionSeconds),
-            0,
-            1);
     }
 
     private static double SmoothStep(double value) =>

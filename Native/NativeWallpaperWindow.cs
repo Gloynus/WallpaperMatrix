@@ -20,6 +20,7 @@ internal sealed class NativeWallpaperWindow : IDisposable
     private readonly ManualResetEventSlim _renderingEnabled = new(true);
     private readonly object _commandLock = new();
     private readonly object _runtimeLock = new();
+    private readonly ImagePreparationService _imagePreparation = new();
     private readonly AppSettings _initialSettings;
     private readonly bool _animateStartupReveal;
     private readonly Action<string, Exception, bool>? _failureHandler;
@@ -709,7 +710,6 @@ internal sealed class NativeWallpaperWindow : IDisposable
         AttackInterfaceFrame? interfaceFrame,
         double transitionSeconds)
     {
-        PreparedImage? interfaceImage = PrepareAttackImage(interfaceFrame);
         Dictionary<string, SceneRuntime> flowMasters = _sceneRuntimes
             .Where(runtime => runtime.IsFlowMaster)
             .GroupBy(
@@ -720,9 +720,24 @@ internal sealed class NativeWallpaperWindow : IDisposable
                 group => group.First(),
                 StringComparer.OrdinalIgnoreCase);
         List<AttackSceneRuntime> attackRuntimes = [];
-        List<MatrixScenePresentation> presentations = [];
-        long latestStreamId = 0;
-
+        List<MatrixScenePresentation> presentations = BuildPresentations(plan)
+            .Select(presentation => presentation with
+            {
+                Layer = MatrixSceneLayer.AttackBase
+            })
+            .ToList();
+        List<(AppSettings Settings, PreparedImage Image)>
+            preparedInterfaceImages = [];
+        double streamTraversalSeconds = plan.Scenes
+            .Where(scene => scene.Targets.Any(target => !target.IsVirtual))
+            .Select(scene => 1.0 / Math.Max(
+                AppSettings.MinimumSpeed,
+                scene.Settings.SpeedMax))
+            .DefaultIfEmpty(0)
+            .Max();
+        AttackTransitionTimeline transitionTimeline = new(
+            Math.Max(transitionSeconds, 0.001),
+            streamTraversalSeconds);
         try
         {
             foreach (MonitorScenePlan scenePlan in plan.Scenes)
@@ -737,15 +752,16 @@ internal sealed class NativeWallpaperWindow : IDisposable
                 bool hasDatabaseImage = scenePlan.Settings.ImageMode
                     && ImageForDatabaseRoot(
                         scenePlan.DatabaseRootMonitorId) is not null;
+                PreparedImage? interfaceImage = PrepareAttackImage(
+                    interfaceFrame,
+                    scenePlan.Settings,
+                    preparedInterfaceImages);
                 foreach (MonitorSceneTarget target in scenePlan.Targets
                              .Where(target => !target.IsVirtual))
                 {
-                    long streamCutoff;
+                    long minimumStreamId;
                     lock (flowSource.Scene.SyncRoot)
-                        streamCutoff = flowSource.Scene.LatestStreamId;
-                    latestStreamId = Math.Max(
-                        latestStreamId,
-                        streamCutoff);
+                        minimumStreamId = flowSource.Scene.LatestStreamId;
 
                     AppSettings interfaceSettings =
                         scenePlan.Settings.Copy(
@@ -761,14 +777,14 @@ internal sealed class NativeWallpaperWindow : IDisposable
                         interfaceImage,
                         AttackImageProjection(target),
                         target.SourceBounds,
-                        streamCutoff);
+                        minimumStreamId);
 
                     AttackSceneRuntime attackRuntime = new(
                         scenePlan.DatabaseRootMonitorId,
                         scenePlan.ImageProjection,
                         scenePlan.Settings.Copy(
                             includeMonitorProfiles: false),
-                        Math.Max(transitionSeconds, 0.001),
+                        transitionTimeline.CompletionSeconds,
                         hasDatabaseImage,
                         scene,
                         renderer);
@@ -777,7 +793,7 @@ internal sealed class NativeWallpaperWindow : IDisposable
                         scene,
                         target.TargetBounds,
                         target.SourceBounds,
-                        streamCutoff));
+                        MatrixSceneLayer.AttackForeground));
                 }
             }
 
@@ -787,12 +803,13 @@ internal sealed class NativeWallpaperWindow : IDisposable
             AttackFrameSnapshot snapshot = new(
                 primary,
                 presentations,
-                latestStreamId,
-                interfaceFrame?.InfluencedSampleCount ?? 0);
+                interfaceFrame?.InfluencedSampleCount ?? 0,
+                streamTraversalSeconds);
             DiagnosticLog.Write(
                 "Симуляция интерфейса АТАКИ подготовлена через ядро образов: "
                 + $"областей={attackRuntimes.Count}; "
                 + $"отсчётов интерфейса={interfaceFrame?.InfluencedSampleCount ?? 0}; "
+                + $"фора={streamTraversalSeconds:0.##} с; "
                 + $"захват={transitionSeconds:0.##} с; "
                 + "переход к базе=первая фактическая смена после захвата.");
             return new AttackComposition(
@@ -896,8 +913,10 @@ internal sealed class NativeWallpaperWindow : IDisposable
                 Math.Max(1, target.TargetBounds.Height)),
             target.SourceBounds);
 
-    private static PreparedImage? PrepareAttackImage(
-        AttackInterfaceFrame? frame)
+    private PreparedImage? PrepareAttackImage(
+        AttackInterfaceFrame? frame,
+        AppSettings settings,
+        List<(AppSettings Settings, PreparedImage Image)> cache)
     {
         if (frame is null
             || frame.Width <= 0
@@ -905,6 +924,16 @@ internal sealed class NativeWallpaperWindow : IDisposable
             || frame.Samples.Length != frame.Width * frame.Height * 2)
         {
             return null;
+        }
+
+        foreach ((AppSettings cachedSettings, PreparedImage cachedImage) in cache)
+        {
+            if (AppSettingsComparer.ImagePreparationEquivalent(
+                    cachedSettings,
+                    settings))
+            {
+                return cachedImage;
+            }
         }
 
         int pixelCount = checked(frame.Width * frame.Height);
@@ -915,12 +944,18 @@ internal sealed class NativeWallpaperWindow : IDisposable
             tone[index] = frame.Samples[index * 2];
             influence[index] = frame.Samples[index * 2 + 1];
         }
-        return new PreparedImage(
+        PreparedImage prepared = _imagePreparation.PrepareToneSource(
             tone,
             frame.Width,
             frame.Height,
             "ATTACK://SYSTEM-INTERFACE",
+            settings,
+            CancellationToken.None,
             influence);
+        cache.Add((
+            settings.Copy(includeMonitorProfiles: false),
+            prepared));
+        return prepared;
     }
 
     private void ReconfigureRuntimes(MonitorOutputPlan plan)
